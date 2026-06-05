@@ -37,3 +37,21 @@ such as malware configuration blobs and command-and-control captures.
   per-sample byte caps to limit it.
 - Treat generated parsers as you would any generated code: read them before
   running them against data you care about.
+
+## Data handling and privacy
+
+Sextant runs fully offline by default. The native statistical engine, executor,
+and scorer never touch the network, and `inspect`, `export`, and `bench` never
+do either. The only component that can transmit data is the optional
+language-model pass, and only when you opt into it.
+
+- [Privacy and the `--no-llm` story](docs/privacy.md) explains what is and is
+  not transmitted, and how to guarantee a fully offline run.
+- [Model data handling](docs/model-data-handling.md) is the detailed note on
+  exactly what the model pass sends, how it is bounded by the per-sample byte
+  cap and the call and budget limits, and how to turn it off. API keys are read
+  only from the environment or a config file, never from a command-line flag.
+
+The verification property is independent of mode: a hypothesis is accepted only
+because the native executor confirmed it parsed your samples, so enabling the
+model never lowers the verified parse score.
