@@ -11,5 +11,32 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+# The HTTP client is only pulled in when a network provider feature is enabled.
+# The default build (and CI's default test run) compiles none of it, so the
+# trait, the mock provider, the cache, and the budgeting logic all build and
+# test with no network stack present.
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+], optional = true }
+
+[features]
+# No provider is on by default. The model layer is always optional (FR-32): the
+# default build has the trait, the mock provider, the cache, retries, and the
+# budget guard, but no network code at all.
+default = []
+# Internal feature that brings in the blocking HTTP client. The user-facing
+# provider features turn it on; nothing else should depend on it directly.
+http = ["dep:reqwest"]
+anthropic = ["http"]
+openai = ["http"]
+ollama = ["http"]
+# Convenience aggregate for building or linting every network provider at once.
+all-providers = ["anthropic", "openai", "ollama"]
+
 [lints]
 workspace = true
