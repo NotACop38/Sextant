@@ -119,3 +119,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (with a shorter smoke run on pull requests that touch the fuzzed crates) and
   fails on any recorded crash artifact, plus a `cargo-audit` job that checks the
   workspace and fuzz lockfiles against the RustSec advisory database (NFR-10).
+- User documentation (Step 14, NFR-7) under `docs/`: an installation guide, a
+  quick start, a workflows reference for `infer`, `inspect`, `export`, and
+  `bench`, a "how it works" explanation of the Format Hypothesis IR and the
+  verification loop, a privacy and `--no-llm` page, and a model data-handling
+  note describing exactly what the optional model pass transmits.
+- Runnable examples against the bundled corpus: `examples/quickstart.sh` (the
+  infer, inspect, export flow) and a `sextant-engine` `infer_corpus` library
+  example, with an index in `examples/README.md`.
+- A recorded asciinema demo at `docs/demo.cast`, generated from genuine command
+  output by `examples/record_demo.py` and linked from the README.
+- A `docs_build` test in the `bench` crate that fails CI if any relative link in
+  `docs/` or `examples/` is broken or if any Markdown file contains an em dash or
+  an en dash.

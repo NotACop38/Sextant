@@ -53,7 +53,15 @@ jobs:
         with:
           toolchain: nightly
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        # Install a prebuilt binary rather than building from source. Compiling
+        # cargo-fuzz with `cargo install --locked` pins an old transitive
+        # dependency (rustix 0.36.5) that no longer builds on the current
+        # nightly compiler, so a from-source install fails before any fuzzing
+        # runs. A prebuilt binary keeps the fuzz tool independent of the
+        # project toolchain, the same approach the cargo-audit job uses.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - name: Choose the per-target budget
         id: budget
         # A long budget on the nightly schedule, a short smoke run on a pull
@@ -66,8 +74,14 @@ jobs:
           fi
       - name: Run the fuzzer
         working-directory: fuzz
+        # Pin the build target to the gnu triple. The prebuilt cargo-fuzz binary
+        # is a musl build, so cargo-fuzz would otherwise default the fuzz target
+        # to x86_64-unknown-linux-musl, which is not installed and links libc
+        # statically (incompatible with the address sanitizer). The gnu target
+        # is the runner's host triple and is dynamically linked.
         run: >-
-          cargo +nightly fuzz run ${{ matrix.target }} --
+          cargo +nightly fuzz run ${{ matrix.target }}
+          --target x86_64-unknown-linux-gnu --
           -max_total_time=${{ steps.budget.outputs.seconds }}
           -rss_limit_mb=4096
       - name: Crash-corpus check

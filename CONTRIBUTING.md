@@ -41,6 +41,23 @@ A pull request is ready when its checklist step's acceptance criteria and the
 Global Definition of Done in [`AGENTS.md`](AGENTS.md) are satisfied, and CI is
 green.
 
+## Documentation and examples
+
+User documentation lives in [`docs/`](docs/index.md). When you change
+user-facing behavior, update the relevant page in the same pull request.
+
+- The documentation is checked in CI by the `docs_build` test in the `bench`
+  crate: every relative link in `docs/` and `examples/` must resolve, and no
+  Markdown file may contain an em dash or an en dash. Run it with
+  `cargo test -p bench --test docs_build`.
+- Runnable examples live in [`examples/`](examples/README.md) and work against
+  the bundled corpus. Build the binary with `cargo build --release`, then run
+  `./examples/quickstart.sh` or
+  `cargo run -p sextant-engine --example infer_corpus`.
+- The demo at [`docs/demo.cast`](docs/demo.cast) is generated from genuine
+  command output by `python3 examples/record_demo.py`. Regenerate it whenever
+  the demo flow changes rather than editing the cast by hand.
+
 ## Reporting issues
 
 The most valuable issues right now describe formats or protocols you would like
