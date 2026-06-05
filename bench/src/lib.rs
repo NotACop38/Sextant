@@ -144,6 +144,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn png_ground_truth_loads_and_matches_its_samples() {
+        let ground_truth = load_ground_truth("png").expect("the png ground truth should load");
+
+        assert_eq!(ground_truth.format, "png");
+        assert_eq!(ground_truth.endianness, "big");
+        assert!(!ground_truth.structure.header.is_empty());
+        assert!(!ground_truth.structure.record.is_empty());
+        assert_eq!(ground_truth.samples.len(), 3);
+
+        const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        for sample in &ground_truth.samples {
+            let bytes = read_sample(&ground_truth.format, sample).unwrap_or_else(|error| {
+                panic!("sample {} should be readable: {error}", sample.path)
+            });
+            assert_eq!(
+                bytes.len() as u64,
+                sample.size,
+                "recorded size for {} does not match the file",
+                sample.path
+            );
+            assert_eq!(
+                &bytes[0..8],
+                &PNG_SIGNATURE,
+                "sample {} is missing the PNG signature",
+                sample.path
+            );
+        }
+    }
+
+    #[test]
     fn tlv_ground_truth_loads_and_matches_its_samples() {
         let ground_truth = load_ground_truth("tlv").expect("the tlv ground truth should load");
 

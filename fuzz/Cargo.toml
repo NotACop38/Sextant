@@ -1,0 +1,25 @@
+[package]
+name = "sextant-engine-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+description = "Fuzz targets for the Sextant native IR executor (FR-24, NFR-2)."
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sextant-ir = { path = "../sextant-ir" }
+sextant-engine = { path = "../sextant-engine" }
+
+[[bin]]
+name = "executor"
+path = "fuzz_targets/executor.rs"
+test = false
+doc = false
+bench = false
+
+# A standalone workspace so the nightly-only fuzzing dependencies never enter the
+# stable workspace build.
+[workspace]

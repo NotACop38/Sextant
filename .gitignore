@@ -2,6 +2,13 @@
 /target
 **/*.rs.bk
 
+# cargo-fuzz build output and run artifacts. The fuzz targets and seed inputs are
+# committed; the generated corpora, crash artifacts, and coverage are not.
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage
+
 # Note: Cargo.lock is intentionally committed. This workspace builds a binary
 # application, so a pinned lock file keeps builds reproducible (NFR-6, NFR-10).
 

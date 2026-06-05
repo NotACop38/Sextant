@@ -92,18 +92,18 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Implement the executor: run an IR against one sample, producing field instances with concrete byte ranges and values, or a localized failure (offset and reason).
-- [ ] Implement resource limits: recursion depth, maximum array length, total work or wall-clock cap (FR-24).
-- [ ] Implement the scorer: coverage, consistency (length, count, offset, checksum relationships), and generality across the sample set, returning a 0 to 1 score and a structured breakdown (FR-22, FR-23).
-- [ ] Implement checksum verification for at least CRC32, CRC16, additive, and XOR over a specified covered range.
-- [ ] Add property tests and at least one `cargo-fuzz` target that feeds random bytes to the executor.
+- [x] Implement the executor: run an IR against one sample, producing field instances with concrete byte ranges and values, or a localized failure (offset and reason).
+- [x] Implement resource limits: recursion depth, maximum array length, total work or wall-clock cap (FR-24).
+- [x] Implement the scorer: coverage, consistency (length, count, offset, checksum relationships), and generality across the sample set, returning a 0 to 1 score and a structured breakdown (FR-22, FR-23).
+- [x] Implement checksum verification for at least CRC32, CRC16, additive, and XOR over a specified covered range.
+- [x] Add property tests and at least one `cargo-fuzz` target that feeds random bytes to the executor.
 
 ### Acceptance criteria
 
-- [ ] The hand-authored IR from Step 2 parses its corpus samples and scores at or near 1.0.
-- [ ] A deliberately wrong IR scores low, and the breakdown points at the failing dimension.
-- [ ] The fuzz target runs for a defined iteration count with no panics, hangs, or unbounded allocation.
-- [ ] Checksum verification passes on a format that has a checksum (for example PNG CRC32).
+- [x] The hand-authored IR from Step 2 parses its corpus samples and scores at or near 1.0.
+- [x] A deliberately wrong IR scores low, and the breakdown points at the failing dimension.
+- [x] The fuzz target runs for a defined iteration count with no panics, hangs, or unbounded allocation.
+- [x] Checksum verification passes on a format that has a checksum (for example PNG CRC32).
 
 ---
 

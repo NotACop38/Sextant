@@ -42,6 +42,29 @@ schema records:
 
 ## Formats
 
+### png (showcase)
+
+The Portable Network Graphics file format, the v1 file-format showcase
+(PRD Section 15). Each sample is a genuine, viewable PNG produced by
+`png/generate.py`, which is the authoritative source for their bytes. They are
+tiny truecolor images, so the structure under test is real and the CRC-32 values
+are real, while the image content is irrelevant.
+
+Layout (all multi-byte integers big-endian):
+
+| Offset | Size | Field | Role | Notes |
+|---|---|---|---|---|
+| 0 | 8 | `signature` | magic | The bytes `89 50 4E 47 0D 0A 1A 0A` |
+
+The signature is followed by a sequence of chunks, each:
+
+| Size | Field | Role | Notes |
+|---|---|---|---|
+| 4 | `length` | length | Big-endian byte length of `data` |
+| 4 | `chunk_type` | enum | Four ASCII letters, for example `IHDR`, `IDAT`, `IEND` |
+| `length` | `data` | payload | Chunk payload |
+| 4 | `crc` | checksum | CRC-32 over `chunk_type` and `data` |
+
 ### tlv (custom)
 
 A small controlled tag-length-value container authored for this project. It is
