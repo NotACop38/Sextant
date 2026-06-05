@@ -21,3 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code-of-conduct documentation and issue and pull-request templates.
 - A seed ground-truth corpus: a custom TLV format with three samples and a
   ground-truth description, plus a corpus loader and tests.
+- The Format Hypothesis IR in `sextant-ir`: format, structure, field, kind,
+  size and count rules, offsets, roles, constraints, evidence, and confidence
+  types, modeled close to Kaitai Struct semantics (PRD Section 10, FR-13 to
+  FR-19).
+- Lossless JSON serialization for the IR, so any hypothesis round-trips to an
+  equal value (FR-19).
+- Semantic IR validation that rejects dangling length, count, offset, and
+  checksum references, overlapping fixed fields, and sizes, widths, ranges, and
+  confidences that are not sane, each with a clear, located error.
+- A hand-authored ground-truth IR for PNG, committed as a fixture for later
+  steps.

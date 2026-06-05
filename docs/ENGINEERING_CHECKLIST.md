@@ -72,17 +72,17 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Implement the IR types in `sextant-ir`: Format, Structure, Field, Kind, size rules, count rules, Role, Constraint, Evidence, and confidence.
-- [ ] Implement `serde` serialization and deserialization to and from JSON (FR-19).
-- [ ] Implement IR validation (well-formed references, no dangling length or count targets, sane sizes).
-- [ ] Author by hand a ground-truth IR for at least one corpus format (for example PNG or the TLV) as a fixture.
-- [ ] Add unit tests for serialization round-trips and validation.
+- [x] Implement the IR types in `sextant-ir`: Format, Structure, Field, Kind, size rules, count rules, Role, Constraint, Evidence, and confidence.
+- [x] Implement `serde` serialization and deserialization to and from JSON (FR-19).
+- [x] Implement IR validation (well-formed references, no dangling length or count targets, sane sizes).
+- [x] Author by hand a ground-truth IR for at least one corpus format (for example PNG or the TLV) as a fixture.
+- [x] Add unit tests for serialization round-trips and validation.
 
 ### Acceptance criteria
 
-- [ ] Any IR serializes to JSON and deserializes back to an equal value (round-trip test passes).
-- [ ] Validation rejects malformed IRs (dangling references, overlapping fixed fields) with clear errors.
-- [ ] The hand-authored IR for the chosen format is committed and used by later steps.
+- [x] Any IR serializes to JSON and deserializes back to an equal value (round-trip test passes).
+- [x] Validation rejects malformed IRs (dangling references, overlapping fixed fields) with clear errors.
+- [x] The hand-authored IR for the chosen format is committed and used by later steps.
 
 ---
 

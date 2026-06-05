@@ -1,0 +1,108 @@
+{
+  "name": "png",
+  "endianness": "big",
+  "metadata": {
+    "description": "Portable Network Graphics: an eight-byte signature followed by a sequence of length-prefixed, CRC-32 checked chunks, ending with an IEND chunk. Hand-authored ground truth for the Sextant PNG showcase format.",
+    "source": "PNG (Portable Network Graphics) Specification, Version 1.2 / ISO-IEC 15948."
+  },
+  "root": {
+    "fields": [
+      {
+        "name": "signature",
+        "kind": { "type": "bytes" },
+        "size": { "rule": "fixed", "bytes": 8 },
+        "role": "magic",
+        "constraints": [
+          { "constant": { "value": "89504e470d0a1a0a" } }
+        ],
+        "confidence": 1.0,
+        "evidence": {
+          "detector": "hand-authored",
+          "notes": ["The eight-byte PNG signature is invariant in every PNG file."]
+        }
+      },
+      {
+        "name": "chunks",
+        "kind": {
+          "type": "array",
+          "count": { "rule": "to_end" },
+          "element": {
+            "name": "chunk",
+            "kind": {
+              "type": "struct",
+              "structure": {
+                "fields": [
+                  {
+                    "name": "length",
+                    "kind": { "type": "integer", "width": 4, "signed": "unsigned" },
+                    "role": "length",
+                    "confidence": 1.0,
+                    "evidence": {
+                      "detector": "hand-authored",
+                      "notes": ["Big-endian count of the bytes in the chunk data field."]
+                    }
+                  },
+                  {
+                    "name": "chunk_type",
+                    "kind": { "type": "string", "encoding": "ascii" },
+                    "size": { "rule": "fixed", "bytes": 4 },
+                    "role": "enum",
+                    "confidence": 1.0,
+                    "evidence": {
+                      "detector": "hand-authored",
+                      "notes": ["Four ASCII letters naming the chunk type, for example IHDR, IDAT, IEND."]
+                    }
+                  },
+                  {
+                    "name": "data",
+                    "kind": { "type": "bytes" },
+                    "size": { "rule": "derived", "length_field": "length" },
+                    "role": "payload",
+                    "confidence": 0.95,
+                    "evidence": {
+                      "detector": "hand-authored",
+                      "notes": ["Chunk payload whose size is given by the preceding length field."]
+                    }
+                  },
+                  {
+                    "name": "crc",
+                    "kind": { "type": "integer", "width": 4, "signed": "unsigned" },
+                    "role": "checksum",
+                    "constraints": [
+                      {
+                        "checksum": {
+                          "spec": {
+                            "algorithm": "crc32",
+                            "covered": {
+                              "from": { "anchor": "field_start", "field": "chunk_type" },
+                              "to": { "anchor": "field_end", "field": "data" }
+                            }
+                          }
+                        }
+                      }
+                    ],
+                    "confidence": 1.0,
+                    "evidence": {
+                      "detector": "hand-authored",
+                      "notes": ["CRC-32 over the chunk type and data, as defined by the PNG specification."]
+                    }
+                  }
+                ]
+              }
+            },
+            "confidence": 1.0,
+            "evidence": {
+              "detector": "hand-authored",
+              "notes": ["A single PNG chunk: a length, a four-letter type, the data, and a CRC-32."]
+            }
+          }
+        },
+        "confidence": 1.0,
+        "evidence": {
+          "detector": "hand-authored",
+          "notes": ["A PNG file is the signature followed by a run of chunks that ends with IEND."]
+        }
+      }
+    ]
+  }
+}
