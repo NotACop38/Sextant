@@ -17,7 +17,7 @@ use sextant_llm::{LlmClient, LlmProvider};
 use crate::candidate::infer_candidates;
 use crate::ingest::{Sample, SampleSet};
 use crate::limits::Limits;
-use crate::refine::{Refinement, refine};
+use crate::refine::{RefineOutcome, Refinement, refine};
 use crate::report::{Report, RunMetadata};
 use crate::semantic::{SemanticOptions, semantic_pass};
 
@@ -26,9 +26,10 @@ use crate::semantic::{SemanticOptions, semantic_pass};
 pub struct InferenceOptions {
     /// Executor and scorer resource limits (FR-24).
     pub limits: Limits,
-    /// Whether to run statistics-only with the language model disabled. The
-    /// model is not yet wired in, so this is effectively always true today; the
-    /// flag records intent and guarantees the offline, zero-egress path (NFR-4).
+    /// Whether to run statistics-only with the language model disabled. When
+    /// set, [`infer_with_llm`] never consults the provider and the run is fully
+    /// offline with zero network egress (NFR-4). [`infer`] is always
+    /// statistics-only regardless of this flag.
     pub no_llm: bool,
 }
 
@@ -68,6 +69,10 @@ pub fn infer(samples: &SampleSet, options: &InferenceOptions) -> Report {
 /// or budget, a transport error, or an unparseable response), the run degrades
 /// gracefully to the verified statistics-only result and never reports a score
 /// below the statistics-only baseline (PRD Section 12, NFR-9).
+///
+/// When `options.no_llm` is set, the model is never consulted: the function
+/// returns the statistics-only result without making any provider call, which
+/// preserves the documented zero-egress guarantee for that flag (FR-32, NFR-4).
 #[must_use]
 pub fn infer_with_llm<P: LlmProvider>(
     samples: &SampleSet,
@@ -78,9 +83,16 @@ pub fn infer_with_llm<P: LlmProvider>(
     let slices: Vec<&[u8]> = samples.samples.iter().map(Sample::bytes).collect();
     let baseline = statistics_refinement(&slices, &options.limits);
 
+    // Honor `--no-llm`: do not touch the provider, and report the statistics-only
+    // result so no bytes can leave the machine (NFR-4).
+    if options.no_llm {
+        let metadata = run_metadata(samples, true);
+        return Report::build(baseline.format, baseline.score, baseline.history, metadata);
+    }
+
     // The semantic pass records the model's format-family guess directly in the
     // returned format's metadata, so the outcome's format carries it already.
-    let (format, score, mut semantic_history) =
+    let (format, score, semantic_history) =
         match semantic_pass(&baseline.format, &slices, client, &options.limits, semantic) {
             // The pass guarantees non-regression, but guard the invariant here
             // too: never accept a result below the statistics-only baseline.
@@ -90,10 +102,16 @@ pub fn infer_with_llm<P: LlmProvider>(
             _ => (baseline.format.clone(), baseline.score.clone(), Vec::new()),
         };
 
-    // The report's refinement history is the statistics-only steps followed by
-    // the semantic pass's accepted and rejected proposals (FR-28).
+    // The report's refinement field is the list of accepted changes (FR-28), so
+    // only accepted semantic steps are appended after the statistics-only steps.
+    // Rejected proposals are retained in the semantic outcome for explainability
+    // but must not appear here, where a consumer would count them as applied.
     let mut history = baseline.history;
-    history.append(&mut semantic_history);
+    history.extend(
+        semantic_history
+            .into_iter()
+            .filter(|step| step.outcome == RefineOutcome::Accepted),
+    );
 
     let metadata = run_metadata(samples, false);
     Report::build(format, score, history, metadata)

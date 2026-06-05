@@ -23,7 +23,10 @@
 use std::fmt::Write as _;
 
 use serde::Deserialize;
-use sextant_ir::{EnumDef, EnumVariant, Format, Kind, Role, SizeRule};
+use sextant_ir::{
+    Constraint, CountRule, EnumDef, EnumVariant, FieldOffset, FieldRef, Format, Kind, RangeAnchor,
+    Role, SizeRule, Structure,
+};
 use sextant_llm::{JsonRequest, LlmClient, LlmError, LlmProvider};
 
 use crate::limits::Limits;
@@ -306,18 +309,40 @@ fn rejected(description: String, score: f64) -> RefineStep {
 /// format, or `None` if the path does not resolve or the proposal does not fit.
 fn apply_field_proposal(format: &Format, path: &[Seg], proposal: &FieldProposal) -> Option<Format> {
     let mut clone = format.clone();
+    // A rename, if any, captured so dependent references can be rewritten once
+    // the field borrow is released.
+    let mut rename: Option<(String, String)> = None;
     {
         let field = navigate(&mut clone.root, path)?;
         if let Some(name) = &proposal.name {
+            // Record the old name so every reference to it (a length, count, or
+            // offset dependency, or a checksum anchor) can be rewritten to the
+            // new name. Otherwise a harmless rename leaves the IR with dangling
+            // references and the proposal fails validation even though it does
+            // not change the parse.
+            if field.name.as_deref() != Some(name.as_str()) {
+                if let Some(old) = &field.name {
+                    rename = Some((old.clone(), name.clone()));
+                }
+            }
             field.name = Some(name.clone());
         }
         if let Some(role) = proposal.role {
-            field.role = Some(role);
+            // An explicit `unknown` role only fills a missing role; it never
+            // erases a concrete role the statistical pipeline already assigned,
+            // which would make the report less informative at no score cost.
+            if role != Role::Unknown || field.role.is_none() {
+                field.role = Some(role);
+            }
         }
         if let Some(kind) = &proposal.kind {
-            // Reject struct and array kinds so the field tree shape, and the
-            // field indices the model referenced, stay stable across the pass.
-            if matches!(kind, Kind::Struct { .. } | Kind::Array { .. }) {
+            // Reject struct and array kinds, and reject collapsing a field that
+            // is already a struct or array into a primitive: either changes the
+            // field tree shape and makes the field indices the model referenced,
+            // and later proposals reference, stale.
+            if matches!(kind, Kind::Struct { .. } | Kind::Array { .. })
+                || matches!(field.kind, Kind::Struct { .. } | Kind::Array { .. })
+            {
                 return None;
             }
             field.kind = kind.clone();
@@ -339,11 +364,65 @@ fn apply_field_proposal(format: &Format, path: &[Seg], proposal: &FieldProposal)
             .get_or_insert_with(|| "llm-semantic".to_owned());
     }
 
+    if let Some((old, new)) = rename {
+        rename_references(&mut clone.root, &old, &new);
+    }
+
     if let Some(variants) = &proposal.enum_variants {
         apply_enum(&mut clone, path, variants)?;
     }
 
     Some(clone)
+}
+
+/// Rewrite every reference to the field named `old` so it points at `new`,
+/// across size, count, offset, and checksum relationships, so a rename leaves
+/// the IR internally consistent rather than dangling.
+fn rename_references(structure: &mut Structure, old: &str, new: &str) {
+    for field in &mut structure.fields {
+        if let Some(SizeRule::Derived { length_field }) = &mut field.size {
+            rewrite_ref(length_field, old, new);
+        }
+        if let Some(FieldOffset::Derived { offset_field }) = &mut field.offset {
+            rewrite_ref(offset_field, old, new);
+        }
+        for constraint in &mut field.constraints {
+            if let Constraint::Checksum { spec } = constraint {
+                rewrite_anchor(&mut spec.covered.from, old, new);
+                rewrite_anchor(&mut spec.covered.to, old, new);
+            }
+        }
+        match &mut field.kind {
+            Kind::Struct { structure } => rename_references(structure, old, new),
+            Kind::Array { element, count } => {
+                match count {
+                    CountRule::FromField { count_field } => rewrite_ref(count_field, old, new),
+                    CountRule::BoundedBy { length_field } => rewrite_ref(length_field, old, new),
+                    _ => {}
+                }
+                if let Kind::Struct { structure } = &mut element.kind {
+                    rename_references(structure, old, new);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Rewrite a field reference in place when it names `old`.
+fn rewrite_ref(field: &mut FieldRef, old: &str, new: &str) {
+    if field.as_str() == old {
+        *field = FieldRef::new(new);
+    }
+}
+
+/// Rewrite a checksum range anchor's field reference when it names `old`.
+fn rewrite_anchor(anchor: &mut RangeAnchor, old: &str, new: &str) {
+    match anchor {
+        RangeAnchor::FieldStart { field } | RangeAnchor::FieldEnd { field } => {
+            rewrite_ref(field, old, new);
+        }
+    }
 }
 
 /// Convert the field at `path` into an enum that references a generated
@@ -362,7 +441,10 @@ fn apply_enum(format: &mut Format, path: &[Seg], variants: &[EnumVariant]) -> Op
             _ => (1u8, None),
         };
         let base = field.name.clone().unwrap_or_else(|| "field".to_owned());
-        (width, endianness, format!("{base}_values"))
+        // Two fields that share a name in different scopes, or two unnamed
+        // fields, would otherwise collide on the same key and silently overwrite
+        // each other's variants. Uniquify so every field gets its own definition.
+        (width, endianness, unique_enum_name(format, &base))
     };
 
     format.enums.insert(
@@ -382,6 +464,23 @@ fn apply_enum(format: &mut Format, path: &[Seg], variants: &[EnumVariant]) -> Op
     field.size = None;
     field.role.get_or_insert(Role::Enum);
     Some(())
+}
+
+/// Build an enum definition name from `base` that does not collide with an
+/// existing definition, appending a numeric suffix when needed.
+fn unique_enum_name(format: &Format, base: &str) -> String {
+    let candidate = format!("{base}_values");
+    if !format.enums.contains_key(&candidate) {
+        return candidate;
+    }
+    let mut suffix = 2usize;
+    loop {
+        let candidate = format!("{base}_values_{suffix}");
+        if !format.enums.contains_key(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
 }
 
 /// Build the prompt: a numbered field summary plus a byte-capped hex view of the

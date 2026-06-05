@@ -8,6 +8,7 @@
 //! score below the statistics-only baseline (FR-26, FR-31).
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use sextant_engine::{
     InferenceOptions, IngestOptions, Limits, SemanticOptions, infer, infer_with_llm, ingest, score,
@@ -272,6 +273,79 @@ fn enum_meanings_are_applied_when_they_do_not_regress() {
 }
 
 #[test]
+fn renaming_a_referenced_field_rewrites_its_dependents() {
+    let samples = samples();
+    let slices = slices(&samples);
+    let format = baseline_format();
+    let baseline = score(&format, &slices);
+
+    // The payload's size is derived from the field named "length". Renaming that
+    // field must rewrite the dependent reference so the IR stays consistent and
+    // the parse does not regress; otherwise the rename would dangle and be
+    // rejected. The rename does not change the parse, so it must be accepted.
+    let proposal = serde_json::json!({
+        "fields": [
+            {"index": 1, "name": "len", "role": "length"}
+        ]
+    });
+    let client = client_with_proposal(proposal);
+    let outcome = semantic_pass(
+        &format,
+        &slices,
+        &client,
+        &Limits::default(),
+        &SemanticOptions::default(),
+    )
+    .expect("the semantic pass completes");
+
+    // The rename was accepted and the score held (the dependency was rewritten).
+    assert!(outcome.score.overall + 1e-9 >= baseline.overall);
+    assert_eq!(outcome.format.root.fields[1].name.as_deref(), Some("len"));
+    // The payload's length reference now points at the new name, and the IR is
+    // still valid (no dangling reference).
+    assert!(matches!(
+        &outcome.format.root.fields[2].size,
+        Some(SizeRule::Derived { length_field }) if length_field.as_str() == "len"
+    ));
+    outcome
+        .format
+        .validate()
+        .expect("the renamed IR has no dangling references");
+}
+
+#[test]
+fn an_unknown_role_does_not_erase_a_concrete_role() {
+    let samples = samples();
+    let slices = slices(&samples);
+    let format = baseline_format();
+
+    // The first proposal assigns a concrete role; a later proposal returning
+    // `unknown` for the same field must not erase it, since that would make the
+    // report less informative at no score cost.
+    let proposal = serde_json::json!({
+        "fields": [
+            {"index": 0, "role": "magic"},
+            {"index": 0, "role": "unknown"}
+        ]
+    });
+    let client = client_with_proposal(proposal);
+    let outcome = semantic_pass(
+        &format,
+        &slices,
+        &client,
+        &Limits::default(),
+        &SemanticOptions::default(),
+    )
+    .expect("the semantic pass completes");
+
+    assert_eq!(
+        outcome.format.root.fields[0].role,
+        Some(Role::Magic),
+        "an unknown role must not overwrite a concrete one"
+    );
+}
+
+#[test]
 fn free_form_text_is_rejected_as_an_invalid_response() {
     let samples = samples();
     let slices = slices(&samples);
@@ -293,17 +367,27 @@ fn free_form_text_is_rejected_as_an_invalid_response() {
 
 /// A provider that records the prompt it was handed, so a test can prove the
 /// byte cap (NFR-4) by inspecting exactly what would be sent off the machine.
+///
+/// The recorded prompt is shared through an `Rc<RefCell<String>>` handle that
+/// the test keeps a clone of, so the prompt can be read back without the client
+/// exposing its wrapped provider. Going through a shared handle, rather than a
+/// `provider_ref` accessor, keeps the client's cache, call cap, and budget the
+/// only path to the provider.
 struct RecordingProvider {
-    last_prompt: RefCell<String>,
+    last_prompt: Rc<RefCell<String>>,
     response: serde_json::Value,
 }
 
 impl RecordingProvider {
-    fn new(response: serde_json::Value) -> Self {
-        Self {
-            last_prompt: RefCell::new(String::new()),
+    /// Build a provider and return it alongside a handle the test reads the
+    /// recorded prompt from.
+    fn new(response: serde_json::Value) -> (Self, Rc<RefCell<String>>) {
+        let last_prompt = Rc::new(RefCell::new(String::new()));
+        let provider = Self {
+            last_prompt: Rc::clone(&last_prompt),
             response,
-        }
+        };
+        (provider, last_prompt)
     }
 }
 
@@ -343,7 +427,7 @@ fn the_prompt_byte_cap_bounds_what_is_sent() {
     let slices: Vec<&[u8]> = vec![sample.as_slice()];
     let format = baseline_format();
 
-    let provider = RecordingProvider::new(serde_json::json!({"fields": []}));
+    let (provider, recorded_prompt) = RecordingProvider::new(serde_json::json!({"fields": []}));
     let client = LlmClient::new(provider);
     let options = SemanticOptions {
         max_prompt_bytes_per_sample: 4,
@@ -352,7 +436,7 @@ fn the_prompt_byte_cap_bounds_what_is_sent() {
     let _ = semantic_pass(&format, &slices, &client, &Limits::default(), &options)
         .expect("the semantic pass completes");
 
-    let prompt = client.into_provider_prompt();
+    let prompt = recorded_prompt.borrow().clone();
     assert!(
         prompt.contains("11"),
         "the capped prefix bytes are present: {prompt}"
@@ -361,20 +445,6 @@ fn the_prompt_byte_cap_bounds_what_is_sent() {
         !prompt.contains("99"),
         "no byte beyond the cap leaks into the prompt: {prompt}"
     );
-}
-
-/// Helper to read the recorded prompt back out of a client wrapping a
-/// [`RecordingProvider`]. Defined as an extension so the test reads cleanly.
-trait IntoProviderPrompt {
-    fn into_provider_prompt(self) -> String;
-}
-
-impl IntoProviderPrompt for LlmClient<RecordingProvider> {
-    fn into_provider_prompt(self) -> String {
-        // The client owns the provider; recover the recorded prompt through a
-        // fresh borrow. The client is consumed so the borrow cannot outlive it.
-        self.provider_ref().last_prompt.borrow().clone()
-    }
 }
 
 #[test]
@@ -399,12 +469,7 @@ fn enabling_the_model_never_drops_below_the_statistics_baseline_on_the_corpus() 
         ]
     });
     let client = client_with_proposal(proposal);
-    let report = infer_with_llm(
-        &set,
-        &InferenceOptions::default(),
-        &client,
-        &SemanticOptions::default(),
-    );
+    let report = infer_with_llm(&set, &llm_enabled(), &client, &SemanticOptions::default());
 
     assert!(
         report.score.overall + 1e-9 >= baseline.score.overall,
@@ -430,14 +495,50 @@ fn a_failing_model_call_degrades_to_the_statistics_result() {
     // The run must fall back to the verified statistics-only result rather than
     // erroring (PRD Section 12, graceful degradation).
     let client = LlmClient::new(MockProvider::new("mock").with_text("sorry, no structure"));
-    let report = infer_with_llm(
-        &set,
-        &InferenceOptions::default(),
-        &client,
-        &SemanticOptions::default(),
-    );
+    let report = infer_with_llm(&set, &llm_enabled(), &client, &SemanticOptions::default());
 
     assert!((report.score.overall - baseline.score.overall).abs() < 1e-9);
+}
+
+#[test]
+fn no_llm_skips_the_provider_entirely() {
+    let dir = corpus_dir("sdlp");
+    let set = ingest(
+        &[dir.to_string_lossy().into_owned()],
+        &IngestOptions::default(),
+    )
+    .expect("ingest the sdlp corpus");
+
+    // With `no_llm` set, `infer_with_llm` must not consult the provider at all,
+    // so no call is made and the report is the statistics-only result with the
+    // offline flag preserved (FR-32, NFR-4).
+    let client = client_with_proposal(serde_json::json!({
+        "format_family": "sdlp",
+        "fields": [{"index": 0, "name": "magic", "role": "magic"}]
+    }));
+    let options = InferenceOptions {
+        no_llm: true,
+        ..InferenceOptions::default()
+    };
+    let report = infer_with_llm(&set, &options, &client, &SemanticOptions::default());
+
+    assert_eq!(client.calls_made(), 0, "the provider must not be called");
+    assert!(report.metadata.no_llm);
+    // The model's format-family guess never reached the report, since the model
+    // was never consulted.
+    assert!(
+        !report.format.metadata.extra.contains_key("format_family"),
+        "no model metadata leaks into a no_llm run"
+    );
+}
+
+/// Inference options with the language model enabled, for the corpus tests that
+/// exercise `infer_with_llm`'s model path. The default disables the model.
+fn llm_enabled() -> InferenceOptions {
+    InferenceOptions {
+        no_llm: false,
+        ..InferenceOptions::default()
+    }
 }
 
 fn corpus_dir(format: &str) -> std::path::PathBuf {

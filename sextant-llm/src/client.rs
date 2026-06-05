@@ -137,14 +137,6 @@ impl<P: LlmProvider> LlmClient<P> {
         self.spent.get()
     }
 
-    /// Borrow the wrapped provider. This is for introspection (for example a
-    /// test provider that records the prompt it was handed); the client owns all
-    /// policy, so a caller cannot use this to bypass the cache, the call cap, or
-    /// the budget.
-    pub fn provider_ref(&self) -> &P {
-        &self.provider
-    }
-
     /// Run a plain-text completion, consulting the cache first (NFR-6).
     pub fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let key = self.key_for("completion", request)?;
