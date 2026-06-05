@@ -1,10 +1,17 @@
 //! Inference engine for Sextant.
 //!
-//! This crate holds the native IR executor and scorer (the verification
-//! substrate), and will grow to include sample ingestion, the statistical
-//! inference pass, and the refinement loop in later checklist steps. The
-//! executor and scorer are native Rust, free of any JVM, the Kaitai compiler,
-//! and network access, so they run under `--no-llm` and offline (FR-21).
+//! This crate holds sample ingestion and the native IR executor and scorer (the
+//! verification substrate), and will grow to include the statistical inference
+//! pass and the refinement loop in later checklist steps. The executor and
+//! scorer are native Rust, free of any JVM, the Kaitai compiler, and network
+//! access, so they run under `--no-llm` and offline (FR-21).
+//!
+//! # Ingestion (Step 4)
+//!
+//! [`ingest`] turns user inputs (files, directories, and glob patterns) into a
+//! [`SampleSet`]: an ordered list of [`Sample`]s, each with [`Provenance`].
+//! Per-sample and total byte caps bound memory and are surfaced through
+//! [`Notice`]s (FR-1, FR-3, FR-4, FR-5).
 //!
 //! # The verification substrate (Step 3)
 //!
@@ -33,12 +40,17 @@
 
 pub mod checksum;
 pub mod executor;
+pub mod ingest;
 pub mod limits;
 pub mod scorer;
 
 pub use executor::{
     CheckKind, ConstraintCheck, Execution, FailureReason, FieldInstance, ParseFailure, Value,
     execute,
+};
+pub use ingest::{
+    DEFAULT_MAX_BYTES_PER_SAMPLE, DEFAULT_MAX_TOTAL_BYTES, IngestError, IngestOptions, Notice,
+    Provenance, Sample, SampleSet, ingest,
 };
 pub use limits::Limits;
 pub use scorer::{SampleScore, Score, ScoreWeights, score, score_with};
