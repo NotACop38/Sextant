@@ -25,6 +25,16 @@ confidence-threshold = 0.8
 # in later steps. Do not warn when one of them is not currently in the tree.
 unused-allowed-license = "allow"
 
+# webpki-roots ships Mozilla's trusted root certificate set, which is published
+# under the Community Data License Agreement Permissive 2.0. It is a permissive,
+# non-copyleft data license. The crate is pulled in only by the optional network
+# providers in sextant-llm (the `anthropic`, `openai`, and `ollama` features) and
+# is never on the default build or the offline `--no-llm` path. The exception is
+# scoped to this one crate rather than allowing the license globally.
+[[licenses.exceptions]]
+name = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 # Duplicate dependency versions are reported but do not fail the build yet.
 multiple-versions = "warn"

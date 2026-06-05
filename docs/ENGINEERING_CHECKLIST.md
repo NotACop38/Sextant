@@ -192,19 +192,19 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Define the `LlmProvider` trait: a completion call and a JSON or structured call.
-- [ ] Implement the reference providers, Anthropic Messages API and OpenAI, behind feature flags. Auto-detect the active provider from available credentials and use `--provider` to disambiguate.
-- [ ] Optionally implement a local Ollama provider, feature-gated.
-- [ ] Read API keys from environment or config only, never from flags (FR-40).
-- [ ] Implement retries with backoff, a maximum call count, an optional budget, and on-disk response caching keyed by request hash (NFR-6, NFR-9).
-- [ ] Provide a mock provider for tests so no network is required in CI.
+- [x] Define the `LlmProvider` trait: a completion call and a JSON or structured call.
+- [x] Implement the reference providers, Anthropic Messages API and OpenAI, behind feature flags. Auto-detect the active provider from available credentials and use `--provider` to disambiguate.
+- [x] Optionally implement a local Ollama provider, feature-gated.
+- [x] Read API keys from environment or config only, never from flags (FR-40).
+- [x] Implement retries with backoff, a maximum call count, an optional budget, and on-disk response caching keyed by request hash (NFR-6, NFR-9).
+- [x] Provide a mock provider for tests so no network is required in CI.
 
 ### Acceptance criteria
 
-- [ ] Unit tests exercise the trait using the mock provider with no network access.
-- [ ] `--no-llm` bypasses the provider entirely and remains the default-safe path.
-- [ ] The cache returns a stored response for an identical request without a network call (test with the mock).
-- [ ] Secrets are never accepted via command-line flags.
+- [x] Unit tests exercise the trait using the mock provider with no network access.
+- [x] `--no-llm` bypasses the provider entirely and remains the default-safe path.
+- [x] The cache returns a stored response for an identical request without a network call (test with the mock).
+- [x] Secrets are never accepted via command-line flags.
 
 ---
 
