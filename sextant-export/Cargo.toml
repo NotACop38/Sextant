@@ -11,5 +11,11 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[dependencies]
+sextant-ir.workspace = true
+
+[dev-dependencies]
+sextant-engine.workspace = true
+
 [lints]
 workspace = true

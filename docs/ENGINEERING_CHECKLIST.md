@@ -235,16 +235,16 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Implement the Kaitai `.ksy` exporter (primary).
-- [ ] Implement the ImHex `.hexpat`, Wireshark `.lua`, and 010 `.bt` exporters.
-- [ ] Implement optional Kaitai cross-validation: compile the generated spec with the Kaitai compiler and parse all samples, reported separately and never required by the core (FR-38, NFR-5).
-- [ ] Add round-trip tests: for each corpus format, the exported parser parses every sample.
+- [x] Implement the Kaitai `.ksy` exporter (primary).
+- [x] Implement the ImHex `.hexpat`, Wireshark `.lua`, and 010 `.bt` exporters.
+- [x] Implement optional Kaitai cross-validation: compile the generated spec with the Kaitai compiler and parse all samples, reported separately and never required by the core (FR-38, NFR-5).
+- [x] Add round-trip tests: for each corpus format, the exported parser parses every sample.
 
 ### Acceptance criteria
 
-- [ ] The generated Kaitai spec for a corpus format compiles with the Kaitai compiler and parses all samples (when the optional cross-check is enabled).
-- [ ] Each exporter produces output that correctly parses corpus samples for at least one format.
-- [ ] `sextant export <report.json> --format <fmt> --out <file>` works for all four formats.
+- [x] The generated Kaitai spec for a corpus format compiles with the Kaitai compiler and parses all samples (when the optional cross-check is enabled).
+- [x] Each exporter produces output that correctly parses corpus samples for at least one format.
+- [x] `sextant export <report.json> --format <fmt> --out <file>` works for all four formats.
 
 ---
 
