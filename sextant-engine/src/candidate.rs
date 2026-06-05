@@ -22,6 +22,7 @@ use sextant_ir::{
 };
 
 use crate::align::{Alignment, align};
+use crate::chunk::{ChunkChecksum, ChunkChecksumStart, ChunkLayout, detect_chunks};
 use crate::detect::{
     Bitfield, ChecksumField, ChecksumStart, IntField, IntRelation, Magic, detect_bitfields,
     detect_int_fields, detect_magic, detect_trailing_checksum,
@@ -63,6 +64,9 @@ pub fn infer_candidates<S: AsRef<[u8]>>(samples: &[S], limits: &Limits) -> Vec<C
     let int_fields = detect_int_fields(&slices);
 
     let mut formats: Vec<(Format, usize)> = Vec::new();
+    if let Some(chunked) = build_chunked(&slices, &alignment, magic.as_ref()) {
+        formats.push(chunked);
+    }
     if let Some(structured) = build_structured(&slices, &alignment, magic.as_ref(), &int_fields) {
         formats.push(structured);
     }
@@ -189,8 +193,13 @@ fn build_structured(
 /// is chosen first; this keeps a coincidental relationship found deeper in the
 /// payload from displacing the real header field. Among candidates at the same
 /// offset, a count is preferred (it decomposes the tail into records and
-/// verifies the strongest), then a derived length, then a total-length field,
-/// and finally the narrowest field.
+/// verifies the strongest), then a derived length, then a total-length field.
+///
+/// At the same offset and relation the widest field is preferred. A wider field
+/// satisfies a length relationship only when its high bytes genuinely encode the
+/// length (for a small file those high bytes are the zeros of a little-endian
+/// integer), so preferring the widest recovers a `u32` length where a narrower
+/// read would also fit but leave the high bytes misattributed to the payload.
 fn select_key(int_fields: &[IntField]) -> Option<&IntField> {
     fn rank(relation: IntRelation) -> u8 {
         match relation {
@@ -203,8 +212,246 @@ fn select_key(int_fields: &[IntField]) -> Option<&IntField> {
         a.offset
             .cmp(&b.offset)
             .then(rank(a.relation).cmp(&rank(b.relation)))
-            .then(a.width.cmp(&b.width))
+            .then(b.width.cmp(&a.width))
     })
+}
+
+/// Build a candidate from a detected repeating length-prefixed record layout
+/// (FR-9, FR-10). The header is modeled as a magic and any count or filler
+/// fields, followed by a to-end array of the record element. Returns `None` when
+/// no chunk layout was found.
+fn build_chunked(
+    slices: &[&[u8]],
+    alignment: &Alignment,
+    magic: Option<&Magic>,
+) -> Option<(Format, usize)> {
+    let layout = detect_chunks(slices)?;
+    let total = slices.len();
+    let magic_len = magic.map_or(0, Magic::len).min(layout.header_len);
+
+    let mut fields: Vec<Field> = Vec::new();
+    if magic_len >= 2 {
+        if let Some(magic) = magic {
+            fields.push(magic_field(&magic.bytes[..magic_len], total));
+        }
+    }
+
+    // Header fields between the magic and the record array: a count field when a
+    // byte equals the record count in every sample, otherwise a filler.
+    let bitfields = detect_bitfields(slices, magic_len, layout.header_len);
+    for offset in magic_len..layout.header_len {
+        if is_count_byte(slices, offset, &layout.record_counts) {
+            let mut field = integer_field(
+                "count",
+                1,
+                false,
+                Role::Count,
+                0.85,
+                total,
+                &["value equals the number of records that follow"],
+            );
+            field.evidence.notes.push(values_note(
+                &layout
+                    .record_counts
+                    .iter()
+                    .map(|&c| c as u64)
+                    .collect::<Vec<_>>(),
+            ));
+            fields.push(field);
+        } else {
+            fields.push(filler_field(slices, offset, &bitfields, total));
+        }
+    }
+
+    let mut relations = 1; // the per-record length relationship
+    let element = chunk_element(&layout, total, &mut relations);
+    fields.push(Field {
+        name: Some("records".to_owned()),
+        kind: Kind::Array {
+            element: Box::new(element),
+            count: CountRule::ToEnd,
+        },
+        size: None,
+        offset: None,
+        role: None,
+        constraints: Vec::new(),
+        confidence: Confidence::clamped(0.85),
+        evidence: evidence(
+            total,
+            &["repeating length-prefixed records to the end of the sample"],
+        ),
+    });
+
+    let format = Format {
+        name: "candidate-chunked".to_owned(),
+        endianness: Endianness::Little,
+        root: Structure::new(fields),
+        enums: Default::default(),
+        metadata: format_metadata(alignment),
+    };
+    Some((format, relations))
+}
+
+/// Build the repeating record element for a chunk layout: an optional prefix, the
+/// length field, an optional mid section, the length-derived data, and an
+/// optional trailer that is modeled as a verified checksum when one was found.
+fn chunk_element(layout: &ChunkLayout, total: usize, relations: &mut usize) -> Field {
+    let mut inner: Vec<Field> = Vec::new();
+    let first_name = if layout.pre > 0 { "prefix" } else { "length" };
+
+    if layout.pre > 0 {
+        inner.push(fixed_bytes_field(
+            if layout.pre == 1 { "tag" } else { "prefix" },
+            layout.pre as u64,
+            if layout.pre == 1 {
+                Role::Enum
+            } else {
+                Role::Unknown
+            },
+            0.5,
+            total,
+            "bytes before the record length field",
+        ));
+    }
+
+    inner.push(integer_field(
+        "length",
+        layout.width,
+        layout.big_endian,
+        Role::Length,
+        0.9,
+        total,
+        &["value equals the byte length of the record data that follows"],
+    ));
+
+    if layout.mid > 0 {
+        inner.push(fixed_bytes_field(
+            "type",
+            layout.mid as u64,
+            Role::Enum,
+            0.5,
+            total,
+            "fixed bytes between the length and the data (for example a type tag)",
+        ));
+    }
+
+    inner.push(Field {
+        name: Some("data".to_owned()),
+        kind: Kind::Bytes,
+        size: Some(SizeRule::Derived {
+            length_field: FieldRef::new("length"),
+        }),
+        offset: None,
+        role: Some(Role::Payload),
+        constraints: Vec::new(),
+        confidence: Confidence::clamped(0.7),
+        evidence: evidence(total, &["record data sized by the length field"]),
+    });
+
+    if layout.tail > 0 {
+        if let Some(checksum) = layout.checksum {
+            inner.push(chunk_checksum_field(
+                layout.tail,
+                first_name,
+                checksum,
+                total,
+            ));
+            *relations += 1;
+        } else {
+            inner.push(fixed_bytes_field(
+                "trailer",
+                layout.tail as u64,
+                Role::Reserved,
+                0.4,
+                total,
+                "trailing bytes after each record's data",
+            ));
+        }
+    }
+
+    Field {
+        name: Some("record".to_owned()),
+        kind: Kind::Struct {
+            structure: Structure::new(inner),
+        },
+        size: None,
+        offset: None,
+        role: None,
+        constraints: Vec::new(),
+        confidence: Confidence::clamped(0.75),
+        evidence: evidence(total, &["one length-prefixed record"]),
+    }
+}
+
+/// Build the checksum field of a chunk record from a verified per-record
+/// checksum, covering the record's data (and any mid section) up to the trailer.
+fn chunk_checksum_field(
+    width: usize,
+    first_name: &str,
+    checksum: ChunkChecksum,
+    total: usize,
+) -> Field {
+    let from = match checksum.start {
+        ChunkChecksumStart::RecordStart => RangeAnchor::FieldStart {
+            field: FieldRef::new(first_name),
+        },
+        ChunkChecksumStart::AfterLength => RangeAnchor::FieldEnd {
+            field: FieldRef::new("length"),
+        },
+    };
+    let spec = ChecksumSpec {
+        algorithm: checksum.algorithm,
+        covered: CoveredRange {
+            from,
+            to: RangeAnchor::FieldEnd {
+                field: FieldRef::new("data"),
+            },
+        },
+    };
+    let mut field = integer_field(
+        "checksum",
+        width as u8,
+        checksum.big_endian,
+        Role::Checksum,
+        0.95,
+        total,
+        &["value verifies as a per-record checksum over the covered range"],
+    );
+    field.constraints.push(Constraint::Checksum { spec });
+    field
+}
+
+/// A fixed-size bytes field with a name, role, confidence, and one note.
+fn fixed_bytes_field(
+    name: &str,
+    bytes: u64,
+    role: Role,
+    confidence: f64,
+    total: usize,
+    note: &str,
+) -> Field {
+    Field {
+        name: Some(name.to_owned()),
+        kind: Kind::Bytes,
+        size: Some(SizeRule::Fixed { bytes }),
+        offset: None,
+        role: Some(role),
+        constraints: Vec::new(),
+        confidence: Confidence::clamped(confidence),
+        evidence: evidence(total, &[note]),
+    }
+}
+
+/// Whether the single byte at `offset` equals the number of records in every
+/// sample, identifying a record-count field.
+fn is_count_byte(slices: &[&[u8]], offset: usize, record_counts: &[usize]) -> bool {
+    if slices.len() != record_counts.len() {
+        return false;
+    }
+    slices
+        .iter()
+        .zip(record_counts)
+        .all(|(slice, &count)| count < 256 && slice.get(offset) == Some(&(count as u8)))
 }
 
 /// A magic-and-opaque-tail candidate: recovers the signature only (FR-8).

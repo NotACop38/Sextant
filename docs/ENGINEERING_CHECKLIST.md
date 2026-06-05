@@ -154,16 +154,16 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Implement orchestration: ingest, generate candidates, execute and score each, select the best.
-- [ ] Implement a heuristic-only refinement loop (boundary nudges, endianness and width swaps) that respects the non-regression invariant (FR-26).
-- [ ] Wire the result into a draft report object.
-- [ ] Add end-to-end tests on corpus formats.
+- [x] Implement orchestration: ingest, generate candidates, execute and score each, select the best.
+- [x] Implement a heuristic-only refinement loop (boundary nudges, endianness and width swaps) that respects the non-regression invariant (FR-26).
+- [x] Wire the result into a draft report object.
+- [x] Add end-to-end tests on corpus formats.
 
 ### Acceptance criteria
 
-- [ ] `sextant infer <dir> --no-llm` produces a scored field map for the corpus formats.
-- [ ] No network egress occurs in `--no-llm` mode (assert in a test or document the verification method) (NFR-4).
-- [ ] The statistics-only pipeline meets the accuracy targets in PRD Section 15 on the file-format corpus (field-boundary F1 at least 0.85, perfection at least 0.5).
+- [x] `sextant infer <dir> --no-llm` produces a scored field map for the corpus formats.
+- [x] No network egress occurs in `--no-llm` mode (assert in a test or document the verification method) (NFR-4).
+- [x] The statistics-only pipeline meets the accuracy targets in PRD Section 15 on the file-format corpus (field-boundary F1 at least 0.85, perfection at least 0.5).
 
 ---
 

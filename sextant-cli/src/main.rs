@@ -1,23 +1,29 @@
 //! The `sextant` command-line interface.
 //!
-//! The `infer` subcommand now performs sample ingestion (Step 4): it resolves
-//! files, directories, and glob patterns into a normalized sample set with
-//! provenance, enforces the byte caps, and reports the sample count and sizes.
-//! Statistical inference, reporting, and the exporters are wired in by later
-//! checklist steps, so `inspect`, `export`, and `bench` still print a
-//! not-yet-implemented message. The full exit-code contract from the PRD is
-//! implemented alongside those subcommands.
+//! The `infer` subcommand runs the statistics-only inference pipeline end to end
+//! (Step 6): it ingests files, directories, and glob patterns into a normalized
+//! sample set (Step 4), generates and scores candidate hypotheses, selects the
+//! best, refines it under the non-regression invariant, and prints a scored field
+//! map. With `--no-llm` (and today in every mode, since the language-model pass
+//! is layered on in a later step) the run is fully offline and performs zero
+//! network egress (NFR-4). Reporting to JSON and the exporters are wired in by
+//! later checklist steps, so `inspect`, `export`, and `bench` still print a
+//! not-yet-implemented message.
 
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use sextant_engine::{
-    DEFAULT_MAX_BYTES_PER_SAMPLE, DEFAULT_MAX_TOTAL_BYTES, IngestOptions, SampleSet, ingest,
+    DEFAULT_MAX_BYTES_PER_SAMPLE, DEFAULT_MAX_TOTAL_BYTES, DraftReport, InferenceOptions,
+    IngestOptions, Limits, SampleSet, infer, ingest,
 };
 
 /// The PRD exit code for an input error (Section 14): a path that does not
 /// exist, a malformed glob, an unreadable file, or no usable samples.
 const EXIT_INPUT_ERROR: u8 = 2;
+/// The PRD exit code for inference producing no usable hypothesis (Section 14).
+const EXIT_NO_HYPOTHESIS: u8 = 3;
 
 /// Infer the structure of unknown binary formats and protocols from samples,
 /// then emit parsers verified against those samples.
@@ -44,6 +50,15 @@ enum Command {
         /// Cap the total bytes read across all samples.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_TOTAL_BYTES)]
         max_total_bytes: usize,
+        /// Run statistics-only with no language model and no network egress.
+        /// The model pass is not yet implemented, so this is the default
+        /// behavior today; the flag documents intent and guarantees the offline
+        /// path.
+        #[arg(long)]
+        no_llm: bool,
+        /// Wall-clock cap, in seconds, for executing the IR against each sample.
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<u64>,
     },
     /// Read a sample through an inferred field map (annotated hex view).
     Inspect {
@@ -69,41 +84,114 @@ fn main() -> ExitCode {
             recursive,
             max_bytes_per_sample,
             max_total_bytes,
-        } => run_infer(&inputs, recursive, max_bytes_per_sample, max_total_bytes),
+            no_llm,
+            timeout,
+        } => run_infer(
+            &inputs,
+            recursive,
+            max_bytes_per_sample,
+            max_total_bytes,
+            no_llm,
+            timeout,
+        ),
         Command::Inspect { .. } => not_implemented("inspect"),
         Command::Export { .. } => not_implemented("export"),
         Command::Bench => not_implemented("bench"),
     }
 }
 
-/// Ingest the inputs and report the sample set. Inference itself arrives in a
-/// later checklist step; this realizes the Step 4 ingestion behavior.
+/// Ingest the inputs, run statistics-only inference, and print a scored field
+/// map (Step 6). The `--no-llm` path is fully offline (NFR-4).
 fn run_infer(
     inputs: &[String],
     recursive: bool,
     max_bytes_per_sample: usize,
     max_total_bytes: usize,
+    no_llm: bool,
+    timeout: Option<u64>,
 ) -> ExitCode {
     let options = IngestOptions {
         max_bytes_per_sample,
         max_total_bytes,
         recursive,
     };
-    match ingest(inputs, &options) {
+    let set = match ingest(inputs, &options) {
         Ok(set) if set.is_empty() => {
             eprintln!("sextant infer: no samples found in the given inputs");
-            ExitCode::from(EXIT_INPUT_ERROR)
+            return ExitCode::from(EXIT_INPUT_ERROR);
         }
-        Ok(set) => {
-            print_sample_set(&set);
-            eprintln!(
-                "sextant infer: ingestion complete. Statistical inference arrives in a later checklist step."
-            );
-            ExitCode::SUCCESS
-        }
+        Ok(set) => set,
         Err(error) => {
             eprintln!("sextant infer: {error}");
-            ExitCode::from(EXIT_INPUT_ERROR)
+            return ExitCode::from(EXIT_INPUT_ERROR);
+        }
+    };
+
+    print_sample_set(&set);
+
+    if !no_llm {
+        eprintln!(
+            "sextant infer: the language-model pass is not yet available; running statistics-only."
+        );
+    }
+    let inference = InferenceOptions {
+        limits: Limits::default().with_timeout(timeout.map(Duration::from_secs)),
+        // The model pass is not yet wired in, so every run is statistics-only
+        // and offline regardless of the flag (NFR-4).
+        no_llm: true,
+    };
+    let report = infer(&set, &inference);
+    print_report(&report);
+
+    if report.field_map.is_empty() {
+        eprintln!("sextant infer: no usable hypothesis was produced");
+        ExitCode::from(EXIT_NO_HYPOTHESIS)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Print the scored field map and the fit-score breakdown of a draft report.
+fn print_report(report: &DraftReport) {
+    let score = &report.score;
+    println!();
+    println!(
+        "Best hypothesis: {} (fit score {:.3})",
+        report.format.name, score.overall
+    );
+    println!(
+        "  coverage {:.3}  consistency {:.3}  generality {:.3}",
+        score.coverage, score.consistency, score.generality
+    );
+    if report.metadata.no_llm {
+        println!("  mode: statistics-only (no language model, no network egress)");
+    }
+
+    println!("Field map:");
+    for entry in &report.field_map {
+        let indent = "  ".repeat(entry.depth + 1);
+        println!(
+            "{indent}{name}: {role}, {kind}, {size} (confidence {conf:.2})",
+            name = entry.name,
+            role = entry.role,
+            kind = entry.kind,
+            size = entry.size,
+            conf = entry.confidence,
+        );
+    }
+
+    if report.refinement.is_empty() {
+        println!("Refinement: no improving change was found (already converged).");
+    } else {
+        println!(
+            "Refinement: {} accepted change(s):",
+            report.refinement.len()
+        );
+        for step in &report.refinement {
+            println!(
+                "  {} (score {:.3} to {:.3})",
+                step.description, step.score_before, step.score_after
+            );
         }
     }
 }

@@ -21,6 +21,8 @@ path = "src/main.rs"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+sextant-engine.workspace = true
+sextant-ir.workspace = true
 
 [lints]
 workspace = true

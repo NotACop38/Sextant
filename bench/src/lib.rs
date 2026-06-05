@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub mod accuracy;
+
+pub use accuracy::{CorpusMetrics, FormatMetrics, SampleMetrics, evaluate_corpus, evaluate_format};
+
 /// A hand-verified description of a single corpus format.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GroundTruth {
