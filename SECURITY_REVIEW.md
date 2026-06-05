@@ -126,6 +126,15 @@ All findings were fixed. No escalations.
 - Test: `ingest::tests::recursive_ingest_does_not_follow_a_symlink_cycle`
   (Unix), which builds a real symlink cycle and asserts ingestion terminates and
   returns only the real file.
+- Residual, documented: a recursive glob (`root/**/*`) is expanded by the `glob`
+  crate, which resolves symlinked directories during matching, so the no-follow
+  guarantee covers literal directory inputs only. Closing that would mean
+  replacing the crate's recursive traversal (an architecturally significant
+  change, out of scope for this pass), so the limitation is documented in
+  `docs/threat-model.md` and in the `resolve_input` glob branch, and a literal
+  directory input is the safe path. Reaching it requires a user to point their
+  own recursive glob at their own tree containing a cycle, not an untrusted
+  sample vector.
 
 ### SEC-003 (Medium, privacy / local information disclosure)
 

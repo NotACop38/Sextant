@@ -329,6 +329,12 @@ fn resolve_input(
     seen: &mut BTreeSet<PathBuf>,
 ) -> Result<(), IngestError> {
     if is_glob(input) {
+        // A glob is expanded by the `glob` crate. Note that a recursive `**`
+        // pattern resolves symlinked directories while matching, so the
+        // no-follow guarantee that `collect_dir` gives literal directory inputs
+        // does not extend to glob expansion. This is documented in
+        // `docs/threat-model.md`; pass a directory as a literal input when the
+        // tree may contain symlink cycles or links that lead outside it.
         let matches = glob(input).map_err(|error| IngestError::BadPattern {
             pattern: input.to_string(),
             message: error.to_string(),

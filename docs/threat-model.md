@@ -34,8 +34,12 @@ relies on. The detailed privacy notes live in
   optional wall-clock deadline, so no input causes a panic, hang, or unbounded
   allocation.
 - Ingestion caps per-sample and total bytes and never reads a file whole.
-  Directory traversal does not follow symlinks, so it cannot loop on a cycle or
-  read outside the selected tree.
+  Traversal of a literal directory input does not follow symlinks, so it cannot
+  loop on a cycle or read outside the selected tree. A recursive glob pattern
+  (for example `root/**/*`) is expanded by the `glob` crate, which does resolve
+  symlinked directories while matching; point a recursive glob only at a tree you
+  trust not to contain symlink cycles or links that lead outside it, or pass the
+  directory as a literal input to get the no-follow guarantee.
 - The model is never trusted. Its response is parsed into a strict, typed
   proposal shape (no free-form text), and every proposal is re-validated and
   re-scored by the native executor before it can be accepted.

@@ -88,12 +88,19 @@ impl ResponseCache {
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(path)?;
+    // The `mode` above only takes effect when this call creates the file. An
+    // entry left over from an older, world-readable cache keeps its old mode
+    // through a truncating rewrite, so the refreshed sample-derived bytes would
+    // stay group- or world-readable. Set the mode explicitly on the open handle
+    // so both a fresh and a pre-existing entry end up owner-only.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     file.write_all(bytes)
 }
 
@@ -216,6 +223,27 @@ mod tests {
             & 0o777;
         // No group or world bits: cached sample-derived data stays private.
         assert_eq!(mode, 0o600, "cache entry mode was {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rewriting_a_world_readable_entry_tightens_its_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = TempDir::new("upgrade");
+        let cache = ResponseCache::new(&dir.0);
+        std::fs::create_dir_all(&dir.0).expect("mkdir");
+        let key = "completion-legacy";
+        let path = cache.path_for(key);
+        // Simulate an entry left over from an older, world-readable cache.
+        std::fs::write(&path, b"{}").expect("seed");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        cache
+            .put(key, &serde_json::json!({"sample": "sensitive bytes"}))
+            .expect("rewrite");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        // The rewrite must drop the inherited group and world read bits.
+        assert_eq!(mode, 0o600, "entry kept a broad mode: {mode:o}");
     }
 
     #[test]
