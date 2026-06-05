@@ -294,17 +294,17 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Add `cargo-fuzz` targets for ingestion, the executor, and each exporter.
-- [ ] Add property tests for invariants (a parse never overruns; a length always matches what it governs in a valid parse).
-- [ ] Verify and tighten resource limits (timeouts, memory caps, recursion and array bounds).
-- [ ] Run fuzzers in CI on a schedule (for example nightly) with a crash-corpus check.
-- [ ] Add `cargo-audit` to CI.
+- [x] Add `cargo-fuzz` targets for ingestion, the executor, and each exporter.
+- [x] Add property tests for invariants (a parse never overruns; a length always matches what it governs in a valid parse).
+- [x] Verify and tighten resource limits (timeouts, memory caps, recursion and array bounds).
+- [x] Run fuzzers in CI on a schedule (for example nightly) with a crash-corpus check.
+- [x] Add `cargo-audit` to CI.
 
 ### Acceptance criteria
 
-- [ ] All fuzz targets run for the configured budget with zero crashes or hangs.
-- [ ] Resource limits are enforced and covered by tests.
-- [ ] CI includes scheduled fuzzing and a clean `cargo-audit`.
+- [x] All fuzz targets run for the configured budget with zero crashes or hangs.
+- [x] Resource limits are enforced and covered by tests.
+- [x] CI includes scheduled fuzzing and a clean `cargo-audit`.
 
 ---
 

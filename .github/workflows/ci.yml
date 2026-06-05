@@ -48,3 +48,22 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  cargo-audit:
+    name: Security advisories (cargo-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        # A prebuilt binary, so the audit tool's own toolchain requirement stays
+        # independent of the project's pinned MSRV.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit the workspace dependencies
+        # Checks the committed Cargo.lock against the RustSec advisory database
+        # (NFR-10). The fuzz crate keeps its own lockfile for its nightly-only
+        # tooling, so it is audited too.
+        run: |
+          cargo audit
+          cargo audit --file fuzz/Cargo.lock

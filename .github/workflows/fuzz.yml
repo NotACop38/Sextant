@@ -1,0 +1,91 @@
+name: Fuzz
+
+# Scheduled fuzzing of every input-facing component (NFR-2, FR-24). The nightly
+# run gives each target a long budget; pull requests that touch the fuzzed crates
+# get a short smoke run so a newly introduced crash is caught before merge. A
+# crash leaves an artifact under fuzz/artifacts, which the crash-corpus check
+# turns into a failing build.
+
+on:
+  schedule:
+    # Nightly at 03:17 UTC. The odd minute avoids the top-of-hour scheduler rush.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "fuzz/**"
+      - "sextant-ir/**"
+      - "sextant-engine/**"
+      - "sextant-export/**"
+      - ".github/workflows/fuzz.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One target's crash must not cancel the others, so every target reports.
+      fail-fast: false
+      matrix:
+        target:
+          - executor
+          - infer
+          - pcap
+          - ingest
+          - export_kaitai
+          - export_imhex
+          - export_wireshark
+          - export_bt
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the nightly Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Choose the per-target budget
+        id: budget
+        # A long budget on the nightly schedule, a short smoke run on a pull
+        # request so feedback stays fast.
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "seconds=300" >> "$GITHUB_OUTPUT"
+          else
+            echo "seconds=60" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run the fuzzer
+        working-directory: fuzz
+        run: >-
+          cargo +nightly fuzz run ${{ matrix.target }} --
+          -max_total_time=${{ steps.budget.outputs.seconds }}
+          -rss_limit_mb=4096
+      - name: Crash-corpus check
+        if: always()
+        working-directory: fuzz
+        # Fail if any crashing input was recorded, whether from this run or
+        # checked into the tree by mistake.
+        run: |
+          if compgen -G "artifacts/${{ matrix.target }}/*" > /dev/null; then
+            echo "Fuzzing produced crash artifacts for ${{ matrix.target }}:"
+            ls -la "artifacts/${{ matrix.target }}/"
+            exit 1
+          fi
+          echo "No crash artifacts for ${{ matrix.target }}."
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

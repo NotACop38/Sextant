@@ -3,15 +3,25 @@ name = "sextant-engine-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
-description = "Fuzz targets for the Sextant native IR executor (FR-24, NFR-2)."
+description = "Fuzz targets for Sextant: ingestion, the native IR executor, and every exporter (FR-24, NFR-2)."
 
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+tempfile = "3"
 sextant-ir = { path = "../sextant-ir" }
 sextant-engine = { path = "../sextant-engine" }
+sextant-export = { path = "../sextant-export" }
+
+# A small shared library holds the arbitrary IR generator the exporter targets
+# use, so every exporter is fuzzed against the same wide variety of hypotheses
+# without duplicating the builder in each target.
+[lib]
+name = "sextant_fuzz"
+path = "src/lib.rs"
 
 [[bin]]
 name = "executor"
@@ -30,6 +40,41 @@ bench = false
 [[bin]]
 name = "pcap"
 path = "fuzz_targets/pcap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ingest"
+path = "fuzz_targets/ingest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "export_kaitai"
+path = "fuzz_targets/export_kaitai.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "export_imhex"
+path = "fuzz_targets/export_imhex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "export_wireshark"
+path = "fuzz_targets/export_wireshark.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "export_bt"
+path = "fuzz_targets/export_bt.rs"
 test = false
 doc = false
 bench = false
