@@ -12,7 +12,7 @@
 use std::sync::OnceLock;
 
 use libfuzzer_sys::fuzz_target;
-use sextant_engine::{Limits, execute, score};
+use sextant_engine::{execute, score, Limits};
 use sextant_ir::{
     ChecksumAlgorithm, ChecksumSpec, Confidence, Constraint, CountRule, CoveredRange, Endianness,
     Field, FieldRef, Format, Kind, RangeAnchor, Signedness, SizeRule, Structure,
@@ -66,6 +66,35 @@ fn build_battery() -> Vec<Format> {
                     },
                 });
                 crc
+            },
+        ]),
+        enums: Default::default(),
+        metadata: Default::default(),
+    });
+
+    // A checksum stored in a bytes field wider than eight bytes, plus a
+    // little-endian order: the path that used to overflow the integer decoder.
+    formats.push(Format {
+        name: "wide_csum".to_owned(),
+        endianness: Endianness::Little,
+        root: Structure::new(vec![
+            named("body", Kind::Bytes).with_size(SizeRule::Fixed { bytes: 4 }),
+            {
+                let mut csum = named("csum", Kind::Bytes).with_size(SizeRule::Fixed { bytes: 12 });
+                csum.constraints.push(Constraint::Checksum {
+                    spec: ChecksumSpec {
+                        algorithm: ChecksumAlgorithm::Crc32,
+                        covered: CoveredRange {
+                            from: RangeAnchor::FieldStart {
+                                field: FieldRef::new("body"),
+                            },
+                            to: RangeAnchor::FieldEnd {
+                                field: FieldRef::new("body"),
+                            },
+                        },
+                    },
+                });
+                csum
             },
         ]),
         enums: Default::default(),

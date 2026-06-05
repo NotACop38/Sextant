@@ -523,6 +523,12 @@ impl Ctx<'_> {
                     return None;
                 }
                 let (inner, end) = self.parse_structure(structure, start, limit, depth + 1);
+                if self.failed() {
+                    // The nested structure stopped at a localized failure. Drop
+                    // the partial struct so the returned tree holds only fields
+                    // that completed (the leaf ranges already captured coverage).
+                    return None;
+                }
                 Some(Parsed {
                     instance: FieldInstance {
                         name: field.name.clone(),
@@ -791,8 +797,22 @@ impl Ctx<'_> {
             CountRule::BoundedBy { length_field } => {
                 let value = self.resolve_value(length_field.as_str(), start)?;
                 let len = self.value_as_len(value, start)?;
-                let bound = start.saturating_add(len).min(limit);
-                (None, bound)
+                let end = start.saturating_add(len);
+                if end > limit {
+                    // The declared byte length runs past the bytes available, so
+                    // the sample is truncated. Reject it like a derived-size
+                    // field rather than silently shortening the bound, which
+                    // would let the scorer mark a truncated sample as parsed.
+                    self.fail(
+                        start,
+                        FailureReason::UnexpectedEndOfInput {
+                            needed: len,
+                            available: limit.saturating_sub(start),
+                        },
+                    );
+                    return None;
+                }
+                (None, end)
             }
             CountRule::ToEnd => (None, limit),
         };
@@ -800,6 +820,11 @@ impl Ctx<'_> {
         let mut elements = Vec::new();
         let mut cursor = start;
         let mut produced = 0usize;
+        // Checksum constraints attached directly to the element field are
+        // deferred like those on a structure's fields, then evaluated once the
+        // array is parsed. Constants and ranges on the element are checked
+        // inline by the element's own parse.
+        let mut pending = Vec::new();
 
         loop {
             if self.failed() {
@@ -829,11 +854,17 @@ impl Ctx<'_> {
                 self.fail(before, FailureReason::ZeroWidthRepeat);
                 break;
             }
+            self.note_pending_checksum(element, &parsed, &mut pending);
             cursor = parsed.end;
             elements.push(parsed.instance);
             produced += 1;
         }
 
+        if self.failed() {
+            return None;
+        }
+
+        self.evaluate_pending_checksums(pending);
         if self.failed() {
             return None;
         }
@@ -903,15 +934,19 @@ impl Ctx<'_> {
     ) {
         for constraint in &field.constraints {
             if let Constraint::Checksum { spec } = constraint {
+                let start = parsed.instance.start;
+                let width = (parsed.instance.end - start).min(8) as u8;
                 let stored = match parsed.int_value {
                     Some(value) => value,
+                    // A checksum stored in a bytes field: interpret only its low
+                    // `width` (at most eight) bytes, so a field wider than eight
+                    // bytes cannot overflow the integer decoder and panic.
                     None => decode_int(
-                        &self.sample[parsed.instance.start..parsed.instance.end],
+                        &self.sample[start..start + usize::from(width)],
                         self.default_endianness,
                         sextant_ir::Signedness::Unsigned,
                     ),
                 };
-                let width = (parsed.instance.end - parsed.instance.start).min(8) as u8;
                 pending.push(PendingChecksum {
                     field: field.name.clone(),
                     at: parsed.instance.start,
@@ -938,19 +973,29 @@ impl Ctx<'_> {
         let to = self.anchor_offset(&item.to);
         let (passed, detail) = match (from, to) {
             (Some(from), Some(to)) if from <= to && to <= self.sample.len() => {
-                let data = &self.sample[from..to];
-                let computed = checksum::compute(item.algorithm, data, item.width);
-                let stored = mask_to_width(item.stored, item.width);
-                let passed = computed == stored;
-                let detail = if passed {
-                    format!("{:?} verified over [{from}, {to})", item.algorithm)
-                } else {
-                    format!(
-                        "{:?} over [{from}, {to}) expected {computed:#x}, stored {stored:#x}",
-                        item.algorithm
+                // Hashing the covered range is work proportional to its length,
+                // so charge it before hashing. A checksum over a huge range
+                // therefore cannot exceed the work or wall-clock limit (FR-24).
+                if !self.charge((to - from) as u64, from) {
+                    (
+                        false,
+                        format!("{:?} not evaluated: resource limit reached", item.algorithm),
                     )
-                };
-                (passed, detail)
+                } else {
+                    let data = &self.sample[from..to];
+                    let computed = checksum::compute(item.algorithm, data, item.width);
+                    let stored = mask_to_width(item.stored, item.width);
+                    let passed = computed == stored;
+                    let detail = if passed {
+                        format!("{:?} verified over [{from}, {to})", item.algorithm)
+                    } else {
+                        format!(
+                            "{:?} over [{from}, {to}) expected {computed:#x}, stored {stored:#x}",
+                            item.algorithm
+                        )
+                    };
+                    (passed, detail)
+                }
             }
             _ => (
                 false,
@@ -1000,7 +1045,12 @@ fn mask_to_width(value: i128, width: u8) -> u64 {
 
 /// Decode `bytes` (length 1, 2, 4, or 8) as an integer in the given order and
 /// signedness, into an `i128`.
+///
+/// Callers pass a validated width of at most eight bytes. As a safety guard
+/// against misuse, a longer slice is clamped to its first eight bytes so a
+/// little-endian shift can never overflow and panic.
 fn decode_int(bytes: &[u8], order: Endianness, signed: sextant_ir::Signedness) -> i128 {
+    let bytes = if bytes.len() > 8 { &bytes[..8] } else { bytes };
     let mut acc: u64 = 0;
     match order {
         Endianness::Big => {
@@ -1029,10 +1079,19 @@ fn decode_int(bytes: &[u8], order: Endianness, signed: sextant_ir::Signedness) -
     }
 }
 
+/// The most input bytes [`decode_text`] will materialize into a string. The
+/// decoded text is a preview for the report and inspect view, not used by the
+/// scorer, so a hostile field with a huge string value cannot force an
+/// allocation proportional to the whole sample (FR-24). The field's full byte
+/// range is still recorded on its instance.
+const MAX_TEXT_PREVIEW_BYTES: usize = 4096;
+
 /// Decode bytes into a best-effort string for the given encoding. Lossy on
-/// invalid input so it never fails; the scorer does not use the text, only the
+/// invalid input so it never fails, and capped at [`MAX_TEXT_PREVIEW_BYTES`] so
+/// the allocation stays bounded. The scorer does not use the text, only the
 /// byte range.
 fn decode_text(bytes: &[u8], encoding: StringEncoding) -> String {
+    let bytes = &bytes[..bytes.len().min(MAX_TEXT_PREVIEW_BYTES)];
     match encoding {
         StringEncoding::Ascii | StringEncoding::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
         StringEncoding::Latin1 => bytes.iter().map(|&byte| byte as char).collect(),

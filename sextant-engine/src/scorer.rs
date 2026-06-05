@@ -200,27 +200,48 @@ fn score_sample(index: usize, execution: &Execution) -> SampleScore {
 
 /// Compute explained, overlapped, and gap byte counts from the leaf ranges,
 /// clipped to the sample length.
+///
+/// This merges sorted intervals rather than materializing one boolean per
+/// sample byte, so its memory is proportional to the number of leaf fields
+/// (already bounded by the executor's field limit) and not to the sample size
+/// (FR-24).
 fn coverage_stats(ranges: &[(usize, usize)], sample_len: usize) -> (usize, usize, usize) {
     if sample_len == 0 {
         return (0, 0, 0);
     }
-    let mut covered = vec![false; sample_len];
-    let mut total_leaf = 0usize;
-    let mut max_end = 0usize;
-    for &(start, end) in ranges {
-        let start = start.min(sample_len);
-        let end = end.min(sample_len);
-        if start >= end {
-            continue;
-        }
-        total_leaf += end - start;
-        max_end = max_end.max(end);
-        covered[start..end].fill(true);
+    // Clip every range to the sample and drop empties.
+    let mut clipped: Vec<(usize, usize)> = ranges
+        .iter()
+        .map(|&(start, end)| (start.min(sample_len), end.min(sample_len)))
+        .filter(|&(start, end)| start < end)
+        .collect();
+    if clipped.is_empty() {
+        return (0, 0, 0);
     }
-    let explained = covered.iter().filter(|&&bit| bit).count();
+    let total_leaf: usize = clipped.iter().map(|&(start, end)| end - start).sum();
+    clipped.sort_unstable();
+
+    // Merge overlapping intervals; the merged length is the explained bytes.
+    let mut explained = 0usize;
+    let mut run_start = clipped[0].0;
+    let mut run_end = clipped[0].1;
+    for &(start, end) in &clipped[1..] {
+        if start > run_end {
+            explained += run_end - run_start;
+            run_start = start;
+            run_end = end;
+        } else {
+            run_end = run_end.max(end);
+        }
+    }
+    explained += run_end - run_start;
+
+    // The intervals are sorted and disjoint after merging, so the final run end
+    // is the furthest explained byte.
+    let max_end = run_end;
     let overlap = total_leaf - explained;
     // Gaps are unexplained bytes that fall before the furthest explained byte.
-    let gap = covered[..max_end].iter().filter(|&&bit| !bit).count();
+    let gap = max_end - explained;
     (explained, overlap, gap)
 }
 
