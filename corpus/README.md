@@ -87,3 +87,58 @@ Each record that follows the header is:
 | 1 | `tag` | enum | record type |
 | 2 | `length` | length | byte length of `value`, little-endian |
 | `length` | `value` | payload | opaque value bytes |
+
+### scma (statistical inference)
+
+A small controlled format authored for the Step 5 statistical inference tests.
+It pairs a magic signature with a packed flags byte and a record count, so the
+pass exercises sub-byte detection (FR-11) and count detection (FR-9) at once. The
+samples are produced by `scma/generate.py`, the authoritative source for their
+bytes.
+
+Layout (all multi-byte integers little-endian):
+
+| Offset | Size | Field | Role | Notes |
+|---|---|---|---|---|
+| 0 | 4 | `magic` | magic | ASCII `SCMA` |
+| 4 | 1 | `flags` | flags | high five bits constant `0b10100`, low three bits vary |
+| 5 | 1 | `count` | count | number of records that follow |
+
+Each record that follows the header is a fixed four bytes:
+
+| Size | Field | Role | Notes |
+|---|---|---|---|
+| 2 | `id` | enum | little-endian record id |
+| 2 | `value` | payload | little-endian record value |
+
+### sdlp (statistical inference)
+
+A small controlled format authored for the Step 5 statistical inference tests.
+It exercises derived-length detection (FR-9) and checksum detection (FR-10): a
+length field governs a variable payload, and a trailing CRC-32 covers everything
+before it. The samples are produced by `sdlp/generate.py`, the authoritative
+source for their bytes.
+
+Layout (all multi-byte integers little-endian):
+
+| Offset | Size | Field | Role | Notes |
+|---|---|---|---|---|
+| 0 | 4 | `magic` | magic | ASCII `SDLP` |
+| 4 | 2 | `length` | length | byte length of `payload`, little-endian |
+| `length` | `payload` | payload | opaque payload bytes |
+| 4 | `crc32` | checksum | CRC-32 over every byte before this field |
+
+### stot (statistical inference)
+
+A small controlled format authored for the Step 5 statistical inference tests.
+It exercises total-length detection (FR-9): a header field whose value equals the
+whole file size. The samples are produced by `stot/generate.py`, the
+authoritative source for their bytes.
+
+Layout (all multi-byte integers little-endian):
+
+| Offset | Size | Field | Role | Notes |
+|---|---|---|---|---|
+| 0 | 4 | `magic` | magic | ASCII `STOT` |
+| 4 | 4 | `total_len` | length | the whole file size in bytes, this field included |
+| `total_len - 8` | `payload` | payload | opaque payload bytes to the end |
