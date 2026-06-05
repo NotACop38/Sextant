@@ -24,5 +24,10 @@ sextant-ir.workspace = true
 # provider stays a deliberate choice made higher up (the CLI's `llm` feature).
 sextant-llm.workspace = true
 
+[dev-dependencies]
+# Property-based tests for the parse invariants and resource limits (FR-24,
+# NFR-2). Used only by the test suite; the engine itself has no test deps.
+proptest.workspace = true
+
 [lints]
 workspace = true

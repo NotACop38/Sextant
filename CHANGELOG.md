@@ -103,3 +103,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validity, or role and type accuracy drop below their thresholds. The
   statistics-only corpus run clears the PRD Section 15 targets (field-boundary F1
   at least 0.85, perfection at least 0.5, parser validity 100%).
+- Robustness and security hardening (Step 13, NFR-1, NFR-2, FR-24): `cargo-fuzz`
+  targets for every input-facing component, namely ingestion, the executor, the
+  statistical inference pass, capture parsing, and each of the four exporters
+  (Kaitai, ImHex, Wireshark, and 010), sharing an arbitrary IR generator that
+  stresses hostile field names, unusual widths, dangling references, and
+  oversized sizes. Each target ran its budget with zero crashes or hangs.
+- `proptest`-based property tests for the parse invariants (a parse never
+  overruns the sample; a length or count field always matches what it governs in
+  a valid parse) and for the resource bounds (recursion depth, array length,
+  total field count, total work, and the wall-clock timeout each stop a runaway
+  parse with a localized failure rather than a crash, hang, or unbounded
+  allocation).
+- A scheduled `Fuzz` CI workflow that runs every fuzz target on a nightly cron
+  (with a shorter smoke run on pull requests that touch the fuzzed crates) and
+  fails on any recorded crash artifact, plus a `cargo-audit` job that checks the
+  workspace and fuzz lockfiles against the RustSec advisory database (NFR-10).
