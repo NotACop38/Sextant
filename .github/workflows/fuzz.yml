@@ -74,8 +74,14 @@ jobs:
           fi
       - name: Run the fuzzer
         working-directory: fuzz
+        # Pin the build target to the gnu triple. The prebuilt cargo-fuzz binary
+        # is a musl build, so cargo-fuzz would otherwise default the fuzz target
+        # to x86_64-unknown-linux-musl, which is not installed and links libc
+        # statically (incompatible with the address sanitizer). The gnu target
+        # is the runner's host triple and is dynamically linked.
         run: >-
-          cargo +nightly fuzz run ${{ matrix.target }} --
+          cargo +nightly fuzz run ${{ matrix.target }}
+          --target x86_64-unknown-linux-gnu --
           -max_total_time=${{ steps.budget.outputs.seconds }}
           -rss_limit_mb=4096
       - name: Crash-corpus check
