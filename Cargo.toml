@@ -8,6 +8,9 @@ members = [
     "sextant-cli",
     "bench",
 ]
+# The fuzz crate depends on libfuzzer-sys and builds only on nightly with the
+# `cargo fuzz` tooling, so it is kept out of the stable workspace build.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.0"

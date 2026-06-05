@@ -1,0 +1,107 @@
+{
+  "name": "tlv",
+  "endianness": "little",
+  "metadata": {
+    "description": "Sextant custom TLV container: a four-byte magic, a version byte, a record count, and that many records, each a tag byte, a little-endian length, and a value of that length. Hand-authored ground truth matching corpus/tlv.",
+    "source": "Authored by hand for the Sextant project to match corpus/tlv/generate.py."
+  },
+  "root": {
+    "fields": [
+      {
+        "name": "magic",
+        "kind": { "type": "bytes" },
+        "size": { "rule": "fixed", "bytes": 4 },
+        "role": "magic",
+        "constraints": [
+          { "constant": { "value": "53544c56" } }
+        ],
+        "confidence": 1.0,
+        "evidence": {
+          "detector": "hand-authored",
+          "notes": ["The four ASCII bytes STLV begin every container."]
+        }
+      },
+      {
+        "name": "version",
+        "kind": { "type": "integer", "width": 1, "signed": "unsigned" },
+        "role": "version",
+        "constraints": [
+          { "constant": { "value": "01" } }
+        ],
+        "confidence": 1.0,
+        "evidence": {
+          "detector": "hand-authored",
+          "notes": ["The format version, always 1 in the corpus."]
+        }
+      },
+      {
+        "name": "record_count",
+        "kind": { "type": "integer", "width": 1, "signed": "unsigned" },
+        "role": "count",
+        "confidence": 1.0,
+        "evidence": {
+          "detector": "hand-authored",
+          "notes": ["How many records follow the header."]
+        }
+      },
+      {
+        "name": "records",
+        "kind": {
+          "type": "array",
+          "count": { "rule": "from_field", "count_field": "record_count" },
+          "element": {
+            "name": "record",
+            "kind": {
+              "type": "struct",
+              "structure": {
+                "fields": [
+                  {
+                    "name": "tag",
+                    "kind": { "type": "integer", "width": 1, "signed": "unsigned" },
+                    "role": "enum",
+                    "confidence": 0.9,
+                    "evidence": {
+                      "detector": "hand-authored",
+                      "notes": ["A one-byte record type tag."]
+                    }
+                  },
+                  {
+                    "name": "length",
+                    "kind": { "type": "integer", "width": 2, "signed": "unsigned" },
+                    "role": "length",
+                    "confidence": 1.0,
+                    "evidence": {
+                      "detector": "hand-authored",
+                      "notes": ["Little-endian byte length of the value that follows."]
+                    }
+                  },
+                  {
+                    "name": "value",
+                    "kind": { "type": "bytes" },
+                    "size": { "rule": "derived", "length_field": "length" },
+                    "role": "payload",
+                    "confidence": 0.95,
+                    "evidence": {
+                      "detector": "hand-authored",
+                      "notes": ["Opaque value bytes sized by the preceding length field."]
+                    }
+                  }
+                ]
+              }
+            },
+            "confidence": 1.0,
+            "evidence": {
+              "detector": "hand-authored",
+              "notes": ["One TLV record: a tag, a length, and the value bytes."]
+            }
+          }
+        },
+        "confidence": 1.0,
+        "evidence": {
+          "detector": "hand-authored",
+          "notes": ["The records that follow the header, one per record_count."]
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,77 @@
+//! Resource limits for the executor (FR-24, NFR-2).
+//!
+//! Sextant parses untrusted, potentially hostile input, so the executor must
+//! never panic, hang, or allocate without bound on any input. [`Limits`] caps
+//! recursion depth, array length, the total number of parsed field instances
+//! (which bounds memory), a unit of total work (which bounds time without a
+//! clock), and an optional wall-clock deadline. When any cap is reached the
+//! executor stops with a localized failure rather than continuing.
+
+use std::time::Duration;
+
+/// Caps that bound the executor's recursion, allocation, and run time (FR-24).
+///
+/// The defaults are generous enough for the corpus formats yet still bound every
+/// dimension, so even an adversarial IR or sample cannot exhaust resources. A
+/// caller can tighten any field; fuzzing, for example, drops [`Limits::timeout`]
+/// to stay deterministic and relies on [`Limits::max_steps`] instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Limits {
+    /// The deepest nesting of structures and arrays the executor will enter.
+    /// Reaching it stops the parse rather than recursing further.
+    pub max_depth: usize,
+    /// The most elements a single array may produce before the parse stops.
+    pub max_array_elements: usize,
+    /// The most field instances a single execution may produce in total. This
+    /// is the primary bound on memory, since each instance is a small record.
+    pub max_total_fields: usize,
+    /// The most units of work a single execution may perform. One unit is
+    /// charged per field parsed and per byte scanned while searching for a
+    /// delimiter, so this bounds run time even when the wall-clock cap is off.
+    pub max_steps: u64,
+    /// An optional wall-clock cap. When set, the executor stops once the
+    /// deadline passes. It is left unset for deterministic fuzzing.
+    pub timeout: Option<Duration>,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_depth: 64,
+            max_array_elements: 1 << 24,
+            max_total_fields: 1 << 20,
+            max_steps: 50_000_000,
+            timeout: Some(Duration::from_secs(5)),
+        }
+    }
+}
+
+impl Limits {
+    /// Limits suited to fuzzing: no wall-clock cap, so runs are deterministic,
+    /// with tight work, depth, array, and field caps so any single input
+    /// finishes quickly regardless of content.
+    #[must_use]
+    pub fn for_fuzzing() -> Self {
+        Self {
+            max_depth: 32,
+            max_array_elements: 1 << 16,
+            max_total_fields: 1 << 16,
+            max_steps: 2_000_000,
+            timeout: None,
+        }
+    }
+
+    /// Set the wall-clock timeout (builder style).
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Set the recursion-depth cap (builder style).
+    #[must_use]
+    pub fn with_max_depth(mut self, max_depth: usize) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+}
