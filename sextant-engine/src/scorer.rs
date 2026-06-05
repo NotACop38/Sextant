@@ -19,13 +19,14 @@
 //! sample but fails another cannot hide behind the average. This realizes the
 //! "penalize overfitting" requirement directly in the aggregate.
 
+use serde::{Deserialize, Serialize};
 use sextant_ir::Format;
 
 use crate::executor::{Execution, ParseFailure, execute};
 use crate::limits::Limits;
 
 /// The relative weight of each dimension in the overall fit score.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ScoreWeights {
     /// Weight of the coverage dimension.
     pub coverage: f64,
@@ -53,7 +54,7 @@ impl ScoreWeights {
 
 /// The fit of an IR over a sample set: an overall score in 0 to 1 plus the
 /// per-dimension and per-sample breakdown (FR-23).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Score {
     /// The overall weighted fit, in the range 0 to 1.
     pub overall: f64,
@@ -70,7 +71,7 @@ pub struct Score {
 }
 
 /// The fit of an IR against one sample.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SampleScore {
     /// The sample's index in the set.
     pub index: usize,

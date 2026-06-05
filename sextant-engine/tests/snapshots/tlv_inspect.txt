@@ -1,0 +1,21 @@
+Format: tlv (fit score 1.000)
+Sample: 21 bytes
+
+  Offset    Size  Name                      Role        Type              Value                   Confidence
+--------  ------  ------------------------  ----------  ----------------  ----------------------  ----------
+       0       4  magic                     magic       bytes             53 54 4c 56                   1.00
+       4       1  version                   version     u8                1 (0x1)                       1.00
+       5       1  record_count              count       u8                2 (0x2)                       1.00
+       6      15  records                   unknown     array             [2 elements]                  1.00
+       6       8    record                  unknown     struct            {3 fields}                    1.00
+       6       1      tag                   enum        u8                1 (0x1)                       0.90
+       7       2      length                length      u16               5 (0x5)                       1.00
+       9       5      value                 payload     bytes             68 65 6c 6c 6f                0.95
+      14       7    record                  unknown     struct            {3 fields}                    1.00
+      14       1      tag                   enum        u8                2 (0x2)                       0.90
+      15       2      length                length      u16               4 (0x4)                       1.00
+      17       4      value                 payload     bytes             2a 00 00 00                   0.95
+
+Hex:
+00000000  53 54 4c 56 01 02 01 05  00 68 65 6c 6c 6f 02 04  |STLV.....hello..|
+00000010  00 2a 00 00 00                                    |.*...|

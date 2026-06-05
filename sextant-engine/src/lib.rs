@@ -54,6 +54,7 @@ pub mod chunk;
 pub mod detect;
 pub mod executor;
 pub mod ingest;
+pub mod inspect;
 pub mod limits;
 pub mod orchestrate;
 pub mod refine;
@@ -76,9 +77,10 @@ pub use ingest::{
     DEFAULT_MAX_BYTES_PER_SAMPLE, DEFAULT_MAX_TOTAL_BYTES, IngestError, IngestOptions, Notice,
     Provenance, Sample, SampleSet, ingest,
 };
+pub use inspect::{InspectOptions, render};
 pub use limits::Limits;
 pub use orchestrate::{InferenceOptions, infer};
 pub use refine::{RefineOutcome, RefineStep, Refinement, refine};
-pub use report::{DraftReport, FieldMapEntry, RunMetadata};
+pub use report::{FieldMapEntry, REPORT_SCHEMA_VERSION, Report, RunMetadata};
 pub use scorer::{SampleScore, Score, ScoreWeights, score, score_with};
 pub use stats::{ByteHistogram, ngram_counts, shannon_entropy, windowed_entropy};

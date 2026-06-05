@@ -59,3 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the `bench` crate, with a test confirming the statistics-only pipeline
   clears the PRD Section 15 file-format targets (F1 at least 0.85, perfection at
   least 0.5).
+- A machine-readable JSON report (FR-34): the chosen IR, per-field confidence
+  and evidence, the fit-score breakdown, the per-sample breakdown, the
+  refinement history, and run metadata, with a versioned JSON Schema committed
+  at `schemas/report.schema.json` that every emitted report validates against.
+  `sextant infer --out <file>` writes the report.
+- `sextant inspect <report.json> --sample <file>` (FR-35): an annotated hex view
+  that renders a sample through a report, showing each field's offset, size,
+  name, role, type, decoded value, and confidence, followed by a hex dump, with
+  optional `--color` highlighting per field.

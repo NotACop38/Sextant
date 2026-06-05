@@ -173,16 +173,16 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Define the report JSON structure and commit a JSON Schema for it.
-- [ ] Serialize the chosen IR, per-field confidence and evidence, the score breakdown, the refinement history, and run metadata into the report.
-- [ ] Implement `sextant inspect <report.json> --sample <file>`: an annotated hex view with offsets, sizes, names, roles, types, values, and confidence, with optional color.
-- [ ] Add tests validating reports against the schema and snapshot tests for `inspect` output.
+- [x] Define the report JSON structure and commit a JSON Schema for it.
+- [x] Serialize the chosen IR, per-field confidence and evidence, the score breakdown, the refinement history, and run metadata into the report.
+- [x] Implement `sextant inspect <report.json> --sample <file>`: an annotated hex view with offsets, sizes, names, roles, types, values, and confidence, with optional color.
+- [x] Add tests validating reports against the schema and snapshot tests for `inspect` output.
 
 ### Acceptance criteria
 
-- [ ] Reports validate against the committed schema.
-- [ ] `inspect` renders a readable annotated hex view for a corpus sample.
-- [ ] Snapshot tests cover the report and the `inspect` rendering.
+- [x] Reports validate against the committed schema.
+- [x] `inspect` renders a readable annotated hex view for a corpus sample.
+- [x] Snapshot tests cover the report and the `inspect` rendering.
 
 ---
 

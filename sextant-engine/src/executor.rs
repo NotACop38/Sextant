@@ -25,6 +25,7 @@
 
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
 use sextant_ir::{
     ChecksumAlgorithm, Constraint, CountRule, Endianness, Field, FieldOffset, Format, Kind,
     RangeAnchor, Role, SizeRule, StringEncoding,
@@ -120,7 +121,7 @@ pub enum Value {
 }
 
 /// A localized parse failure: where it happened and why (FR-20).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParseFailure {
     /// The byte offset at which the parse stopped.
     pub offset: usize,
@@ -129,7 +130,8 @@ pub struct ParseFailure {
 }
 
 /// Why a parse stopped at a localized failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FailureReason {
     /// A field needed more bytes than the buffer or parent had left.
     UnexpectedEndOfInput {
