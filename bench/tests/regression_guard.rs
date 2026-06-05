@@ -74,6 +74,6 @@ fn readme_benchmark_block_matches_harness() {
     assert_eq!(
         block,
         expected.trim(),
-        "README benchmark block is stale. Regenerate it with `cargo run -p bench -- --write-readme`."
+        "README benchmark block is stale. Regenerate it with `cargo run -p sextant-bench -- --write-readme`."
     );
 }

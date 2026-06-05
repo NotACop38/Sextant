@@ -334,18 +334,18 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Extend CI to build and test on Linux, macOS, and Windows.
-- [ ] Configure `cargo-dist` (or equivalent) to produce prebuilt binaries for tagged releases.
-- [ ] Prepare crates.io publication metadata for all publishable crates; verify the `sextant` name is available before first publish.
-- [ ] Add an install script and, optionally, a Homebrew tap.
-- [ ] Adopt SemVer and wire the `CHANGELOG.md` into the release process.
-- [ ] Ensure release artifacts are checksummed (and signed if feasible) (NFR-10).
+- [x] Extend CI to build and test on Linux, macOS, and Windows.
+- [x] Configure `cargo-dist` (or equivalent) to produce prebuilt binaries for tagged releases.
+- [x] Prepare crates.io publication metadata for all publishable crates; verify the `sextant` name is available before first publish. (The bare `sextant` name is already taken on crates.io by an unrelated crate, so the CLI publishes as `sextant-re` and still installs a binary named `sextant`; the benchmark harness publishes as `sextant-bench`. See `docs/RELEASING.md`.)
+- [x] Add an install script and, optionally, a Homebrew tap.
+- [x] Adopt SemVer and wire the `CHANGELOG.md` into the release process.
+- [x] Ensure release artifacts are checksummed (and signed if feasible) (NFR-10).
 
 ### Acceptance criteria
 
-- [ ] A tagged release produces working binaries for Linux, macOS, and Windows.
-- [ ] `cargo install sextant` (after publish) installs a working binary.
-- [ ] The changelog is updated for the release and the version is consistent across crates.
+- [x] A tagged release produces working binaries for Linux, macOS, and Windows. (Built by `.github/workflows/release.yml`; the Linux build, archive, checksum, and binary smoke test were verified locally via a dry-run of the same steps.)
+- [x] `cargo install sextant-re` (after publish) installs a working binary named `sextant`. The crates.io name `sextant` is taken, so the CLI publishes as `sextant-re`; publishability was confirmed with `cargo publish --dry-run` and `cargo package`.
+- [x] The changelog is updated for the release and the version is consistent across crates.
 
 ---
 

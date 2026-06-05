@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-05
+
 ### Added
 
 - Initial Cargo workspace scaffolding: the `sextant-ir`, `sextant-engine`,
@@ -96,9 +98,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured threshold.
 - The benchmark harness (`bench` crate) computes those metrics and assembles a
   machine-readable report; the README benchmark block is generated from it with
-  `cargo run -p bench -- --write-readme` (and a test fails if the block drifts),
+  `cargo run -p sextant-bench -- --write-readme` (and a test fails if the block drifts),
   so the published numbers are never hand-written.
-- A benchmark regression guard in CI (`cargo run -p bench -- --check`) and in the
+- A benchmark regression guard in CI (`cargo run -p sextant-bench -- --check`) and in the
   test suite that fails the build if field-boundary F1, perfection rate, parser
   validity, or role and type accuracy drop below their thresholds. The
   statistics-only corpus run clears the PRD Section 15 targets (field-boundary F1
@@ -119,3 +121,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (with a shorter smoke run on pull requests that touch the fuzzed crates) and
   fails on any recorded crash artifact, plus a `cargo-audit` job that checks the
   workspace and fuzz lockfiles against the RustSec advisory database (NFR-10).
+- Packaging and distribution (Step 15, NFR-5, NFR-10): CI now builds, lints, and
+  tests on Linux, macOS, and Windows via a platform matrix, and a `.gitattributes`
+  normalizes text to LF so cross-platform builds and output comparisons stay
+  stable.
+- A tag-driven `Release` workflow (the cargo-dist equivalent) that verifies the
+  tag matches the workspace version, builds the `sextant` binary natively for
+  `x86_64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, and
+  `x86_64-pc-windows-msvc`, packages each build with the licenses and changelog,
+  writes a per-archive SHA-256 checksum and an aggregate `SHA256SUMS` manifest,
+  and publishes them to a GitHub Release with notes drawn from this changelog.
+- crates.io publication metadata for every publishable crate. Because the bare
+  name `sextant` is already taken, the CLI is published as `sextant-re` (it still
+  installs a binary named `sextant`) and the benchmark harness is published as
+  `sextant-bench` (its library name stays `bench`). The shared workspace version
+  keeps all crates consistent. `docs/RELEASING.md` documents the SemVer policy,
+  the changelog flow, the crate names, and the publish order.
+- Install scripts: `scripts/install.sh` (Linux and macOS) and
+  `scripts/install.ps1` (Windows) download the release archive for the host
+  platform, verify its checksum, and install the `sextant` binary without
+  requiring a compiler. A Homebrew formula template lives at
+  `packaging/homebrew/sextant.rb`.
+
+[Unreleased]: https://github.com/NotACop38/Sextant/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/NotACop38/Sextant/releases/tag/v0.1.0

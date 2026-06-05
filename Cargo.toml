@@ -13,7 +13,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.85.0"
 license = "MIT OR Apache-2.0"
@@ -31,10 +31,11 @@ glob = "0.3"
 proptest = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sextant-ir = { path = "sextant-ir", version = "0.0.0" }
-sextant-engine = { path = "sextant-engine", version = "0.0.0" }
-sextant-llm = { path = "sextant-llm", version = "0.0.0" }
-sextant-export = { path = "sextant-export", version = "0.0.0" }
+sextant-ir = { path = "sextant-ir", version = "0.1.0" }
+sextant-engine = { path = "sextant-engine", version = "0.1.0" }
+sextant-llm = { path = "sextant-llm", version = "0.1.0" }
+sextant-export = { path = "sextant-export", version = "0.1.0" }
+sextant-bench = { path = "bench", version = "0.1.0" }
 
 [workspace.lints.rust]
 # The parsing core handles untrusted input, so unsafe is denied by default
