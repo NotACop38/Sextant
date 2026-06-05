@@ -68,3 +68,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that renders a sample through a report, showing each field's offset, size,
   name, role, type, decoded value, and confidence, followed by a hex dump, with
   optional `--color` highlighting per field.
+- Packet-capture ingestion in `sextant-engine` (FR-2): a native, dependency-free
+  reader for classic pcap (microsecond and nanosecond, either byte order) and
+  pcapng, extracting transport payloads by transport and port over Ethernet, raw
+  IP, BSD loopback, and Linux cooked-capture link layers carrying IPv4 or IPv6
+  and TCP or UDP, each payload carrying its direction, flow, timestamp, and
+  capture offset.
+- Protocol inference: message clustering that separates message types by the most
+  discriminating byte, request and response association on a flow, and detection
+  of the protocol-oriented field semantics (message type, sequence or transaction
+  id, and remaining length). The assembled hypothesis is verified against every
+  message and is never chosen over the statistics-only baseline when it scores
+  lower (the non-regression invariant, FR-26). New `message_type` and `sequence`
+  field roles back these semantics.
+- `sextant infer <capture> --transport <tcp|udp> --port <N>` reads packet
+  captures, prints the clustered field map and request/response pairing, and
+  writes a report whose Wireshark dissector binds to the capture's port, the
+  primary output for the protocol track.
+- Modbus/TCP (the protocol showcase) and a custom toy request/response protocol
+  added to the corpus, each with a generated capture, a `generate.py` source, and
+  a hand-verified ground truth.

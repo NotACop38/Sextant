@@ -254,17 +254,17 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Implement pcap and pcapng reading and payload extraction by transport and port (FR-2).
-- [ ] Implement message clustering and request and response association.
-- [ ] Add protocol-oriented field semantics (message type, sequence number, length).
-- [ ] Add Modbus/TCP (the protocol showcase) and a custom toy protocol to the corpus, each with captures and ground truth.
-- [ ] Wire the Wireshark exporter as the primary output for this track.
+- [x] Implement pcap and pcapng reading and payload extraction by transport and port (FR-2).
+- [x] Implement message clustering and request and response association.
+- [x] Add protocol-oriented field semantics (message type, sequence number, length).
+- [x] Add Modbus/TCP (the protocol showcase) and a custom toy protocol to the corpus, each with captures and ground truth.
+- [x] Wire the Wireshark exporter as the primary output for this track.
 
 ### Acceptance criteria
 
-- [ ] `sextant infer capture.pcap --transport tcp --port <N>` produces a field map for the Modbus/TCP and toy protocol captures.
-- [ ] A generated Wireshark dissector decodes the Modbus/TCP and toy protocol captures.
-- [ ] Message clustering separates distinct message types on the toy protocol.
+- [x] `sextant infer capture.pcap --transport tcp --port <N>` produces a field map for the Modbus/TCP and toy protocol captures.
+- [x] A generated Wireshark dissector decodes the Modbus/TCP and toy protocol captures.
+- [x] Message clustering separates distinct message types on the toy protocol.
 
 ---
 

@@ -67,6 +67,8 @@ pub mod ingest;
 pub mod inspect;
 pub mod limits;
 pub mod orchestrate;
+pub mod pcap;
+pub mod protocol;
 pub mod refine;
 pub mod report;
 pub mod scorer;
@@ -91,6 +93,14 @@ pub use ingest::{
 pub use inspect::{InspectOptions, render};
 pub use limits::Limits;
 pub use orchestrate::{InferenceOptions, infer, infer_with_llm};
+pub use pcap::{
+    Direction, Endpoint, ExtractOptions, ExtractedMessage, Flow, PcapError, Transport,
+    extract_messages,
+};
+pub use protocol::{
+    Association, Cluster, Clustering, Discriminant, ProtocolInference, associate, cluster_messages,
+    infer_protocol,
+};
 pub use refine::{RefineOutcome, RefineStep, Refinement, refine};
 pub use report::{FieldMapEntry, REPORT_SCHEMA_VERSION, Report, RunMetadata};
 pub use scorer::{SampleScore, Score, ScoreWeights, score, score_with};

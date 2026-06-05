@@ -490,6 +490,8 @@ fn role_word(role: sextant_ir::Role) -> &'static str {
         Role::Length => "length",
         Role::Count => "count",
         Role::Offset => "offset",
+        Role::MessageType => "message_type",
+        Role::Sequence => "sequence",
         Role::Checksum => "checksum",
         Role::Timestamp => "timestamp",
         Role::Flags => "flags",

@@ -444,6 +444,8 @@
         "length",
         "count",
         "offset",
+        "message_type",
+        "sequence",
         "checksum",
         "timestamp",
         "flags",
