@@ -1,0 +1,15 @@
+[package]
+name = "sextant-ir"
+description = "Format Hypothesis IR types, serialization, and validation for Sextant."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true

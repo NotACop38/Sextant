@@ -1,0 +1,2 @@
+# Keep clippy's suggestions within the project's minimum supported Rust version.
+msrv = "1.85.0"

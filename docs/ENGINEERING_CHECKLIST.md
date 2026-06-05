@@ -40,29 +40,29 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Initialize the Git repository (private for now; public flip is Step 16).
-- [ ] Create a Cargo workspace with the adopted crates: `sextant-ir`, `sextant-engine`, `sextant-llm`, `sextant-export`, `sextant-cli`, plus an `xtask` or `bench` harness.
-- [ ] Add `rust-toolchain.toml` pinning Rust 2024 edition and MSRV 1.85.0.
-- [ ] Add `Cargo.toml` workspace metadata: description, repository URL, keywords, categories, and license fields.
-- [ ] Commit `README.md` (already drafted).
-- [ ] Commit `docs/PRD.md` and `docs/ENGINEERING_CHECKLIST.md` (this file).
-- [ ] Add `LICENSE-MIT` and `LICENSE-APACHE` (dual license).
-- [ ] Add `.gitignore` for Rust (`/target`, caches, editor files, local secrets).
-- [ ] Add `rustfmt.toml` and `clippy` configuration; enable warnings-as-errors in CI.
-- [ ] Add `deny.toml` for `cargo-deny` (licenses and advisories).
-- [ ] Add a minimal `sextant-cli` binary that supports `--version` and `--help` via `clap`, with `infer`, `inspect`, `export`, and `bench` subcommands stubbed to a not-yet-implemented message.
-- [ ] Add the test-corpus directory structure (for example `corpus/<format>/samples/` and `corpus/<format>/ground_truth.json`) with a short `corpus/README.md` describing the format and provenance fields. Seed it with one trivial controlled format (a custom TLV) including two or three samples and a ground-truth file.
-- [ ] Add a GitHub Actions CI workflow: build, test, clippy, fmt check, and `cargo-deny`, on Linux at minimum (macOS and Windows can be added in Step 15).
-- [ ] Add `CONTRIBUTING.md` (brief), `SECURITY.md`, `CODE_OF_CONDUCT.md`, and issue and pull-request templates.
-- [ ] Add a `CHANGELOG.md` seeded with an Unreleased section.
+- [x] Initialize the Git repository (private for now; public flip is Step 16).
+- [x] Create a Cargo workspace with the adopted crates: `sextant-ir`, `sextant-engine`, `sextant-llm`, `sextant-export`, `sextant-cli`, plus an `xtask` or `bench` harness.
+- [x] Add `rust-toolchain.toml` pinning Rust 2024 edition and MSRV 1.85.0.
+- [x] Add `Cargo.toml` workspace metadata: description, repository URL, keywords, categories, and license fields.
+- [x] Commit `README.md` (already drafted).
+- [x] Commit `docs/PRD.md` and `docs/ENGINEERING_CHECKLIST.md` (this file).
+- [x] Add `LICENSE-MIT` and `LICENSE-APACHE` (dual license).
+- [x] Add `.gitignore` for Rust (`/target`, caches, editor files, local secrets).
+- [x] Add `rustfmt.toml` and `clippy` configuration; enable warnings-as-errors in CI.
+- [x] Add `deny.toml` for `cargo-deny` (licenses and advisories).
+- [x] Add a minimal `sextant-cli` binary that supports `--version` and `--help` via `clap`, with `infer`, `inspect`, `export`, and `bench` subcommands stubbed to a not-yet-implemented message.
+- [x] Add the test-corpus directory structure (for example `corpus/<format>/samples/` and `corpus/<format>/ground_truth.json`) with a short `corpus/README.md` describing the format and provenance fields. Seed it with one trivial controlled format (a custom TLV) including two or three samples and a ground-truth file.
+- [x] Add a GitHub Actions CI workflow: build, test, clippy, fmt check, and `cargo-deny`, on Linux at minimum (macOS and Windows can be added in Step 15).
+- [x] Add `CONTRIBUTING.md` (brief), `SECURITY.md`, `CODE_OF_CONDUCT.md`, and issue and pull-request templates.
+- [x] Add a `CHANGELOG.md` seeded with an Unreleased section.
 
 ### Acceptance criteria
 
-- [ ] `cargo build` and `cargo test` succeed on a clean checkout.
-- [ ] `sextant --version` and `sextant --help` work and list the four subcommands.
-- [ ] `docs/PRD.md` and `docs/ENGINEERING_CHECKLIST.md` are committed and linked from the README.
-- [ ] CI runs and passes build, test, clippy, fmt, and `cargo-deny` on Linux.
-- [ ] The seed corpus format loads: a test reads its samples and ground-truth file without error.
+- [x] `cargo build` and `cargo test` succeed on a clean checkout.
+- [x] `sextant --version` and `sextant --help` work and list the four subcommands.
+- [x] `docs/PRD.md` and `docs/ENGINEERING_CHECKLIST.md` are committed and linked from the README.
+- [x] CI runs and passes build, test, clippy, fmt, and `cargo-deny` on Linux.
+- [x] The seed corpus format loads: a test reads its samples and ground-truth file without error.
 
 ---
 
