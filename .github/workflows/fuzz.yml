@@ -53,7 +53,15 @@ jobs:
         with:
           toolchain: nightly
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        # Install a prebuilt binary rather than building from source. Compiling
+        # cargo-fuzz with `cargo install --locked` pins an old transitive
+        # dependency (rustix 0.36.5) that no longer builds on the current
+        # nightly compiler, so a from-source install fails before any fuzzing
+        # runs. A prebuilt binary keeps the fuzz tool independent of the
+        # project toolchain, the same approach the cargo-audit job uses.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - name: Choose the per-target budget
         id: budget
         # A long budget on the nightly schedule, a short smoke run on a pull
