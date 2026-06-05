@@ -157,6 +157,8 @@ pub(crate) fn role_label(role: Option<Role>) -> String {
         Some(Role::Length) => "length",
         Some(Role::Count) => "count",
         Some(Role::Offset) => "offset",
+        Some(Role::MessageType) => "message type",
+        Some(Role::Sequence) => "sequence",
         Some(Role::Checksum) => "checksum",
         Some(Role::Timestamp) => "timestamp",
         Some(Role::Flags) => "flags",

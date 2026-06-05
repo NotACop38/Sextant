@@ -68,12 +68,41 @@ pub(crate) fn export(format: &Format) -> String {
     out.push_str(&body);
     out.push_str("end\n\n");
 
-    out.push_str("-- To attach this dissector, register it with a DissectorTable, for example:\n");
-    let _ = writeln!(
-        out,
-        "-- DissectorTable.get(\"udp.port\"):add(0, proto_{proto})"
-    );
+    // When the IR was inferred from a capture, the transport and port are
+    // recorded in the format metadata (Step 11). Bind the dissector to that port
+    // so it decodes the capture as soon as the script loads. Otherwise leave a
+    // commented example, since a file format has no port to attach to.
+    match protocol_binding(format) {
+        Some((transport, port)) => {
+            out.push_str("-- Inferred from a capture: bound to its transport and port.\n");
+            let _ = writeln!(
+                out,
+                "DissectorTable.get(\"{transport}.port\"):add({port}, proto_{proto})"
+            );
+        }
+        None => {
+            out.push_str(
+                "-- To attach this dissector, register it with a DissectorTable, for example:\n",
+            );
+            let _ = writeln!(
+                out,
+                "-- DissectorTable.get(\"udp.port\"):add(0, proto_{proto})"
+            );
+        }
+    }
     out
+}
+
+/// The transport and port a protocol IR was inferred from, when the metadata
+/// records them (Step 11). Only `tcp` and `udp` name a Wireshark port table.
+fn protocol_binding(format: &Format) -> Option<(&'static str, u16)> {
+    let transport = match format.metadata.extra.get("protocol.transport")?.as_str() {
+        "tcp" => "tcp",
+        "udp" => "udp",
+        _ => return None,
+    };
+    let port: u16 = format.metadata.extra.get("protocol.port")?.parse().ok()?;
+    Some((transport, port))
 }
 
 /// Mutable state for the recursive code generation.
@@ -630,6 +659,38 @@ mod tests {
         let lua = export(&format_of(vec![field], BTreeMap::new()));
         // The dissector scans for the terminator rather than reading to end.
         assert!(lua.contains(":bytes():tohex() == \"00\""), "got:\n{lua}");
+    }
+
+    #[test]
+    fn protocol_metadata_binds_the_dissector_to_its_port() {
+        // A format inferred from a capture records its transport and port, so the
+        // exporter emits an active DissectorTable registration (Step 11).
+        let mut format = format_of(
+            vec![
+                Field::new(Kind::Bytes, Confidence::CERTAIN)
+                    .with_name("payload")
+                    .with_size(SizeRule::ToEnd),
+            ],
+            BTreeMap::new(),
+        );
+        format
+            .metadata
+            .extra
+            .insert("protocol.transport".to_owned(), "tcp".to_owned());
+        format
+            .metadata
+            .extra
+            .insert("protocol.port".to_owned(), "502".to_owned());
+        let lua = export(&format);
+        assert!(
+            lua.contains("DissectorTable.get(\"tcp.port\"):add(502, proto_t)"),
+            "got:\n{lua}"
+        );
+        // The binding is active, not the commented placeholder.
+        assert!(
+            !lua.contains("-- DissectorTable.get(\"udp.port\")"),
+            "got:\n{lua}"
+        );
     }
 
     #[test]

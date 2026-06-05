@@ -82,6 +82,11 @@ pub enum Role {
     Count,
     /// An offset that points at where another structure begins.
     Offset,
+    /// A message type or function code that discriminates protocol messages.
+    MessageType,
+    /// A sequence, transaction, or request identifier that orders or pairs
+    /// protocol messages.
+    Sequence,
     /// A checksum or hash value.
     Checksum,
     /// A timestamp.

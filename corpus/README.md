@@ -30,8 +30,9 @@ origin in the `provenance` block of `ground_truth.json`:
 ## ground_truth.json
 
 Each `ground_truth.json` describes a format independently of Sextant's internal
-representation, so the corpus stays stable as the engine evolves. The current
-schema records:
+representation, so the corpus stays stable as the engine evolves.
+
+For file formats the schema records:
 
 - `format`, `display_name`, `description`, and the default `endianness`;
 - a `provenance` block (see above);
@@ -39,6 +40,17 @@ schema records:
   fields, each giving a name, size, type, and role;
 - a `samples` list, each entry giving the file `path`, its `size` in bytes, and
   the number of records it contains.
+
+For protocols (entries with `"kind": "protocol"`) the schema instead records:
+
+- `format`, `display_name`, `description`, `transport`, and `port`;
+- a `provenance` block (see above);
+- a `message` block: the fields of one protocol message, each with a name,
+  offset, size, type, and role (including the protocol roles `message_type` and
+  `sequence`);
+- a `message_types` list mapping each message-type value to a name;
+- a `captures` list, each entry giving the capture `path` and how many messages,
+  requests, and responses it contains.
 
 ## Formats
 
@@ -142,3 +154,41 @@ Layout (all multi-byte integers little-endian):
 | 0 | 4 | `magic` | magic | ASCII `STOT` |
 | 4 | 4 | `total_len` | length | the whole file size in bytes, this field included |
 | `total_len - 8` | `payload` | payload | opaque payload bytes to the end |
+
+## Protocols
+
+Protocol entries hold packet captures (`.pcap`) rather than flat sample files.
+Inference reads them with a transport and port selector, for example
+`sextant infer samples/session_01.pcap --transport tcp --port 502`, which
+extracts the transport payloads, clusters them by message type, and infers a
+protocol structure. The captures are framed in Ethernet, IPv4, and TCP.
+
+### modbus (showcase)
+
+Modbus/TCP, the protocol showcase (PRD Section 15): a real industrial protocol
+with a public specification. The capture is a synthetic, spec-faithful exchange
+produced by `modbus/generate.py`, the authoritative source for its bytes. Each
+message is an MBAP header followed by a function code and data (all multi-byte
+integers big-endian), on TCP port 502:
+
+| Offset | Size | Field | Role | Notes |
+|---|---|---|---|---|
+| 0 | 2 | `transaction_id` | sequence | request id the response echoes |
+| 2 | 2 | `protocol_id` | reserved | always `0000` for Modbus |
+| 4 | 2 | `length` | length | number of following bytes (unit id, function, data) |
+| 6 | 1 | `unit_id` | reserved | server unit address |
+| 7 | 1 | `function_code` | message type | the operation: read coils, read holding registers, write single register |
+| 8 | to end | `data` | payload | function-specific bytes |
+
+### toy (custom)
+
+A small controlled request/response protocol authored for this project, produced
+by `toy/generate.py`. It exercises message type, sequence, and length at once
+(all multi-byte integers little-endian), on TCP port 9000:
+
+| Offset | Size | Field | Role | Notes |
+|---|---|---|---|---|
+| 0 | 1 | `message_type` | message type | one of PING (1), DATA (2), BYE (3) |
+| 1 | 2 | `sequence` | sequence | increments per request; the response echoes it |
+| 3 | 2 | `length` | length | byte length of `payload` |
+| `5` | `length` | `payload` | payload | opaque payload bytes |

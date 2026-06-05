@@ -201,6 +201,84 @@ fn export_with_an_unknown_format_is_an_export_error() {
 }
 
 #[test]
+fn infer_on_a_capture_produces_a_field_map_and_a_wireshark_dissector() {
+    // Step 11 acceptance: infer over a Modbus/TCP capture with a transport and
+    // port, then export a Wireshark dissector that decodes the capture.
+    let capture = corpus_dir("modbus/samples/session_01.pcap");
+    let report_path =
+        std::env::temp_dir().join(format!("sextant-modbus-{}.json", std::process::id()));
+
+    let infer = sextant()
+        .arg("infer")
+        .arg(&capture)
+        .arg("--transport")
+        .arg("tcp")
+        .arg("--port")
+        .arg("502")
+        .arg("--out")
+        .arg(&report_path)
+        .output()
+        .expect("run sextant infer on a capture");
+    assert!(
+        infer.status.success(),
+        "protocol infer should succeed, stderr: {}",
+        String::from_utf8_lossy(&infer.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&infer.stdout);
+    // The field map names the protocol-oriented roles.
+    assert!(stdout.contains("message type"), "stdout was: {stdout}");
+    assert!(stdout.contains("sequence"), "stdout was: {stdout}");
+    assert!(stdout.contains("length"), "stdout was: {stdout}");
+    assert!(
+        stdout.contains("Message clustering"),
+        "stdout was: {stdout}"
+    );
+
+    let export = sextant()
+        .arg("export")
+        .arg(&report_path)
+        .arg("--format")
+        .arg("wireshark")
+        .output()
+        .expect("run sextant export --format wireshark");
+    assert!(
+        export.status.success(),
+        "wireshark export should succeed, stderr: {}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    let dissector = String::from_utf8_lossy(&export.stdout);
+    // The dissector reads the inferred fields and binds to the capture's port,
+    // so loading it decodes the capture.
+    assert!(
+        dissector.contains("message_type"),
+        "dissector was: {dissector}"
+    );
+    assert!(
+        dissector.contains("DissectorTable.get(\"tcp.port\"):add(502"),
+        "the dissector should bind to tcp port 502: {dissector}"
+    );
+
+    let _ = std::fs::remove_file(&report_path);
+}
+
+#[test]
+fn infer_with_transport_but_no_port_is_an_input_error() {
+    let capture = corpus_dir("modbus/samples/session_01.pcap");
+    let output = sextant()
+        .arg("infer")
+        .arg(&capture)
+        .arg("--transport")
+        .arg("tcp")
+        .output()
+        .expect("run sextant infer with a transport but no port");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a transport without a port should exit with the PRD input-error code"
+    );
+}
+
+#[test]
 fn inspect_on_a_missing_report_is_an_input_error() {
     let output = sextant()
         .arg("inspect")

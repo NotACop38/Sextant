@@ -20,8 +20,9 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use sextant_engine::{
-    DEFAULT_MAX_BYTES_PER_SAMPLE, DEFAULT_MAX_TOTAL_BYTES, InferenceOptions, IngestOptions,
-    InspectOptions, Limits, Report, SampleSet, infer, ingest, render,
+    Clustering, DEFAULT_MAX_BYTES_PER_SAMPLE, DEFAULT_MAX_TOTAL_BYTES, ExtractOptions,
+    InferenceOptions, IngestOptions, InspectOptions, Limits, ProtocolInference, Report, SampleSet,
+    Transport, extract_messages, infer, infer_protocol, ingest, render,
 };
 use sextant_export::{ExportFormat, export};
 
@@ -67,6 +68,14 @@ enum Command {
         /// Wall-clock cap, in seconds, for executing the IR against each sample.
         #[arg(long, value_name = "SECONDS")]
         timeout: Option<u64>,
+        /// Treat the inputs as packet captures and extract this transport's
+        /// payloads (tcp or udp). Requires --port (FR-2).
+        #[arg(long, value_name = "TCP|UDP")]
+        transport: Option<String>,
+        /// The port that identifies the protocol in a capture. Requires
+        /// --transport (FR-2).
+        #[arg(long, value_name = "N")]
+        port: Option<u16>,
         /// Write the machine-readable JSON report to this path (FR-34).
         #[arg(long, value_name = "FILE")]
         out: Option<String>,
@@ -115,6 +124,8 @@ fn main() -> ExitCode {
             max_total_bytes,
             no_llm,
             timeout,
+            transport,
+            port,
             out,
         } => run_infer(
             &inputs,
@@ -123,6 +134,8 @@ fn main() -> ExitCode {
             max_total_bytes,
             no_llm,
             timeout,
+            transport.as_deref(),
+            port,
             out.as_deref(),
         ),
         Command::Inspect {
@@ -141,7 +154,9 @@ fn main() -> ExitCode {
 }
 
 /// Ingest the inputs, run statistics-only inference, and print a scored field
-/// map (Step 6). The `--no-llm` path is fully offline (NFR-4).
+/// map (Step 6). The `--no-llm` path is fully offline (NFR-4). When a transport
+/// and port are given, the inputs are read as packet captures and protocol
+/// inference runs instead (Step 11, FR-2).
 #[allow(clippy::too_many_arguments)]
 fn run_infer(
     inputs: &[String],
@@ -150,8 +165,31 @@ fn run_infer(
     max_total_bytes: usize,
     no_llm: bool,
     timeout: Option<u64>,
+    transport: Option<&str>,
+    port: Option<u16>,
     out: Option<&str>,
 ) -> ExitCode {
+    match (transport, port) {
+        (Some(transport), Some(port)) => {
+            return run_infer_protocol(
+                inputs,
+                transport,
+                port,
+                max_bytes_per_sample,
+                max_total_bytes,
+                timeout,
+                out,
+            );
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            eprintln!(
+                "sextant infer: --transport and --port must be given together for capture input."
+            );
+            return ExitCode::from(EXIT_INPUT_ERROR);
+        }
+        (None, None) => {}
+    }
+
     let options = IngestOptions {
         max_bytes_per_sample,
         max_total_bytes,
@@ -201,6 +239,143 @@ fn run_infer(
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Read the inputs as packet captures, extract the transport payloads on the
+/// selected port, run protocol inference, and print the clustered field map
+/// (Step 11, FR-2). Writes the report with `--out` so it can be exported to a
+/// Wireshark dissector, the primary output for the protocol track.
+///
+/// The byte caps bound memory exactly as they do for file ingestion (FR-5,
+/// FR-24): each capture is read with a bounded reader so a single attacker-sized
+/// pcap cannot exhaust memory, and reading stops once the captures together would
+/// exceed the total cap.
+#[allow(clippy::too_many_arguments)]
+fn run_infer_protocol(
+    inputs: &[String],
+    transport: &str,
+    port: u16,
+    max_bytes_per_sample: usize,
+    max_total_bytes: usize,
+    timeout: Option<u64>,
+    out: Option<&str>,
+) -> ExitCode {
+    let Some(transport) = Transport::parse(transport) else {
+        eprintln!("sextant infer: unknown transport `{transport}`. Use tcp or udp.");
+        return ExitCode::from(EXIT_INPUT_ERROR);
+    };
+    let extract = ExtractOptions { transport, port };
+
+    let mut messages = Vec::new();
+    let mut total_read = 0usize;
+    for input in inputs {
+        // A capture is read with the same caps file ingestion enforces: at most
+        // the per-sample cap from any one file, and never past the total cap.
+        let remaining = max_total_bytes.saturating_sub(total_read);
+        if remaining == 0 {
+            eprintln!(
+                "sextant infer: reached the total-input cap of {max_total_bytes} bytes; \
+                 skipping remaining capture(s)."
+            );
+            break;
+        }
+        let cap = max_bytes_per_sample.min(remaining);
+        let bytes = match read_capped(input, cap) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("sextant infer: could not read capture {input}: {error}");
+                return ExitCode::from(EXIT_INPUT_ERROR);
+            }
+        };
+        total_read += bytes.len();
+        match extract_messages(&bytes, &extract) {
+            Ok(extracted) => messages.extend(extracted),
+            Err(error) => {
+                eprintln!("sextant infer: {input}: {error}");
+                return ExitCode::from(EXIT_INPUT_ERROR);
+            }
+        }
+    }
+
+    if messages.is_empty() {
+        eprintln!(
+            "sextant infer: no {transport} payloads on port {port} were found in the capture(s)."
+        );
+        return ExitCode::from(EXIT_INPUT_ERROR);
+    }
+
+    // Re-index the messages across all captures so association and sequence
+    // detection see one ordered stream.
+    for (index, message) in messages.iter_mut().enumerate() {
+        message.index = index;
+    }
+
+    let limits = Limits::default().with_timeout(timeout.map(Duration::from_secs));
+    let inference = infer_protocol(&messages, transport, port, &limits);
+
+    println!(
+        "Extracted {} {transport} message(s) on port {port}.",
+        inference.message_count
+    );
+    print_clustering(&inference);
+    println!(
+        "Request/response pairs associated: {}.",
+        inference.associations.len()
+    );
+    print_report(&inference.report);
+
+    if let Some(path) = out {
+        match write_report(&inference.report, path) {
+            Ok(()) => {
+                println!("\nWrote report to {path}");
+                println!(
+                    "Export a Wireshark dissector with: sextant export {path} --format wireshark"
+                );
+            }
+            Err(error) => {
+                eprintln!("sextant infer: could not write report to {path}: {error}");
+                return ExitCode::from(EXIT_INPUT_ERROR);
+            }
+        }
+    }
+
+    if inference.report.field_map.is_empty() {
+        eprintln!("sextant infer: no usable hypothesis was produced");
+        ExitCode::from(EXIT_NO_HYPOTHESIS)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Print how the messages clustered by type (FR-2).
+fn print_clustering(inference: &ProtocolInference) {
+    let clustering: &Clustering = &inference.clustering;
+    match &clustering.discriminant {
+        Some(discriminant) => {
+            println!(
+                "Message clustering: {} type(s) discriminated at byte offset {}.",
+                clustering.clusters.len(),
+                discriminant.offset
+            );
+            for cluster in &clustering.clusters {
+                if let Some(value) = cluster.type_value {
+                    println!("  type {value:#04x}: {} message(s)", cluster.indices.len());
+                }
+            }
+        }
+        None => println!("Message clustering: a single message type (no discriminant found)."),
+    }
+}
+
+/// Read at most `cap` bytes from a file. A very large capture is never read
+/// whole: the read limit bounds both the bytes read and the allocation, so an
+/// attacker-sized pcap costs only `cap` bytes of memory (FR-24, FR-5).
+fn read_capped(path: &str, cap: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path)?;
+    let mut data = Vec::new();
+    file.take(cap as u64).read_to_end(&mut data)?;
+    Ok(data)
 }
 
 /// Serialize a report to pretty JSON and write it to `path` (FR-34).

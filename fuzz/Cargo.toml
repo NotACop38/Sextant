@@ -27,6 +27,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "pcap"
+path = "fuzz_targets/pcap.rs"
+test = false
+doc = false
+bench = false
+
 # A standalone workspace so the nightly-only fuzzing dependencies never enter the
 # stable workspace build.
 [workspace]
