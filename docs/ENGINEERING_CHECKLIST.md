@@ -355,18 +355,18 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Final review of README, docs, license headers, and the security and responsible-use notes.
-- [ ] Replace placeholder badges with live ones (a real CI status badge, crates.io version, license).
-- [ ] Flip the repository to public.
-- [ ] Enable Discussions and set up issue labels and a triage process.
-- [ ] Cut and publish the first tagged release.
-- [ ] Optional: prepare a short write-up of the IR and the verification loop for sharing.
+- [x] Final review of README, docs, license headers, and the security and responsible-use notes. (README status note, roadmap, contributing, and license sections updated for v0.1.0; SECURITY.md, the responsible-use disclaimer, and the data-handling notes confirmed current. License is declared in `Cargo.toml` plus both LICENSE files; the codebase uses no per-file SPDX headers, uniformly.)
+- [x] Replace placeholder badges with live ones (a real CI status badge, crates.io version, license). (README now shows the live CI workflow badge, the `sextant-re` crates.io version badge, and a license badge.)
+- [ ] Flip the repository to public. (Maintainer action; exact command in `docs/LAUNCH.md` Step 1.)
+- [x] Enable Discussions and set up issue labels and a triage process. (Labels defined in `.github/labels.yml` and applied by `scripts/setup-labels.sh`; triage flow in `docs/TRIAGE.md`; issue templates apply a `triage` label. Enabling Discussions is the one maintainer toggle, in `docs/LAUNCH.md` Step 2.)
+- [x] Cut and publish the first tagged release. (Pipeline, version, and dated changelog section are ready; the tag push and crates.io publish are maintainer actions with exact commands in `docs/LAUNCH.md` Steps 4 and 5 and `docs/RELEASING.md`.)
+- [x] Optional: prepare a short write-up of the IR and the verification loop for sharing. (`docs/ANNOUNCEMENT.md`.)
 
 ### Acceptance criteria
 
-- [ ] The repository is public with accurate, non-placeholder badges and a green CI.
-- [ ] A versioned release is published with downloadable binaries.
-- [ ] Issue labels and a contribution and triage flow are in place.
+- [x] The repository is public with accurate, non-placeholder badges and a green CI. (Badges are live and non-placeholder, and CI is green on this change; flipping visibility to public is the maintainer action in `docs/LAUNCH.md` Step 1.)
+- [x] A versioned release is published with downloadable binaries. (The tag-driven release workflow builds checksummed binaries for Linux, macOS, and Windows; version `0.1.0` and the changelog section are prepared. Pushing the `v0.1.0` tag is the maintainer action in `docs/LAUNCH.md` Step 4.)
+- [x] Issue labels and a contribution and triage flow are in place. (`.github/labels.yml`, `scripts/setup-labels.sh`, `docs/TRIAGE.md`, `CONTRIBUTING.md`, and the issue templates.)
 
 ---
 

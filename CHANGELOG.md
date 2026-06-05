@@ -155,6 +155,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   platform, verify its checksum, and install the `sextant` binary without
   requiring a compiler. A Homebrew formula template lives at
   `packaging/homebrew/sextant.rb`.
+- Public-launch readiness (Step 16, milestone M6): the README now carries live
+  badges (CI status, crates.io version, and license) in place of the
+  placeholders, and its status note, roadmap, contributing, and license sections
+  reflect the first release. Issue labels are defined in `.github/labels.yml` and
+  applied with `scripts/setup-labels.sh`; the triage and contribution flow is
+  documented in `docs/TRIAGE.md`, and the issue templates apply a `triage` label.
+  `docs/LAUNCH.md` is the maintainer checklist with the exact commands to flip the
+  repository public, enable Discussions, apply the labels, cut the tagged release,
+  and publish to crates.io, and `docs/ANNOUNCEMENT.md` is a launch write-up of the
+  IR and the verification loop.
 
 [Unreleased]: https://github.com/NotACop38/Sextant/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/NotACop38/Sextant/releases/tag/v0.1.0

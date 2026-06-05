@@ -54,6 +54,11 @@ beside it:
   plan.
 - [Agent guide](../AGENTS.md): how contributors and AI coding agents work in
   this repository.
+- [Issue triage and contribution flow](TRIAGE.md): how issues and pull requests
+  are labeled and handled.
+- [Releasing](RELEASING.md): how Sextant is versioned, packaged, and published.
+- [Public launch checklist](LAUNCH.md): the maintainer steps to take the project
+  public and cut a release.
 
 ## A safety note
 
