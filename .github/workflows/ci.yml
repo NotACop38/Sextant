@@ -33,6 +33,11 @@ jobs:
         run: cargo build --all-targets --all-features --verbose
       - name: Test
         run: cargo test --workspace --all-features --verbose
+      - name: Benchmark regression guard
+        # Fail the build if any accuracy metric drops below its configured
+        # threshold (PRD Section 15). This runs the same harness that generates
+        # the README numbers, statistics-only and fully offline.
+        run: cargo run -p bench -- --check
 
   cargo-deny:
     name: Licenses and advisories (cargo-deny)

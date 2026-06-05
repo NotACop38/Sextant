@@ -88,3 +88,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Modbus/TCP (the protocol showcase) and a custom toy request/response protocol
   added to the corpus, each with a generated capture, a `generate.py` source, and
   a hand-verified ground truth.
+- `sextant bench` runs statistics-only inference over the ground-truth corpus and
+  reports the PRD Section 15 metrics: field-boundary precision, recall, and F1;
+  the perfection rate; semantic role and type accuracy; and parser validity. It
+  prints a results table, writes machine-readable JSON with `--out`, accepts a
+  `--corpus <dir>` override, and exits non-zero when a metric falls below its
+  configured threshold.
+- The benchmark harness (`bench` crate) computes those metrics and assembles a
+  machine-readable report; the README benchmark block is generated from it with
+  `cargo run -p bench -- --write-readme` (and a test fails if the block drifts),
+  so the published numbers are never hand-written.
+- A benchmark regression guard in CI (`cargo run -p bench -- --check`) and in the
+  test suite that fails the build if field-boundary F1, perfection rate, parser
+  validity, or role and type accuracy drop below their thresholds. The
+  statistics-only corpus run clears the PRD Section 15 targets (field-boundary F1
+  at least 0.85, perfection at least 0.5, parser validity 100%).

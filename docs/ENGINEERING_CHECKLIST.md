@@ -274,17 +274,17 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Implement `sextant bench`: run inference over the corpus and compute field-boundary precision, recall, and F1; perfection rate; role and type accuracy; and parser validity.
-- [ ] Emit a results table (and machine-readable results) suitable for the README.
-- [ ] Add a regression guard so CI fails if metrics drop below configured thresholds.
-- [ ] Frame results against the academic baselines on comparable metrics.
+- [x] Implement `sextant bench`: run inference over the corpus and compute field-boundary precision, recall, and F1; perfection rate; role and type accuracy; and parser validity.
+- [x] Emit a results table (and machine-readable results) suitable for the README.
+- [x] Add a regression guard so CI fails if metrics drop below configured thresholds.
+- [x] Frame results against the academic baselines on comparable metrics.
 
 ### Acceptance criteria
 
-- [ ] `sextant bench` runs over the corpus and prints a metrics table.
-- [ ] Metrics meet the targets in PRD Section 15.
-- [ ] A metrics regression below threshold fails CI.
-- [ ] README benchmark numbers are generated from this harness, not hand-written.
+- [x] `sextant bench` runs over the corpus and prints a metrics table.
+- [x] Metrics meet the targets in PRD Section 15.
+- [x] A metrics regression below threshold fails CI.
+- [x] README benchmark numbers are generated from this harness, not hand-written.
 
 ---
 

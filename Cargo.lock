@@ -885,6 +885,7 @@ dependencies = [
 name = "sextant-cli"
 version = "0.0.0"
 dependencies = [
+ "bench",
  "clap",
  "sextant-engine",
  "sextant-export",
