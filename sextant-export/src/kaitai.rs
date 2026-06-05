@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use sextant_ir::{
-    Constraint, CountRule, Endianness, EnumDef, Field, Format, Kind, SizeRule, StringEncoding,
-    Structure,
+    Constraint, CountRule, Endianness, EnumDef, Field, FieldOffset, Format, Kind, Signedness,
+    SizeRule, StringEncoding, Structure,
 };
 
 use crate::naming::{Allocator, snake};
@@ -31,6 +31,7 @@ pub(crate) fn export(format: &Format) -> String {
         types: BTreeMap::new(),
         alloc: Allocator::new(),
         endianness: format.endianness,
+        scopes: Vec::new(),
     };
     // Reserve the root id so a nested type never collides with it.
     let root_id = ctx.alloc.allocate(&snake(&format.name, "format"));
@@ -67,28 +68,77 @@ pub(crate) fn export(format: &Format) -> String {
 }
 
 /// Mutable state threaded through the recursive render: the collected named
-/// types, the type-name allocator, and the format default endianness.
+/// types, the type-name allocator, the format default endianness, and a stack
+/// of per-structure name maps so a length, count, or offset reference resolves
+/// to the same de-duplicated id the referenced field was emitted with.
 struct Ctx {
     types: BTreeMap<String, String>,
     alloc: Allocator,
     endianness: Endianness,
+    scopes: Vec<BTreeMap<String, String>>,
 }
 
 impl Ctx {
     /// Render a structure's fields as a `seq` block indented at `indent` levels
     /// of two spaces.
+    ///
+    /// Field ids are allocated up front and de-duplicated within the structure,
+    /// so two raw names that sanitize to the same identifier still get distinct
+    /// Kaitai ids and the document never carries a duplicate key.
     fn render_seq(&mut self, structure: &Structure, indent: usize) -> String {
+        let mut ids = Allocator::new();
+        let mut names = BTreeMap::new();
+        let field_ids: Vec<String> = structure
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let base = match &field.name {
+                    Some(name) => snake(name, &format!("field_{index}")),
+                    None => format!("field_{index}"),
+                };
+                let id = ids.allocate(&base);
+                if let Some(name) = &field.name {
+                    names.entry(name.clone()).or_insert_with(|| id.clone());
+                }
+                id
+            })
+            .collect();
+
+        self.scopes.push(names);
         let mut out = String::new();
-        for (index, field) in structure.fields.iter().enumerate() {
-            self.render_field(field, index, indent, &mut out);
+        for (field, id) in structure.fields.iter().zip(&field_ids) {
+            self.render_field(field, id, indent, &mut out);
         }
+        self.scopes.pop();
         out
     }
 
+    /// Resolve a referenced field name to the id it was emitted with, searching
+    /// the enclosing scopes outward and falling back to a plain sanitization.
+    fn resolve_ref(&self, name: &str) -> String {
+        for scope in self.scopes.iter().rev() {
+            if let Some(id) = scope.get(name) {
+                return id.clone();
+            }
+        }
+        snake(name, "ref")
+    }
+
     /// Render one field as a `seq` attribute (a `- id:` entry plus its keys).
-    fn render_field(&mut self, field: &Field, index: usize, indent: usize, out: &mut String) {
+    fn render_field(&mut self, field: &Field, id: &str, indent: usize, out: &mut String) {
         let pad = "  ".repeat(indent);
-        let id = field_id(field, index);
+        // An explicit offset becomes a padding gap that seeks to the position,
+        // so a field with padding or a jump parses where the executor verified
+        // it rather than sequentially.
+        if let Some(offset) = &field.offset {
+            let target = match offset {
+                FieldOffset::Absolute { bytes } => bytes.to_string(),
+                FieldOffset::Derived { offset_field } => self.resolve_ref(offset_field.as_str()),
+            };
+            let _ = writeln!(out, "{pad}- id: pad_to_{id}");
+            let _ = writeln!(out, "{pad}  size: {target} - _io.pos");
+        }
         let mut attrs: Vec<(String, String)> = Vec::new();
 
         match &field.kind {
@@ -98,7 +148,9 @@ impl Ctx {
                 endianness,
             } => {
                 attrs.push(("type".to_owned(), int_type(*width, *signed, *endianness)));
-                if let Some(value) = integer_constant(field, *width, endianness, self.endianness) {
+                if let Some(value) =
+                    integer_constant(field, *width, *signed, endianness, self.endianness)
+                {
                     attrs.push(("valid".to_owned(), value.to_string()));
                 }
             }
@@ -125,7 +177,7 @@ impl Ctx {
                 }
             }
             Kind::Struct { structure } => {
-                let type_name = self.define_type(field, index, structure);
+                let type_name = self.define_type(field, structure);
                 attrs.push(("type".to_owned(), type_name));
             }
             Kind::Array { element, count } => {
@@ -133,11 +185,15 @@ impl Ctx {
             }
         }
 
-        for note in self.field_notes(field) {
-            attrs.push(("doc".to_owned(), yaml_scalar(&note)));
+        // Combine every note into a single doc string. Emitting one doc key per
+        // note would put duplicate keys in the same YAML mapping, which is
+        // invalid and can drop notes or fail to load.
+        let notes = self.field_notes(field);
+        if !notes.is_empty() {
+            attrs.push(("doc".to_owned(), yaml_scalar(&notes.join("; "))));
         }
 
-        write_attrs(out, &pad, &id, &attrs);
+        write_attrs(out, &pad, id, &attrs);
     }
 
     /// Emit the size attributes for a raw bytes or opaque field.
@@ -156,7 +212,7 @@ impl Ctx {
                 attrs.push(("size".to_owned(), bytes.to_string()));
             }
             Some(SizeRule::Derived { length_field }) => {
-                attrs.push(("size".to_owned(), snake(length_field.as_str(), "len")));
+                attrs.push(("size".to_owned(), self.resolve_ref(length_field.as_str())));
             }
             Some(SizeRule::ToEnd) => {
                 attrs.push(("size-eos".to_owned(), "true".to_owned()));
@@ -199,7 +255,7 @@ impl Ctx {
         // The element type goes on the array attribute itself.
         match &element.kind {
             Kind::Struct { structure } => {
-                let type_name = self.define_type(element, 0, structure);
+                let type_name = self.define_type(element, structure);
                 attrs.push(("type".to_owned(), type_name));
             }
             Kind::Integer {
@@ -243,12 +299,12 @@ impl Ctx {
                 attrs.push(("repeat".to_owned(), "expr".to_owned()));
                 attrs.push((
                     "repeat-expr".to_owned(),
-                    snake(count_field.as_str(), "count"),
+                    self.resolve_ref(count_field.as_str()),
                 ));
             }
             CountRule::BoundedBy { length_field } => {
                 // Read the elements inside a substream sized by the length field.
-                attrs.push(("size".to_owned(), snake(length_field.as_str(), "len")));
+                attrs.push(("size".to_owned(), self.resolve_ref(length_field.as_str())));
                 attrs.push(("repeat".to_owned(), "eos".to_owned()));
             }
             CountRule::ToEnd => {
@@ -258,11 +314,11 @@ impl Ctx {
     }
 
     /// Define a named Kaitai type for a struct kind and return its name.
-    fn define_type(&mut self, field: &Field, index: usize, structure: &Structure) -> String {
+    fn define_type(&mut self, field: &Field, structure: &Structure) -> String {
         let base = field
             .name
             .as_deref()
-            .map_or_else(|| format!("type_{index}"), |name| snake(name, "type"));
+            .map_or_else(|| "type".to_owned(), |name| snake(name, "type"));
         let type_name = self.alloc.allocate(&base);
         // Reserve the name before rendering the body so a recursive or repeated
         // nested type does not reuse it.
@@ -303,9 +359,6 @@ impl Ctx {
                     spec.covered.to.field()
                 ));
             }
-        }
-        if field.offset.is_some() {
-            notes.push("has an explicit offset; verify positioning by hand".to_owned());
         }
         notes
     }
@@ -352,22 +405,43 @@ fn int_type(width: u8, signed: sextant_ir::Signedness, endianness: Option<Endian
     format!("{letter}{width}{suffix}")
 }
 
-/// The integer value of a field's constant constraint, if it has one.
+/// The integer value of a field's constant constraint, if it has one, decoded
+/// with the field's signedness so a negative signed constant is rendered as a
+/// negative `valid` value that Kaitai checks against the signed decode.
 fn integer_constant(
     field: &Field,
     width: u8,
+    signed: Signedness,
     endianness: &Option<Endianness>,
     default: Endianness,
-) -> Option<u64> {
+) -> Option<i128> {
     field
         .constraints
         .iter()
         .find_map(|constraint| match constraint {
             Constraint::Constant { value } => {
-                Some(const_as_u64(value, width, endianness.unwrap_or(default)))
+                let raw = const_as_u64(value, width, endianness.unwrap_or(default));
+                Some(sign_extend(raw, width, signed))
             }
             _ => None,
         })
+}
+
+/// Sign- or zero-extend a raw little- or big-endian-decoded value to an `i128`
+/// according to the field width and signedness.
+fn sign_extend(raw: u64, width: u8, signed: Signedness) -> i128 {
+    match signed {
+        Signedness::Unsigned => i128::from(raw),
+        Signedness::Signed => {
+            let bits = u32::from(width.max(1)) * 8;
+            if bits >= 64 {
+                i128::from(raw as i64)
+            } else {
+                let shift = 64 - bits;
+                i128::from(((raw << shift) as i64) >> shift)
+            }
+        }
+    }
 }
 
 /// A `contents` flow list for a field with a byte or string constant, if any.
@@ -386,14 +460,6 @@ fn constant_contents(field: &Field) -> Option<String> {
             }
             _ => None,
         })
-}
-
-/// The Kaitai id for a field, synthesizing one when the IR did not name it.
-fn field_id(field: &Field, index: usize) -> String {
-    match &field.name {
-        Some(name) => snake(name, &format!("field_{index}")),
-        None => format!("field_{index}"),
-    }
 }
 
 /// The Kaitai `endian` keyword for a byte order.
@@ -481,5 +547,78 @@ mod tests {
     fn export_is_deterministic() {
         let format = sextant_ir::fixtures::png_ground_truth();
         assert_eq!(export(&format), export(&format));
+    }
+
+    use sextant_ir::{Bytes, Confidence, Metadata};
+
+    /// Build a single-structure format with a little-endian default.
+    fn format_of(fields: Vec<Field>) -> Format {
+        Format {
+            name: "t".to_owned(),
+            endianness: Endianness::Little,
+            root: Structure::new(fields),
+            enums: BTreeMap::new(),
+            metadata: Metadata::default(),
+        }
+    }
+
+    #[test]
+    fn signed_constant_is_emitted_as_a_signed_value() {
+        let mut field = Field::new(
+            Kind::Integer {
+                width: 1,
+                signed: Signedness::Signed,
+                endianness: None,
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name("marker");
+        field.constraints = vec![Constraint::Constant {
+            value: Bytes::new(vec![0xff]),
+        }];
+        let ksy = export(&format_of(vec![field]));
+        assert!(ksy.contains("type: s1"));
+        // 0xff decoded as a signed byte is -1, not 255.
+        assert!(ksy.contains("valid: -1"), "got:\n{ksy}");
+    }
+
+    #[test]
+    fn multiple_notes_collapse_to_one_doc_key() {
+        let ksy = export(&sextant_ir::fixtures::png_ground_truth());
+        // The crc field has both a role and a checksum note; they share one doc.
+        assert!(
+            ksy.contains("doc: 'role: checksum; checksum: Crc32"),
+            "got:\n{ksy}"
+        );
+    }
+
+    #[test]
+    fn explicit_offset_becomes_a_padding_gap() {
+        let mut field = Field::new(
+            Kind::Integer {
+                width: 1,
+                signed: Signedness::Unsigned,
+                endianness: None,
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name("at_ten");
+        field.offset = Some(FieldOffset::Absolute { bytes: 10 });
+        let ksy = export(&format_of(vec![field]));
+        assert!(ksy.contains("- id: pad_to_at_ten"), "got:\n{ksy}");
+        assert!(ksy.contains("size: 10 - _io.pos"), "got:\n{ksy}");
+    }
+
+    #[test]
+    fn colliding_sanitized_names_get_unique_ids() {
+        let a = Field::new(Kind::Bytes, Confidence::CERTAIN)
+            .with_name("a-b")
+            .with_size(SizeRule::Fixed { bytes: 1 });
+        let b = Field::new(Kind::Bytes, Confidence::CERTAIN)
+            .with_name("a_b")
+            .with_size(SizeRule::Fixed { bytes: 1 });
+        let ksy = export(&format_of(vec![a, b]));
+        assert!(ksy.contains("- id: a_b\n"), "got:\n{ksy}");
+        assert!(ksy.contains("- id: a_b_2\n"), "got:\n{ksy}");
     }
 }

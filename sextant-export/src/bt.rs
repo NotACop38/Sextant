@@ -148,7 +148,7 @@ impl Ctx {
                 lines.push(format!("{type_name} {name};"));
             }
             Kind::Array { element, count } => {
-                lines.extend(self.array_member(field, &name, element, count));
+                lines.extend(self.array_member(&name, element, count));
             }
         }
 
@@ -160,13 +160,11 @@ impl Ctx {
     }
 
     /// Render an array member, either as a sized declaration or a loop.
-    fn array_member(
-        &mut self,
-        field: &Field,
-        name: &str,
-        element: &Field,
-        count: &CountRule,
-    ) -> Vec<String> {
+    fn array_member(&mut self, name: &str, element: &Field, count: &CountRule) -> Vec<String> {
+        // A fixed-width integer or enum element is emitted inline. Every other
+        // element (a struct, a sized bytes, opaque, or string field, or a nested
+        // array) is wrapped in a generated struct so its own size rule and
+        // layout survive instead of collapsing to a single scalar.
         let element_type = match &element.kind {
             Kind::Struct { structure } => self.define_struct(
                 element.name.as_deref().unwrap_or("Element"),
@@ -175,15 +173,17 @@ impl Ctx {
             ),
             Kind::Integer { width, signed, .. } => bt_int(*width, *signed),
             Kind::Enum { enum_ref, .. } => pascal(enum_ref, "Enum"),
-            Kind::String { encoding } => string_element(*encoding).0.to_owned(),
-            Kind::Bytes | Kind::Opaque => "ubyte".to_owned(),
-            Kind::Array { .. } => {
+            Kind::Bytes | Kind::Opaque | Kind::String { .. } | Kind::Array { .. } => {
                 let wrapper = Structure::new(vec![element.clone()]);
-                self.define_struct(field.name.as_deref().unwrap_or("Inner"), "Inner", &wrapper)
+                self.define_struct(
+                    element.name.as_deref().unwrap_or("Element"),
+                    "Element",
+                    &wrapper,
+                )
             }
         };
 
-        match count {
+        let body = match count {
             CountRule::Fixed { count } => vec![format!("{element_type} {name}[{count}];")],
             CountRule::FromField { count_field } => vec![format!(
                 "{element_type} {name}[{}];",
@@ -203,6 +203,19 @@ impl Ctx {
                 format!("    {element_type} {name};"),
                 "}".to_owned(),
             ],
+        };
+
+        // An inline integer or enum element with an endianness override is read
+        // in the file default order unless the array is wrapped in the matching
+        // byte-order call, so wrap it and restore the default afterward.
+        match field_endianness(&element.kind).filter(|order| *order != self.endianness) {
+            Some(order) => {
+                let mut wrapped = vec![format!("{}();", endian_call(order))];
+                wrapped.extend(body);
+                wrapped.push(format!("{}();", endian_call(self.endianness)));
+                wrapped
+            }
+            None => body,
         }
     }
 
@@ -344,5 +357,56 @@ mod tests {
     fn export_is_deterministic() {
         let format = sextant_ir::fixtures::png_ground_truth();
         assert_eq!(export(&format), export(&format));
+    }
+
+    use sextant_ir::{Confidence, Metadata};
+
+    /// Build a little-endian format whose root holds one array `items`.
+    fn array_format(element: Field, count: CountRule) -> Format {
+        let array = Field::new(
+            Kind::Array {
+                element: Box::new(element),
+                count,
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name("items");
+        Format {
+            name: "t".to_owned(),
+            endianness: Endianness::Little,
+            root: Structure::new(vec![array]),
+            enums: Default::default(),
+            metadata: Metadata::default(),
+        }
+    }
+
+    #[test]
+    fn array_element_endianness_override_wraps_the_declaration() {
+        let element = Field::new(
+            Kind::Integer {
+                width: 2,
+                signed: Signedness::Unsigned,
+                endianness: Some(Endianness::Big),
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name("word");
+        let bt = export(&array_format(element, CountRule::Fixed { count: 3 }));
+        // The big-endian array is wrapped in BigEndian()/LittleEndian() calls.
+        assert!(
+            bt.contains("BigEndian();\n    ushort items[3];"),
+            "got:\n{bt}"
+        );
+    }
+
+    #[test]
+    fn sized_byte_array_element_preserves_its_length() {
+        let element = Field::new(Kind::Bytes, Confidence::CERTAIN)
+            .with_name("blob")
+            .with_size(SizeRule::Fixed { bytes: 4 });
+        let bt = export(&array_format(element, CountRule::Fixed { count: 2 }));
+        // Each element keeps its 4 bytes via a wrapping typedef.
+        assert!(bt.contains("ubyte blob[4];"), "got:\n{bt}");
+        assert!(bt.contains("items[2];"), "got:\n{bt}");
     }
 }

@@ -147,7 +147,7 @@ impl Ctx {
                 lines.push(format!("{type_name} {name};"));
             }
             Kind::Array { element, count } => {
-                lines.extend(self.array_member(field, &name, element, count));
+                lines.extend(self.array_member(&name, element, count));
             }
         }
         lines
@@ -155,28 +155,47 @@ impl Ctx {
 
     /// Render an array member: its element type plus a C array suffix derived
     /// from the count rule.
-    fn array_member(
-        &mut self,
-        field: &Field,
-        name: &str,
-        element: &Field,
-        count: &CountRule,
-    ) -> Vec<String> {
-        let element_type = match &element.kind {
-            Kind::Struct { structure } => self.define_struct(
-                element.name.as_deref().unwrap_or("Element"),
-                "Element",
-                structure,
+    fn array_member(&mut self, name: &str, element: &Field, count: &CountRule) -> Vec<String> {
+        // A fixed-width integer or enum element is emitted inline, carrying any
+        // endianness override as a prefix. Every other element (a struct, a
+        // sized bytes, opaque, or string field, or a nested array) is wrapped in
+        // a generated struct so its own size rule and layout are preserved
+        // rather than collapsed to a single byte.
+        let (prefix, element_type) = match &element.kind {
+            Kind::Integer {
+                width,
+                signed,
+                endianness,
+            } => (
+                self.endian_prefix(*endianness, *width),
+                imhex_int(*width, *signed),
             ),
-            Kind::Integer { width, signed, .. } => imhex_int(*width, *signed),
-            Kind::Enum { enum_ref, .. } => pascal(enum_ref, "Enum"),
-            Kind::String { encoding } => string_element(*encoding).0.to_owned(),
-            Kind::Bytes | Kind::Opaque => "u8".to_owned(),
-            Kind::Array { .. } => {
-                // ImHex cannot declare an array of arrays on one line; wrap the
-                // inner array in a generated struct so it stays parseable.
+            Kind::Enum {
+                enum_ref,
+                endianness,
+                width,
+            } => (
+                self.endian_prefix(*endianness, *width),
+                pascal(enum_ref, "Enum"),
+            ),
+            Kind::Struct { structure } => (
+                String::new(),
+                self.define_struct(
+                    element.name.as_deref().unwrap_or("Element"),
+                    "Element",
+                    structure,
+                ),
+            ),
+            Kind::Bytes | Kind::Opaque | Kind::String { .. } | Kind::Array { .. } => {
                 let wrapper = Structure::new(vec![element.clone()]);
-                self.define_struct(field.name.as_deref().unwrap_or("Inner"), "Inner", &wrapper)
+                (
+                    String::new(),
+                    self.define_struct(
+                        element.name.as_deref().unwrap_or("Element"),
+                        "Element",
+                        &wrapper,
+                    ),
+                )
             }
         };
         let suffix = match count {
@@ -196,7 +215,7 @@ impl Ctx {
                 )
             }
         };
-        vec![format!("{element_type} {name}{suffix};")]
+        vec![format!("{prefix}{element_type} {name}{suffix};")]
     }
 
     /// The array-size suffix for a raw bytes or opaque field.
@@ -244,11 +263,13 @@ impl Ctx {
     }
 
     /// An endianness prefix (`be ` or `le `) when a field overrides the default,
-    /// otherwise empty. A one-byte field never needs one.
+    /// otherwise empty. A one-byte field never needs one. ImHex uses the `be`
+    /// and `le` qualifiers on a member, distinct from the `#pragma endian
+    /// big|little` directive.
     fn endian_prefix(&self, endianness: Option<Endianness>, width: u8) -> String {
         match endianness {
             Some(order) if width > 1 && order != self.endianness => {
-                format!("{} ", endian_word(order))
+                format!("{} ", endian_keyword(order))
             }
             _ => String::new(),
         }
@@ -316,6 +337,15 @@ fn endian_word(order: Endianness) -> &'static str {
     }
 }
 
+/// The ImHex per-member endianness qualifier (`le` or `be`), distinct from the
+/// `#pragma endian` directive's `little`/`big`.
+fn endian_keyword(order: Endianness) -> &'static str {
+    match order {
+        Endianness::Little => "le",
+        Endianness::Big => "be",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +380,55 @@ mod tests {
     fn export_is_deterministic() {
         let format = sextant_ir::fixtures::tlv_ground_truth();
         assert_eq!(export(&format), export(&format));
+    }
+
+    use sextant_ir::{Confidence, Metadata};
+
+    /// Build a little-endian format whose root holds one array `items` of the
+    /// given element.
+    fn array_format(element: Field, count: CountRule) -> Format {
+        let array = Field::new(
+            Kind::Array {
+                element: Box::new(element),
+                count,
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name("items");
+        Format {
+            name: "t".to_owned(),
+            endianness: Endianness::Little,
+            root: Structure::new(vec![array]),
+            enums: Default::default(),
+            metadata: Metadata::default(),
+        }
+    }
+
+    #[test]
+    fn array_element_endianness_override_is_honored() {
+        let element = Field::new(
+            Kind::Integer {
+                width: 2,
+                signed: Signedness::Unsigned,
+                endianness: Some(Endianness::Big),
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name("word");
+        let pat = export(&array_format(element, CountRule::Fixed { count: 3 }));
+        // The element keeps its big-endian override even inside the array.
+        assert!(pat.contains("be u16 items[3];"), "got:\n{pat}");
+    }
+
+    #[test]
+    fn sized_byte_array_element_preserves_its_length() {
+        let element = Field::new(Kind::Bytes, Confidence::CERTAIN)
+            .with_name("blob")
+            .with_size(SizeRule::Fixed { bytes: 4 });
+        let pat = export(&array_format(element, CountRule::Fixed { count: 2 }));
+        // Each element keeps its 4 bytes via a wrapping struct, not collapsed to
+        // a single byte.
+        assert!(pat.contains("u8 blob[4];"), "got:\n{pat}");
+        assert!(pat.contains("items[2];"), "got:\n{pat}");
     }
 }

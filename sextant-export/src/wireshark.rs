@@ -11,11 +11,12 @@
 //! shows how to attach it. Checksums are not verified, matching the other
 //! exporters.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use sextant_ir::{
-    CountRule, Endianness, Field, Format, Kind, Signedness, SizeRule, StringEncoding, Structure,
+    CountRule, Endianness, EnumDef, Field, Format, Kind, Signedness, SizeRule, StringEncoding,
+    Structure,
 };
 
 use crate::naming::snake;
@@ -27,6 +28,7 @@ pub(crate) fn export(format: &Format) -> String {
     let mut emitter = Gen {
         proto: proto.clone(),
         endianness: format.endianness,
+        enums: format.enums.clone(),
         fields: Vec::new(),
         registered: BTreeSet::new(),
         code: String::new(),
@@ -78,6 +80,7 @@ pub(crate) fn export(format: &Format) -> String {
 struct Gen {
     proto: String,
     endianness: Endianness,
+    enums: BTreeMap<String, EnumDef>,
     fields: Vec<String>,
     registered: BTreeSet<String>,
     code: String,
@@ -85,6 +88,22 @@ struct Gen {
 }
 
 impl Gen {
+    /// Build the value-string table literal for an enum, mapping each variant's
+    /// value to its name so Wireshark shows the symbolic meaning, not just the
+    /// number. Returns `None` when the enum is unknown or has no variants.
+    fn value_string_table(&self, enum_ref: &str) -> Option<String> {
+        let def = self.enums.get(enum_ref)?;
+        if def.variants.is_empty() {
+            return None;
+        }
+        let entries: Vec<String> = def
+            .variants
+            .iter()
+            .map(|variant| format!("[{}]=\"{}\"", variant.value, lua_escape(&variant.name)))
+            .collect();
+        Some(format!("{{{}}}", entries.join(", ")))
+    }
+
     /// The registered field keys, in registration order.
     fn field_keys(&self) -> Vec<String> {
         // The registration line is `f["key"] = ...`; recover the key from it.
@@ -199,18 +218,36 @@ impl Gen {
                 indent,
             ),
             Kind::Enum {
-                width, endianness, ..
+                width,
+                endianness,
+                enum_ref,
             } => self.emit_integer(
                 key,
                 label,
                 *width,
                 Signedness::Unsigned,
                 *endianness,
-                Some(field),
+                Some(enum_ref.as_str()),
                 parent,
                 indent,
             ),
             Kind::Bytes | Kind::Opaque => {
+                if let Some(SizeRule::Delimited {
+                    terminator,
+                    include_terminator,
+                }) = field.size.as_ref()
+                {
+                    self.emit_delimited(
+                        key,
+                        label,
+                        false,
+                        terminator.as_slice(),
+                        *include_terminator,
+                        parent,
+                        indent,
+                    );
+                    return;
+                }
                 let ctor = format!("ProtoField.bytes(\"{}.{key}\", \"{label}\")", self.proto);
                 self.register(key, &ctor);
                 let size = self.size_expr(field.size.as_ref(), prefix);
@@ -221,6 +258,22 @@ impl Gen {
                 self.line(indent, &format!("offset = offset + ({size})"));
             }
             Kind::String { encoding } => {
+                if let Some(SizeRule::Delimited {
+                    terminator,
+                    include_terminator,
+                }) = field.size.as_ref()
+                {
+                    self.emit_delimited(
+                        key,
+                        label,
+                        true,
+                        terminator.as_slice(),
+                        *include_terminator,
+                        parent,
+                        indent,
+                    );
+                    return;
+                }
                 let ctor = format!("ProtoField.string(\"{}.{key}\", \"{label}\")", self.proto);
                 self.register(key, &ctor);
                 let size = self.size_expr(field.size.as_ref(), prefix);
@@ -250,14 +303,14 @@ impl Gen {
         width: u8,
         signed: Signedness,
         endianness: Option<Endianness>,
-        enum_field: Option<&Field>,
+        enum_ref: Option<&str>,
         parent: &str,
         indent: usize,
     ) {
         let order = endianness.unwrap_or(self.endianness);
         let little = matches!(order, Endianness::Little);
         let pf_type = proto_int_type(width, signed);
-        let ctor = match enum_field.and_then(value_string_table) {
+        let ctor = match enum_ref.and_then(|name| self.value_string_table(name)) {
             Some(table) => format!(
                 "ProtoField.{pf_type}(\"{}.{key}\", \"{label}\", base.DEC, {table})",
                 self.proto
@@ -269,7 +322,7 @@ impl Gen {
         };
         self.register(key, &ctor);
 
-        let reader = int_reader(width, little);
+        let reader = int_reader(width, little, signed);
         let var = value_var(key);
         self.line(
             indent,
@@ -281,6 +334,68 @@ impl Gen {
             &format!("{parent}:{adder}(f[\"{key}\"], buffer(offset, {width}))"),
         );
         self.line(indent, &format!("offset = offset + {width}"));
+    }
+
+    /// Emit a delimited bytes or string field: scan for the terminator, then add
+    /// the value and advance past the terminator. This mirrors the executor's
+    /// terminator handling so following fields stay at the right offset instead
+    /// of the field swallowing the rest of the packet.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_delimited(
+        &mut self,
+        key: &str,
+        label: &str,
+        is_string: bool,
+        terminator: &[u8],
+        include: bool,
+        parent: &str,
+        indent: usize,
+    ) {
+        let ctor = if is_string {
+            format!("ProtoField.string(\"{}.{key}\", \"{label}\")", self.proto)
+        } else {
+            format!("ProtoField.bytes(\"{}.{key}\", \"{label}\")", self.proto)
+        };
+        self.register(key, &ctor);
+
+        let term_len = terminator.len().max(1);
+        let mut hex = String::with_capacity(terminator.len() * 2);
+        for byte in terminator {
+            let _ = write!(hex, "{byte:02X}");
+        }
+        let dlen = self.temp("dlen");
+        let found = self.temp("found");
+        self.line(indent, &format!("local {dlen} = 0"));
+        self.line(indent, &format!("local {found} = false"));
+        self.line(
+            indent,
+            &format!("while offset + {dlen} + {term_len} <= blen do"),
+        );
+        self.line(
+            indent + 1,
+            &format!("if buffer(offset + {dlen}, {term_len}):bytes():tohex() == \"{hex}\" then"),
+        );
+        self.line(indent + 2, &format!("{found} = true"));
+        self.line(indent + 2, "break");
+        self.line(indent + 1, "end");
+        self.line(indent + 1, &format!("{dlen} = {dlen} + 1"));
+        self.line(indent, "end");
+
+        let vlen = self.temp("vlen");
+        let clen = self.temp("clen");
+        self.line(indent, &format!("local {vlen} = {dlen}"));
+        self.line(indent, &format!("local {clen} = {dlen}"));
+        self.line(indent, &format!("if {found} then"));
+        self.line(indent + 1, &format!("{clen} = {dlen} + {term_len}"));
+        if include {
+            self.line(indent + 1, &format!("{vlen} = {dlen} + {term_len}"));
+        }
+        self.line(indent, "end");
+        self.line(
+            indent,
+            &format!("{parent}:add(f[\"{key}\"], buffer(offset, {vlen}))"),
+        );
+        self.line(indent, &format!("offset = offset + {clen}"));
     }
 
     /// Emit an array as a bounded loop adding to a subtree.
@@ -375,12 +490,9 @@ impl Gen {
     }
 }
 
-/// Build the value-string table literal for an enum field, if its enum defines
-/// values. Returns `None` when there is nothing to map (the IR carries enum
-/// variants on the [`Format`], not inline, so this is a placeholder for inline
-/// variants and currently yields `None`).
-fn value_string_table(_field: &Field) -> Option<String> {
-    None
+/// Escape a string for inclusion in a Lua double-quoted literal.
+fn lua_escape(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// The Wireshark `ProtoField` constructor name for an integer width and sign.
@@ -392,13 +504,18 @@ fn proto_int_type(width: u8, signed: Signedness) -> String {
     }
 }
 
-/// The `TvbRange` reader method for an integer width and byte order.
-fn int_reader(width: u8, little: bool) -> &'static str {
-    match (width, little) {
-        (8, true) => ":le_uint64()",
-        (8, false) => ":uint64()",
-        (_, true) => ":le_uint()",
-        (_, false) => ":uint()",
+/// The `TvbRange` reader method for an integer width, byte order, and sign, so a
+/// captured signed value keeps its sign for any later derived size or count.
+fn int_reader(width: u8, little: bool, signed: Signedness) -> &'static str {
+    match (width, little, signed) {
+        (8, true, Signedness::Signed) => ":le_int64()",
+        (8, false, Signedness::Signed) => ":int64()",
+        (8, true, Signedness::Unsigned) => ":le_uint64()",
+        (8, false, Signedness::Unsigned) => ":uint64()",
+        (_, true, Signedness::Signed) => ":le_int()",
+        (_, false, Signedness::Signed) => ":int()",
+        (_, true, Signedness::Unsigned) => ":le_uint()",
+        (_, false, Signedness::Unsigned) => ":uint()",
     }
 }
 
@@ -470,5 +587,84 @@ mod tests {
     fn export_is_deterministic() {
         let format = sextant_ir::fixtures::tlv_ground_truth();
         assert_eq!(export(&format), export(&format));
+    }
+
+    use sextant_ir::{Bytes, Confidence, EnumVariant, Metadata};
+
+    /// Build a little-endian format from a list of root fields.
+    fn format_of(fields: Vec<Field>, enums: BTreeMap<String, EnumDef>) -> Format {
+        Format {
+            name: "t".to_owned(),
+            endianness: Endianness::Little,
+            root: Structure::new(fields),
+            enums,
+            metadata: Metadata::default(),
+        }
+    }
+
+    #[test]
+    fn signed_field_uses_a_signed_reader() {
+        let field = Field::new(
+            Kind::Integer {
+                width: 2,
+                signed: Signedness::Signed,
+                endianness: None,
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name("delta");
+        let lua = export(&format_of(vec![field], BTreeMap::new()));
+        // A signed value is read with a signed reader so it keeps its sign.
+        assert!(lua.contains(":le_int()"), "got:\n{lua}");
+        assert!(lua.contains("ProtoField.int16(\"t.delta\""), "got:\n{lua}");
+    }
+
+    #[test]
+    fn delimited_field_scans_for_its_terminator() {
+        let field = Field::new(Kind::Bytes, Confidence::CERTAIN)
+            .with_name("name")
+            .with_size(SizeRule::Delimited {
+                terminator: Bytes::new(vec![0x00]),
+                include_terminator: false,
+            });
+        let lua = export(&format_of(vec![field], BTreeMap::new()));
+        // The dissector scans for the terminator rather than reading to end.
+        assert!(lua.contains(":bytes():tohex() == \"00\""), "got:\n{lua}");
+    }
+
+    #[test]
+    fn enum_field_emits_a_value_string_table() {
+        let mut enums = BTreeMap::new();
+        enums.insert(
+            "kind".to_owned(),
+            EnumDef {
+                width: Some(1),
+                variants: vec![
+                    EnumVariant {
+                        value: 1,
+                        name: "alpha".to_owned(),
+                        description: None,
+                    },
+                    EnumVariant {
+                        value: 2,
+                        name: "beta".to_owned(),
+                        description: None,
+                    },
+                ],
+            },
+        );
+        let field = Field::new(
+            Kind::Enum {
+                enum_ref: "kind".to_owned(),
+                width: 1,
+                endianness: None,
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name("kind");
+        let lua = export(&format_of(vec![field], enums));
+        assert!(lua.contains("[1]=\"alpha\""), "got:\n{lua}");
+        assert!(lua.contains("[2]=\"beta\""), "got:\n{lua}");
+        assert!(lua.contains("base.DEC"), "got:\n{lua}");
     }
 }
