@@ -49,6 +49,11 @@ impl ResponseCache {
     }
 
     /// Store a value under `key`.
+    ///
+    /// On Unix the cache directory and every entry are created with
+    /// owner-only permissions. A cached request and response can echo bytes
+    /// drawn from the samples that were sent to the model, so they must not be
+    /// readable by other users on a shared machine (PRD Section 16).
     pub fn put<T: Serialize>(&self, key: &str, value: &T) -> Result<(), LlmError> {
         std::fs::create_dir_all(&self.root).map_err(|error| {
             LlmError::Cache(format!(
@@ -56,11 +61,12 @@ impl ResponseCache {
                 self.root.display()
             ))
         })?;
+        restrict_dir_permissions(&self.root);
         let text = serde_json::to_string_pretty(value).map_err(|error| {
             LlmError::Cache(format!("could not serialize entry {key}: {error}"))
         })?;
         let path = self.path_for(key);
-        std::fs::write(&path, text)
+        write_private(&path, text.as_bytes())
             .map_err(|error| LlmError::Cache(format!("could not write entry {key}: {error}")))
     }
 
@@ -74,6 +80,40 @@ impl ResponseCache {
         &self.root
     }
 }
+
+/// Write `bytes` to `path`, creating the file with owner-only permissions on
+/// Unix so cached sample-derived data is not world-readable. On other platforms
+/// this is an ordinary write.
+#[cfg(unix)]
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)
+}
+
+/// Non-Unix fallback: an ordinary write, since file modes are POSIX specific.
+#[cfg(not(unix))]
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
+}
+
+/// Tighten the cache directory to owner-only access on Unix. Best effort: a
+/// failure to adjust the mode is not fatal to writing the entry.
+#[cfg(unix)]
+fn restrict_dir_permissions(root: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let _ = std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700));
+}
+
+/// Non-Unix fallback: no POSIX mode to set.
+#[cfg(not(unix))]
+fn restrict_dir_permissions(_root: &Path) {}
 
 /// Compute the cache key for a request.
 ///
@@ -157,6 +197,25 @@ mod tests {
         let c = request_key(ProviderKind::Mock, "m1", "json", &request);
         assert_ne!(a, b, "model must affect the key");
         assert_ne!(a, c, "call kind must affect the key");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_entries_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = TempDir::new("perms");
+        let cache = ResponseCache::new(&dir.0);
+        let key = "completion-secret";
+        cache
+            .put(key, &serde_json::json!({"sample": "sensitive bytes"}))
+            .expect("write");
+        let mode = std::fs::metadata(cache.path_for(key))
+            .expect("stat entry")
+            .permissions()
+            .mode()
+            & 0o777;
+        // No group or world bits: cached sample-derived data stays private.
+        assert_eq!(mode, 0o600, "cache entry mode was {mode:o}");
     }
 
     #[test]

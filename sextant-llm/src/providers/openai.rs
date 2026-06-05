@@ -14,12 +14,24 @@ use crate::providers::http;
 const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
 /// A provider that talks to the OpenAI chat-completions API.
-#[derive(Debug)]
 pub struct OpenAiProvider {
     http: reqwest::blocking::Client,
     api_key: String,
     model: String,
     base_url: String,
+}
+
+// A manual Debug that never prints the API key. Deriving Debug would format the
+// secret in full, so any accidental `{:?}` of a provider (a log line, an error
+// chain) would leak the credential (FR-40, PRD Section 16).
+impl std::fmt::Debug for OpenAiProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiProvider")
+            .field("model", &self.model)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[redacted]")
+            .finish()
+    }
 }
 
 impl OpenAiProvider {
@@ -134,5 +146,21 @@ impl LlmProvider for OpenAiProvider {
                 output_tokens: response.usage.completion_tokens,
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_never_reveals_the_api_key() {
+        let provider = OpenAiProvider::new("sk-openai-super-secret", "gpt-4o-mini").expect("build");
+        let shown = format!("{provider:?}");
+        assert!(
+            !shown.contains("sk-openai-super-secret"),
+            "key leaked: {shown}"
+        );
+        assert!(shown.contains("[redacted]"), "no redaction marker: {shown}");
     }
 }

@@ -17,12 +17,24 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 
 /// A provider that talks to the Anthropic Messages API.
-#[derive(Debug)]
 pub struct AnthropicProvider {
     http: reqwest::blocking::Client,
     api_key: String,
     model: String,
     base_url: String,
+}
+
+// A manual Debug that never prints the API key. Deriving Debug would format the
+// secret in full, so any accidental `{:?}` of a provider (a log line, an error
+// chain) would leak the credential (FR-40, PRD Section 16).
+impl std::fmt::Debug for AnthropicProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnthropicProvider")
+            .field("model", &self.model)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[redacted]")
+            .finish()
+    }
 }
 
 impl AnthropicProvider {
@@ -130,5 +142,22 @@ impl LlmProvider for AnthropicProvider {
                 output_tokens: response.usage.output_tokens,
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_never_reveals_the_api_key() {
+        let provider =
+            AnthropicProvider::new("sk-ant-super-secret", "claude-haiku-4-5").expect("build");
+        let shown = format!("{provider:?}");
+        assert!(
+            !shown.contains("sk-ant-super-secret"),
+            "key leaked: {shown}"
+        );
+        assert!(shown.contains("[redacted]"), "no redaction marker: {shown}");
     }
 }
