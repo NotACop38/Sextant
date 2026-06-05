@@ -1,6 +1,10 @@
+# Published as `sextant-re` because the bare name `sextant` is already taken on
+# crates.io by an unrelated celestial-navigation crate. The installed binary is
+# still named `sextant`, so users run `cargo install sextant-re` and then invoke
+# `sextant`. See docs/RELEASING.md for the naming rationale.
 [package]
-name = "sextant-cli"
-description = "The sextant command-line interface."
+name = "sextant-re"
+description = "Sextant: infer and verify the structure of unknown binary formats and protocols. Installs the `sextant` command."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +14,7 @@ homepage.workspace = true
 authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
+readme = "README.md"
 
 [[bin]]
 name = "sextant"
@@ -19,10 +24,11 @@ path = "src/main.rs"
 clap.workspace = true
 sextant-engine.workspace = true
 sextant-export.workspace = true
-# The benchmark harness is an internal, non-published workspace crate. The CLI
-# wires `sextant bench` to it so the published accuracy numbers and the
-# command-line benchmark share one implementation (PRD Section 15).
-bench = { path = "../bench" }
+# The benchmark harness, published as `sextant-bench` (its library name stays
+# `bench`). The CLI wires `sextant bench` to it so the published accuracy
+# numbers and the command-line benchmark share one implementation (PRD
+# Section 15).
+sextant-bench.workspace = true
 
 [lints]
 workspace = true

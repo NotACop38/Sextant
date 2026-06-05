@@ -1,0 +1,182 @@
+name: Release
+
+# Sextant uses a hand-written, self-contained release pipeline as its cargo-dist
+# equivalent: pushing a SemVer tag (for example `v0.1.0`) builds the `sextant`
+# binary natively on Linux, macOS, and Windows (NFR-5), packages each build with
+# the licenses and changelog, computes a SHA-256 checksum for every archive
+# (NFR-10), and publishes them all to a GitHub Release. See docs/RELEASING.md.
+
+on:
+  push:
+    tags:
+      # GitHub Actions tag filters are globs, not regular expressions, so a glob
+      # is used here and the strict SemVer check lives in the verify-version job
+      # below. `v*.*.*` matches stable tags like `v0.1.0` and prereleases like
+      # `v0.1.0-rc.1` (the trailing `*` also matches `-` and `.`).
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: sextant
+  # The CLI is published on crates.io as `sextant-re`; the package name is what
+  # `cargo build -p` expects, while the produced binary is named `sextant`.
+  CLI_PACKAGE: sextant-re
+
+jobs:
+  verify-version:
+    name: Verify tag matches the crate version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare the git tag with the workspace version
+        id: check
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          # The glob trigger is permissive, so enforce SemVer here.
+          if ! printf '%s' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "::error::tag $GITHUB_REF_NAME is not a SemVer version" >&2
+            exit 1
+          fi
+          # The first `version = "..."` in the root manifest is the shared
+          # workspace.package version that every crate inherits, so this is the
+          # single source of truth for "the version is consistent across crates".
+          crate="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"(.+)".*/\1/')"
+          echo "tag=$tag crate=$crate"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag v$tag does not match workspace version $crate" >&2
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: verify-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+      - name: Build the release binary
+        run: cargo build --release --locked -p ${{ env.CLI_PACKAGE }} --target ${{ matrix.target }}
+
+      - name: Stage the archive contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.verify-version.outputs.version }}"
+          stage="${BIN_NAME}-v${version}-${{ matrix.target }}"
+          mkdir -p "dist/$stage"
+          bin="${BIN_NAME}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            bin="${BIN_NAME}.exe"
+          fi
+          cp "target/${{ matrix.target }}/release/$bin" "dist/$stage/"
+          cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md "dist/$stage/"
+          echo "stage=$stage" >> "$GITHUB_ENV"
+
+      - name: Create the archive and its checksum (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          archive="${stage}.tar.gz"
+          tar -czf "$archive" "$stage"
+          shasum -a 256 "$archive" > "${archive}.sha256"
+          cat "${archive}.sha256"
+
+      - name: Create the archive and its checksum (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-Location dist
+          $archive = "$env:stage.zip"
+          Compress-Archive -Path $env:stage -DestinationPath $archive
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower()
+          "$hash  $archive" | Out-File -Encoding ascii "$archive.sha256"
+          Get-Content "$archive.sha256"
+
+      - name: Upload the build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.stage }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish the GitHub Release
+    needs: [verify-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download every build artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect archives and aggregate the checksums
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \) \
+            -exec cp {} release/ \;
+          cd release
+          # One aggregate manifest over all platforms, alongside the per-archive
+          # .sha256 files, so downloads can be verified offline (NFR-10).
+          cat ./*.sha256 | sort -k2 > SHA256SUMS
+          echo "Release artifacts:"
+          ls -l
+          echo "----- SHA256SUMS -----"
+          cat SHA256SUMS
+      - name: Extract this version's changelog section
+        id: notes
+        run: |
+          set -euo pipefail
+          version="${{ needs.verify-version.outputs.version }}"
+          # Pull the body of the matching changelog heading for the release notes.
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { capture=1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md > release-notes.md || true
+          if [ ! -s release-notes.md ]; then
+            echo "See CHANGELOG.md for details." > release-notes.md
+          fi
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Sextant v${{ needs.verify-version.outputs.version }}
+          body_path: release-notes.md
+          files: |
+            release/*.tar.gz
+            release/*.zip
+            release/*.sha256
+            release/SHA256SUMS
+          fail_on_unmatched_files: true

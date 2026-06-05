@@ -175,6 +175,18 @@ fn run_bench(corpus: Option<&str>, out: Option<&str>) -> ExitCode {
     let mut options = bench::BenchOptions::default();
     if let Some(dir) = corpus {
         options.corpus_dir = std::path::PathBuf::from(dir);
+    } else if !options.corpus_dir.is_dir() {
+        // The default corpus is a sibling of the source tree, so it is present
+        // in a workspace checkout but not in an installed binary. Guide the user
+        // to point at one explicitly rather than failing with a path that does
+        // not exist on their machine.
+        eprintln!(
+            "sextant bench: no built-in corpus at {}.\n\
+             Pass --corpus <dir> to point at a ground-truth corpus, for example \
+             the corpus/ directory of a Sextant repository checkout.",
+            options.corpus_dir.display()
+        );
+        return ExitCode::from(EXIT_INPUT_ERROR);
     }
 
     let report = match bench::run_benchmark(&options) {

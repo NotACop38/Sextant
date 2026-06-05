@@ -1,5 +1,9 @@
+# Published as `sextant-bench` because the bare name `bench` is not available on
+# crates.io and the CLI (`sextant-re`) depends on this crate, so it must be a
+# real, versioned registry dependency. The library and binary keep the short
+# `bench` name, so source code and `sextant bench` are unchanged.
 [package]
-name = "bench"
+name = "sextant-bench"
 description = "Evaluation and benchmark harness for the Sextant ground-truth corpus."
 version.workspace = true
 edition.workspace = true
@@ -8,7 +12,8 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-publish = false
+keywords.workspace = true
+categories.workspace = true
 
 [lib]
 name = "bench"

@@ -1,0 +1,25 @@
+# Normalize all text files to LF on checkout, on every platform. Sextant's CI
+# builds and tests on Windows as well as Linux and macOS, and some tests compare
+# generated output (for example the README benchmark block) byte for byte. Held
+# to LF, those comparisons stay stable regardless of the runner's autocrlf
+# setting.
+* text=auto eol=lf
+
+# Binary corpus samples and captures must never be line-ending normalized.
+*.png binary
+*.gif binary
+*.bmp binary
+*.wav binary
+*.zip binary
+*.tar binary
+*.bin binary
+*.pcap binary
+*.pcapng binary
+
+# Custom corpus sample formats (controlled difficulty fixtures) are raw bytes.
+*.tlv binary
+*.stot binary
+*.sdlp binary
+*.scma binary
+*.elf binary
+*.wasm binary

@@ -71,16 +71,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
-name = "bench"
-version = "0.0.0"
-dependencies = [
- "serde",
- "serde_json",
- "sextant-engine",
- "sextant-ir",
-]
-
-[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1005,18 +995,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "sextant-cli"
-version = "0.0.0"
+name = "sextant-bench"
+version = "0.1.0"
 dependencies = [
- "bench",
- "clap",
+ "serde",
+ "serde_json",
  "sextant-engine",
- "sextant-export",
+ "sextant-ir",
 ]
 
 [[package]]
 name = "sextant-engine"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bitvec",
  "glob",
@@ -1029,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "sextant-export"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "sextant-engine",
  "sextant-ir",
@@ -1037,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "sextant-ir"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1045,11 +1035,21 @@ dependencies = [
 
 [[package]]
 name = "sextant-llm"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "sextant-re"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "sextant-bench",
+ "sextant-engine",
+ "sextant-export",
 ]
 
 [[package]]
