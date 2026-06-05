@@ -887,6 +887,7 @@ version = "0.0.0"
 dependencies = [
  "clap",
  "sextant-engine",
+ "sextant-export",
 ]
 
 [[package]]
@@ -904,6 +905,10 @@ dependencies = [
 [[package]]
 name = "sextant-export"
 version = "0.0.0"
+dependencies = [
+ "sextant-engine",
+ "sextant-ir",
+]
 
 [[package]]
 name = "sextant-ir"

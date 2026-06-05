@@ -129,6 +129,78 @@ fn infer_writes_a_report_that_inspect_can_render() {
 }
 
 #[test]
+fn export_emits_a_parser_for_every_format() {
+    let samples = corpus_dir("tlv/samples");
+    let report_path =
+        std::env::temp_dir().join(format!("sextant-export-report-{}.json", std::process::id()));
+    let infer = sextant()
+        .arg("infer")
+        .arg(&samples)
+        .arg("--out")
+        .arg(&report_path)
+        .output()
+        .expect("run sextant infer with --out");
+    assert!(infer.status.success(), "infer --out should succeed");
+
+    for (format, marker) in [
+        ("kaitai", "meta:"),
+        ("imhex", "#pragma endian"),
+        ("wireshark", "Proto("),
+        ("010", "struct"),
+    ] {
+        let output = sextant()
+            .arg("export")
+            .arg(&report_path)
+            .arg("--format")
+            .arg(format)
+            .output()
+            .unwrap_or_else(|error| panic!("run sextant export --format {format}: {error}"));
+        assert!(
+            output.status.success(),
+            "export --format {format} should succeed, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(marker),
+            "export --format {format} output is missing `{marker}`:\n{stdout}"
+        );
+    }
+
+    let _ = std::fs::remove_file(&report_path);
+}
+
+#[test]
+fn export_with_an_unknown_format_is_an_export_error() {
+    let samples = corpus_dir("tlv/samples");
+    let report_path =
+        std::env::temp_dir().join(format!("sextant-export-bad-{}.json", std::process::id()));
+    let infer = sextant()
+        .arg("infer")
+        .arg(&samples)
+        .arg("--out")
+        .arg(&report_path)
+        .output()
+        .expect("run sextant infer with --out");
+    assert!(infer.status.success(), "infer --out should succeed");
+
+    let output = sextant()
+        .arg("export")
+        .arg(&report_path)
+        .arg("--format")
+        .arg("nonsense")
+        .output()
+        .expect("run sextant export with a bad format");
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "an unknown export format should exit with the PRD export-error code"
+    );
+
+    let _ = std::fs::remove_file(&report_path);
+}
+
+#[test]
 fn inspect_on_a_missing_report_is_an_input_error() {
     let output = sextant()
         .arg("inspect")

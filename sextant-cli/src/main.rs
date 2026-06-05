@@ -10,8 +10,10 @@
 //! egress (NFR-4).
 //!
 //! The `inspect` subcommand reads a sample through a report and renders an
-//! annotated hex view (FR-35). The exporters are wired in by a later checklist
-//! step, so `export` and `bench` still print a not-yet-implemented message.
+//! annotated hex view (FR-35). The `export` subcommand reads a report and emits
+//! an editable parser (Kaitai, ImHex, Wireshark, or 010) from the chosen IR
+//! (FR-36, FR-37), with an optional Kaitai cross-check (FR-38). Only `bench`
+//! still prints a not-yet-implemented message.
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -21,12 +23,15 @@ use sextant_engine::{
     DEFAULT_MAX_BYTES_PER_SAMPLE, DEFAULT_MAX_TOTAL_BYTES, InferenceOptions, IngestOptions,
     InspectOptions, Limits, Report, SampleSet, infer, ingest, render,
 };
+use sextant_export::{ExportFormat, export};
 
 /// The PRD exit code for an input error (Section 14): a path that does not
 /// exist, a malformed glob, an unreadable file, or no usable samples.
 const EXIT_INPUT_ERROR: u8 = 2;
 /// The PRD exit code for inference producing no usable hypothesis (Section 14).
 const EXIT_NO_HYPOTHESIS: u8 = 3;
+/// The PRD exit code for an export error (Section 14).
+const EXIT_EXPORT_ERROR: u8 = 4;
 
 /// Infer the structure of unknown binary formats and protocols from samples,
 /// then emit parsers verified against those samples.
@@ -78,11 +83,23 @@ enum Command {
         #[arg(long)]
         color: bool,
     },
-    /// Export a verified parser from a report.
+    /// Export a verified parser from a report (FR-36, FR-37).
     Export {
         /// Report produced by `sextant infer`.
         #[arg(value_name = "REPORT")]
         report: String,
+        /// The target parser format: kaitai, imhex, wireshark, or 010.
+        #[arg(long, value_name = "FMT")]
+        format: String,
+        /// Write the generated parser to this path. Defaults to standard output.
+        #[arg(long, value_name = "FILE")]
+        out: Option<String>,
+        /// For the Kaitai format, additionally compile the spec and parse the
+        /// given samples through it as an independent cross-check (FR-38). This
+        /// is optional and never required: it reports separately and a missing
+        /// compiler is reported as skipped, not failed.
+        #[arg(long, value_name = "DIR")]
+        cross_validate: Option<String>,
     },
     /// Run the accuracy benchmark over the ground-truth corpus.
     Bench,
@@ -113,7 +130,12 @@ fn main() -> ExitCode {
             sample,
             color,
         } => run_inspect(&report, &sample, color),
-        Command::Export { .. } => not_implemented("export"),
+        Command::Export {
+            report,
+            format,
+            out,
+            cross_validate,
+        } => run_export(&report, &format, out.as_deref(), cross_validate.as_deref()),
         Command::Bench => not_implemented("bench"),
     }
 }
@@ -219,6 +241,107 @@ fn run_inspect(report_path: &str, sample_path: &str, color: bool) -> ExitCode {
     };
     print!("{}", render(&report, &sample, &options));
     ExitCode::SUCCESS
+}
+
+/// Read a report, export the chosen IR to a parser format, and write it out
+/// (FR-36, FR-37). Optionally cross-validate a Kaitai export (FR-38).
+fn run_export(
+    report_path: &str,
+    format_name: &str,
+    out: Option<&str>,
+    cross_validate: Option<&str>,
+) -> ExitCode {
+    let Some(target) = ExportFormat::parse(format_name) else {
+        eprintln!(
+            "sextant export: unknown format `{format_name}`. Use one of: kaitai, imhex, wireshark, 010."
+        );
+        return ExitCode::from(EXIT_EXPORT_ERROR);
+    };
+
+    let report_text = match std::fs::read_to_string(report_path) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("sextant export: could not read report {report_path}: {error}");
+            return ExitCode::from(EXIT_INPUT_ERROR);
+        }
+    };
+    let report = match Report::from_json(&report_text) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("sextant export: {report_path} is not a valid report: {error}");
+            return ExitCode::from(EXIT_INPUT_ERROR);
+        }
+    };
+
+    let parser = match export(&report.format, target) {
+        Ok(parser) => parser,
+        Err(error) => {
+            eprintln!("sextant export: {error}");
+            return ExitCode::from(EXIT_EXPORT_ERROR);
+        }
+    };
+
+    match out {
+        Some(path) => {
+            if let Err(error) = std::fs::write(path, &parser) {
+                eprintln!("sextant export: could not write {path}: {error}");
+                return ExitCode::from(EXIT_EXPORT_ERROR);
+            }
+            println!("Wrote {target} parser to {path}");
+        }
+        None => print!("{parser}"),
+    }
+
+    if let Some(dir) = cross_validate {
+        if let Some(code) = run_cross_validate(&report, target, dir) {
+            return code;
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Run the optional Kaitai cross-check on every sample in `dir` (FR-38). Returns
+/// `Some(exit code)` on a hard failure and `None` otherwise. A cross-check is
+/// only meaningful for the Kaitai target and never required by the pipeline.
+fn run_cross_validate(report: &Report, target: ExportFormat, dir: &str) -> Option<ExitCode> {
+    if target != ExportFormat::Kaitai {
+        eprintln!("sextant export: --cross-validate applies only to the kaitai format; ignoring.");
+        return None;
+    }
+    let samples = match read_sample_dir(dir) {
+        Ok(samples) => samples,
+        Err(error) => {
+            eprintln!("sextant export: could not read samples from {dir}: {error}");
+            return Some(ExitCode::from(EXIT_INPUT_ERROR));
+        }
+    };
+    match sextant_export::crossval::cross_validate(&report.format, &samples) {
+        sextant_export::crossval::CrossValidation::Passed { samples } => {
+            println!(
+                "Cross-validation: the Kaitai spec compiled and parsed all {samples} samples."
+            );
+            None
+        }
+        sextant_export::crossval::CrossValidation::Skipped { reason } => {
+            println!("Cross-validation: skipped ({reason}).");
+            None
+        }
+        sextant_export::crossval::CrossValidation::Failed { detail } => {
+            eprintln!("sextant export: cross-validation failed: {detail}");
+            Some(ExitCode::from(EXIT_EXPORT_ERROR))
+        }
+    }
+}
+
+/// Read every regular file in a directory into memory, sorted by name.
+fn read_sample_dir(dir: &str) -> std::io::Result<Vec<Vec<u8>>> {
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_file())
+        .collect();
+    paths.sort();
+    paths.into_iter().map(std::fs::read).collect()
 }
 
 /// Print the scored field map and the fit-score breakdown of a report.
