@@ -107,6 +107,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "glob"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -202,12 +208,14 @@ name = "sextant-cli"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "sextant-engine",
 ]
 
 [[package]]
 name = "sextant-engine"
 version = "0.0.0"
 dependencies = [
+ "glob",
  "sextant-ir",
 ]
 

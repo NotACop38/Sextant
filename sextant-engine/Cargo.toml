@@ -12,6 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+glob.workspace = true
 sextant-ir.workspace = true
 
 [lints]

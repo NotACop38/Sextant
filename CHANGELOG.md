@@ -32,3 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confidences that are not sane, each with a clear, located error.
 - A hand-authored ground-truth IR for PNG, committed as a fixture for later
   steps.
+- Sample ingestion in `sextant-engine`: files, directories, and glob patterns
+  are normalized into an ordered sample set with per-sample provenance (path,
+  retained length, full size, and source offset), with configurable per-sample
+  and total byte caps that bound memory and are surfaced to the user (FR-1,
+  FR-3, FR-4, FR-5).
+- `sextant infer <inputs>` now ingests its inputs and reports the sample count
+  and sizes, with `--recursive`, `--max-bytes-per-sample`, and
+  `--max-total-bytes` options. Pathological inputs (empty, single-byte, very
+  large, identical, and single-sample) are handled without error.

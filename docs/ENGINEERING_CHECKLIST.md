@@ -113,16 +113,16 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Implement file and directory and glob ingestion into an ordered sample set with provenance.
-- [ ] Enforce per-sample and total byte caps (FR-5).
-- [ ] Handle empty files, single-byte files, very large files, identical files, and a single-sample set without error (FR-4).
-- [ ] Add tests covering each pathological case.
+- [x] Implement file and directory and glob ingestion into an ordered sample set with provenance.
+- [x] Enforce per-sample and total byte caps (FR-5).
+- [x] Handle empty files, single-byte files, very large files, identical files, and a single-sample set without error (FR-4).
+- [x] Add tests covering each pathological case.
 
 ### Acceptance criteria
 
-- [ ] `sextant infer <dir>` ingests a directory and reports the sample count and sizes.
-- [ ] All pathological-input tests pass.
-- [ ] Byte caps are enforced and surfaced to the user.
+- [x] `sextant infer <dir>` ingests a directory and reports the sample count and sizes.
+- [x] All pathological-input tests pass.
+- [x] Byte caps are enforced and surfaced to the user.
 
 ---
 
