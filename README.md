@@ -26,6 +26,8 @@ Sextant infers the structure of unknown binary file formats and network protocol
 - [What is Sextant?](#what-is-sextant)
 - [The problem](#the-problem)
 - [How it works](#how-it-works)
+- [Demo](#demo)
+- [Documentation](#documentation)
 - [How Sextant is positioned](#how-sextant-is-positioned)
 - [Output formats](#output-formats)
 - [Usage (target interface)](#usage-target-interface)
@@ -101,6 +103,28 @@ The heart of Sextant is the **Format Hypothesis IR** and its **native executor**
 A note on the alignment step: comparing many samples to discover where fields begin and end is, mathematically, the same problem as aligning biological sequences. Sextant borrows sequence-alignment algorithms (Needleman-Wunsch, Smith-Waterman) from bioinformatics for this; the technique has a long history in protocol reverse engineering.
 
 The language-model pass is **optional**. The statistical engine and IR executor run entirely offline; the model adds semantic naming and ambiguity resolution on top. Run `--no-llm` for a fully local, privacy-preserving inference, or point Sextant at the model of your choice.
+
+## Demo
+
+An unknown binary blob goes in; a verified field map and a working parser come out, fully offline. The demo is recorded as an [asciinema cast](docs/demo.cast). Play it locally with:
+
+```bash
+asciinema play docs/demo.cast
+```
+
+The cast is generated from genuine command output by [`examples/record_demo.py`](examples/record_demo.py), not hand-written. To run the same flow yourself, see the [quick start](docs/quickstart.md) or run [`examples/quickstart.sh`](examples/quickstart.sh).
+
+## Documentation
+
+Full user documentation lives in [`docs/`](docs/index.md):
+
+- [Installation](docs/installation.md): build Sextant from source.
+- [Quick start](docs/quickstart.md): infer, inspect, and export a parser end to end.
+- [Workflows](docs/workflows.md): the `infer`, `inspect`, `export`, and `bench` commands in detail.
+- [How it works](docs/how-it-works.md): the Format Hypothesis IR and the verification loop.
+- [Privacy and the `--no-llm` story](docs/privacy.md): what is and is not transmitted.
+- [Model data handling](docs/model-data-handling.md): exactly what the optional model pass sends.
+- [Examples](docs/examples.md): runnable examples against the corpus and the recorded demo.
 
 ## How Sextant is positioned
 

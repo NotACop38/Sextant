@@ -314,17 +314,17 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Write user documentation: install, quick start, the `infer`, `inspect`, and `export` workflows, the `--no-llm` and privacy story, and a short "how it works" explanation of the IR and the verification loop.
-- [ ] Add runnable examples against the corpus.
-- [ ] Record an asciinema demo: unknown blob in, field map and working parser out.
-- [ ] Finalize `CONTRIBUTING.md`, `SECURITY.md`, and the data-handling note for the model pass.
-- [ ] Ensure the documentation site or `docs/` builds cleanly.
+- [x] Write user documentation: install, quick start, the `infer`, `inspect`, and `export` workflows, the `--no-llm` and privacy story, and a short "how it works" explanation of the IR and the verification loop.
+- [x] Add runnable examples against the corpus.
+- [x] Record an asciinema demo: unknown blob in, field map and working parser out.
+- [x] Finalize `CONTRIBUTING.md`, `SECURITY.md`, and the data-handling note for the model pass.
+- [x] Ensure the documentation site or `docs/` builds cleanly.
 
 ### Acceptance criteria
 
-- [ ] Documentation builds and the quick start works end to end on a fresh machine.
-- [ ] At least one example runs successfully against the corpus.
-- [ ] The demo is recorded and linked from the README.
+- [x] Documentation builds and the quick start works end to end on a fresh machine.
+- [x] At least one example runs successfully against the corpus.
+- [x] The demo is recorded and linked from the README.
 
 ---
 

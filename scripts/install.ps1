@@ -30,7 +30,10 @@ $target = "x86_64-pc-windows-msvc"
 $version = $env:SEXTANT_VERSION
 if (-not $version) {
     $api = "https://api.github.com/repos/$repo/releases/latest"
-    $release = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "sextant-install" }
+    # -UseBasicParsing keeps these calls working on Windows PowerShell 5.1, where
+    # the default parser depends on an Internet Explorer engine that may be
+    # absent or not yet first-run-configured. It is a no-op on PowerShell 6+.
+    $release = Invoke-RestMethod -Uri $api -UseBasicParsing -Headers @{ "User-Agent" = "sextant-install" }
     $version = $release.tag_name -replace '^v', ''
 }
 if (-not $version) { throw "could not determine the latest release version" }
@@ -47,8 +50,8 @@ try {
     $sumPath = "$zipPath.sha256"
 
     Write-Host "Downloading $archive ..."
-    Invoke-WebRequest -Uri $url -OutFile $zipPath -Headers @{ "User-Agent" = "sextant-install" }
-    Invoke-WebRequest -Uri $sumUrl -OutFile $sumPath -Headers @{ "User-Agent" = "sextant-install" }
+    Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing -Headers @{ "User-Agent" = "sextant-install" }
+    Invoke-WebRequest -Uri $sumUrl -OutFile $sumPath -UseBasicParsing -Headers @{ "User-Agent" = "sextant-install" }
 
     Write-Host "Verifying checksum ..."
     $expected = ((Get-Content $sumPath) -split '\s+')[0].ToLower()

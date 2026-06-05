@@ -9,8 +9,11 @@ name: Release
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-*"
+      # GitHub Actions tag filters are globs, not regular expressions, so a glob
+      # is used here and the strict SemVer check lives in the verify-version job
+      # below. `v*.*.*` matches stable tags like `v0.1.0` and prereleases like
+      # `v0.1.0-rc.1` (the trailing `*` also matches `-` and `.`).
+      - "v*.*.*"
 
 permissions:
   contents: write
@@ -35,6 +38,11 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
+          # The glob trigger is permissive, so enforce SemVer here.
+          if ! printf '%s' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "::error::tag $GITHUB_REF_NAME is not a SemVer version" >&2
+            exit 1
+          fi
           # The first `version = "..."` in the root manifest is the shared
           # workspace.package version that every crate inherits, so this is the
           # single source of truth for "the version is consistent across crates".
