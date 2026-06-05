@@ -31,13 +31,15 @@ pub const PARSER_VALIDITY_TARGET: f64 = 1.0;
 /// accuracy bar (0.8) for the language-model pass; the statistics-only pipeline
 /// the harness runs offline is held to this measured floor so a regression is
 /// caught without gating on a model the CI does not call. The deterministic
-/// pipeline currently measures 0.83, so this floor leaves a small headroom and
-/// trips on any real drop.
-pub const ROLE_ACCURACY_FLOOR: f64 = 0.80;
+/// pipeline currently measures about 0.81 (semantic credit requires the inferred
+/// field to occupy the exact ground-truth span), so this floor leaves a small
+/// headroom and trips on any real drop.
+pub const ROLE_ACCURACY_FLOOR: f64 = 0.78;
 /// The regression floor for semantic type accuracy on the statistics-only
 /// pipeline (a measured floor, see [`ROLE_ACCURACY_FLOOR`]). The pipeline
-/// measures 0.74; this floor trips on any real regression.
-pub const TYPE_ACCURACY_FLOOR: f64 = 0.70;
+/// measures about 0.72 (a multi-byte integer must also agree on byte order);
+/// this floor trips on any real regression.
+pub const TYPE_ACCURACY_FLOOR: f64 = 0.68;
 
 /// Options for a benchmark run.
 #[derive(Debug, Clone)]

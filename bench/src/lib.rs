@@ -174,8 +174,18 @@ pub fn read_sample(format: &str, sample: &SampleEntry) -> std::io::Result<Vec<u8
     read_sample_in(&corpus_dir(), format, sample)
 }
 
+/// The per-sample byte cap the benchmark reads under. A corpus passed with
+/// `--corpus` is untrusted: its ground truth could name an arbitrarily large
+/// sample, so each read is bounded to keep `sextant bench` within the repository
+/// resource-limit invariant (FR-24, NFR-2) rather than allocating a whole file
+/// up front. It matches the engine's per-sample ingestion cap so the bytes the
+/// benchmark evaluates are the same the pipeline would ingest. The corpus
+/// samples are tiny, so this never clips a real sample.
+pub const SAMPLE_READ_CAP: usize = sextant_engine::DEFAULT_MAX_BYTES_PER_SAMPLE;
+
 /// Reads the raw bytes of a sample listed in a ground-truth description, under
-/// an arbitrary corpus directory.
+/// an arbitrary corpus directory, bounded by [`SAMPLE_READ_CAP`] so a hostile
+/// corpus cannot drive an unbounded allocation.
 ///
 /// # Errors
 ///
@@ -185,7 +195,14 @@ pub fn read_sample_in(
     format: &str,
     sample: &SampleEntry,
 ) -> std::io::Result<Vec<u8>> {
-    std::fs::read(corpus_dir.join(format).join(&sample.path))
+    use std::io::Read as _;
+    let path = corpus_dir.join(format).join(&sample.path);
+    let file = std::fs::File::open(path)?;
+    let mut data = Vec::new();
+    // `take` bounds both the bytes read and the allocation: an attacker-sized
+    // sample costs at most the cap, not the file's full length.
+    file.take(SAMPLE_READ_CAP as u64).read_to_end(&mut data)?;
+    Ok(data)
 }
 
 #[cfg(test)]

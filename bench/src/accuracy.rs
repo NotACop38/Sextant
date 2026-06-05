@@ -22,7 +22,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use sextant_engine::{FieldInstance, Limits, Value, execute, infer_candidates, refine};
-use sextant_ir::Role;
+use sextant_ir::{Endianness, Role};
 
 use crate::{Field, GroundTruth, SizeRule, corpus_dir, load_ground_truth_in, read_sample_in};
 
@@ -104,32 +104,133 @@ fn int_type(ty: &str) -> Option<(usize, bool)> {
     }
 }
 
-/// A canonical token for a ground-truth storage type, ignoring byte order so the
-/// comparison against the executed value (which records width but not the
-/// declared endianness) is on equal footing.
-fn canonical_truth_type(ty: &str) -> String {
-    if let Some((width, _)) = int_type(ty) {
-        return format!("int{width}");
-    }
-    match ty {
-        "bytes" => "bytes".to_owned(),
-        "string" => "string".to_owned(),
-        other => other.to_owned(),
+/// A canonical storage type, used to compare a ground-truth field's declared
+/// type against an executed field's decoded type. Integer byte order is part of
+/// the type: an inferred field decoded big-endian does not match a little-endian
+/// ground-truth field, so a parser that reads a numeric field with the wrong
+/// endianness is not counted as a type hit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TypeToken {
+    /// A fixed-width integer. `endian` is `None` for a single byte (no byte
+    /// order) and for an executed value whose byte order cannot be determined
+    /// (the bytes read the same either way), which is then treated as matching.
+    Int {
+        /// Width in bytes.
+        width: usize,
+        /// Byte order, when it is meaningful and determinable.
+        endian: Option<Endianness>,
+    },
+    /// A raw byte run.
+    Bytes,
+    /// A decoded string.
+    Str,
+    /// Any other type, compared by name.
+    Other(String),
+}
+
+impl TypeToken {
+    /// Whether an inferred type (`self`) matches a ground-truth type. Integers
+    /// must agree on width and, for multi-byte fields, on byte order. An
+    /// undeterminable inferred byte order (palindromic bytes) is not penalized.
+    fn matches(&self, truth: &TypeToken) -> bool {
+        match (self, truth) {
+            (
+                TypeToken::Int {
+                    width: a,
+                    endian: ea,
+                },
+                TypeToken::Int {
+                    width: b,
+                    endian: eb,
+                },
+            ) => {
+                if a != b {
+                    return false;
+                }
+                if *a <= 1 {
+                    return true;
+                }
+                match (ea, eb) {
+                    (Some(x), Some(y)) => x == y,
+                    // Byte order not determinable on one side: do not penalize.
+                    _ => true,
+                }
+            }
+            (TypeToken::Bytes, TypeToken::Bytes) | (TypeToken::Str, TypeToken::Str) => true,
+            (TypeToken::Other(x), TypeToken::Other(y)) => x == y,
+            _ => false,
+        }
     }
 }
 
-/// A canonical token for an executed field's storage type, derived from its
-/// decoded value and concrete byte width. Enumerated values are folded to their
-/// underlying integer width because the corpus expresses an enum as an integer
-/// or string with an `enum` role, not as a distinct storage type.
-fn canonical_value_type(value: &Value, width: usize) -> String {
-    match value {
-        Value::Integer(_) | Value::Enum { .. } => format!("int{width}"),
-        Value::Bytes | Value::Opaque => "bytes".to_owned(),
-        Value::Text(_) => "string".to_owned(),
-        Value::Struct(_) => "struct".to_owned(),
-        Value::Array(_) => "array".to_owned(),
+/// The ground-truth storage type as a [`TypeToken`], carrying declared byte
+/// order for multi-byte integers.
+fn truth_type_token(ty: &str) -> TypeToken {
+    if let Some((width, big)) = int_type(ty) {
+        let endian = if width <= 1 {
+            None
+        } else if big {
+            Some(Endianness::Big)
+        } else {
+            Some(Endianness::Little)
+        };
+        return TypeToken::Int { width, endian };
     }
+    match ty {
+        "bytes" => TypeToken::Bytes,
+        "string" => TypeToken::Str,
+        other => TypeToken::Other(other.to_owned()),
+    }
+}
+
+/// The executed field's storage type as a [`TypeToken`]. For an integer the byte
+/// order the executor used is recovered from the raw bytes: whichever of the
+/// little- and big-endian readings equals the decoded value is the order that
+/// was applied. Enumerated values fold to their underlying integer, matching how
+/// the corpus expresses an enum (an integer or string with an `enum` role).
+fn inferred_type_token(value: &Value, bytes: &[u8], start: usize, end: usize) -> TypeToken {
+    let width = end.saturating_sub(start);
+    match value {
+        Value::Integer(decoded) => integer_token(*decoded, bytes, start, end, width),
+        Value::Enum { value, .. } => integer_token(*value, bytes, start, end, width),
+        Value::Bytes | Value::Opaque => TypeToken::Bytes,
+        Value::Text(_) => TypeToken::Str,
+        Value::Struct(_) => TypeToken::Other("struct".to_owned()),
+        Value::Array(_) => TypeToken::Other("array".to_owned()),
+    }
+}
+
+/// Build an integer [`TypeToken`], recovering the byte order the executor applied
+/// by comparing the decoded value against the little- and big-endian readings of
+/// the field's bytes.
+fn integer_token(decoded: i128, bytes: &[u8], start: usize, end: usize, width: usize) -> TypeToken {
+    if width <= 1 || !(2..=8).contains(&width) || end > bytes.len() || start > end {
+        return TypeToken::Int {
+            width,
+            endian: None,
+        };
+    }
+    let slice = &bytes[start..end];
+    let mut little: i128 = 0;
+    for (index, &byte) in slice.iter().enumerate() {
+        little |= i128::from(byte) << (8 * index);
+    }
+    let mut big: i128 = 0;
+    for &byte in slice {
+        big = (big << 8) | i128::from(byte);
+    }
+    let endian = if little == big {
+        // The bytes read the same either way: byte order is undeterminable.
+        None
+    } else if decoded == big {
+        Some(Endianness::Big)
+    } else if decoded == little {
+        Some(Endianness::Little)
+    } else {
+        // A signed or otherwise unexpected reading: do not assert an order.
+        None
+    };
+    TypeToken::Int { width, endian }
 }
 
 /// A canonical token for a ground-truth role string.
@@ -200,10 +301,12 @@ fn field_size(field: &Field, values: &HashMap<String, u64>, cursor: usize, len: 
 struct TruthField {
     /// The field's start offset in the sample.
     start: usize,
+    /// The field's end offset (exclusive) in the sample.
+    end: usize,
     /// The field's canonical role token.
     role: String,
-    /// The field's canonical storage type token.
-    ty: String,
+    /// The field's storage type.
+    ty: TypeToken,
 }
 
 /// Walk the ground-truth header and records against one concrete sample,
@@ -231,12 +334,15 @@ fn walk_ground_truth(
         if let Some(value) = decode_int(field, sample, *cursor) {
             values.insert(field.name.clone(), value);
         }
+        let size = field_size(field, values, *cursor, len);
+        let end = (*cursor + size).min(len);
         fields.push(TruthField {
             start,
+            end,
             role: canonical_truth_role(&field.role),
-            ty: canonical_truth_type(&field.ty),
+            ty: truth_type_token(&field.ty),
         });
-        *cursor += field_size(field, values, *cursor, len);
+        *cursor += size;
     };
 
     for field in &gt.structure.header {
@@ -266,10 +372,13 @@ fn ground_truth_boundaries(gt: &GroundTruth, sample: &[u8], record_count: u64) -
 /// A single inferred leaf field, flattened from the executed parse tree.
 #[derive(Debug, Clone)]
 struct InferredField {
+    /// The field's end offset (exclusive), so a match can require the whole span
+    /// to agree, not just the start.
+    end: usize,
     /// The field's role token.
     role: String,
-    /// The field's storage type token.
-    ty: String,
+    /// The field's storage type.
+    ty: TypeToken,
 }
 
 /// Collect the start offset of every field instance (recursively into structs
@@ -297,27 +406,31 @@ fn inferred_boundaries(fields: &[FieldInstance], consumed: usize) -> BTreeSet<us
 }
 
 /// Index the inferred leaf fields by their start offset, so a ground-truth field
-/// can be matched to the inferred field that begins at the same place.
-fn inferred_leaves_by_start(fields: &[FieldInstance]) -> HashMap<usize, InferredField> {
-    fn walk(field: &FieldInstance, out: &mut HashMap<usize, InferredField>) {
+/// can be matched to the inferred field that begins at the same place. The
+/// sample bytes are needed to recover an integer field's byte order.
+fn inferred_leaves_by_start(
+    fields: &[FieldInstance],
+    bytes: &[u8],
+) -> HashMap<usize, InferredField> {
+    fn walk(field: &FieldInstance, bytes: &[u8], out: &mut HashMap<usize, InferredField>) {
         match &field.value {
             Value::Struct(children) | Value::Array(children) => {
                 for child in children {
-                    walk(child, out);
+                    walk(child, bytes, out);
                 }
             }
             value => {
-                let width = field.end.saturating_sub(field.start);
                 out.entry(field.start).or_insert_with(|| InferredField {
+                    end: field.end,
                     role: canonical_field_role(field.role),
-                    ty: canonical_value_type(value, width),
+                    ty: inferred_type_token(value, bytes, field.start, field.end),
                 });
             }
         }
     }
     let mut out = HashMap::new();
     for field in fields {
-        walk(field, &mut out);
+        walk(field, bytes, &mut out);
     }
     out
 }
@@ -388,16 +501,23 @@ pub fn evaluate_format_in(corpus_dir: &Path, format: &str) -> std::io::Result<Fo
         let truth_boundaries = ground_truth_boundaries(&gt, bytes, *record_count);
         let execution = execute(&refined.format, bytes, &limits);
         let inferred = inferred_boundaries(&execution.fields, execution.consumed);
-        let leaves = inferred_leaves_by_start(&execution.fields);
+        let leaves = inferred_leaves_by_start(&execution.fields, bytes);
         let (precision, recall, f1) = boundary_scores(&truth_boundaries, &inferred);
 
         for truth in &truth_fields {
             field_total += 1;
+            // Award semantic credit only when the inferred field occupies the
+            // same span as the ground-truth field. A field at the right start but
+            // the wrong length was not recovered, so it earns no role or type
+            // hit even if its label happens to agree.
             if let Some(inferred_field) = leaves.get(&truth.start) {
+                if inferred_field.end != truth.end {
+                    continue;
+                }
                 if inferred_field.role == truth.role {
                     role_hits += 1;
                 }
-                if inferred_field.ty == truth.ty {
+                if inferred_field.ty.matches(&truth.ty) {
                     type_hits += 1;
                 }
             }
@@ -535,6 +655,49 @@ mod tests {
         let (fields, _) = walk_ground_truth(&gt, &bytes, entry.record_count);
         assert!(fields.iter().any(|f| f.role == "magic"));
         assert!(fields.iter().any(|f| f.role == "length"));
-        assert!(fields.iter().any(|f| f.ty == "bytes"));
+        assert!(fields.iter().any(|f| f.ty == TypeToken::Bytes));
+        // The TLV length field is a little-endian u16; its declared byte order is
+        // part of its type token.
+        assert!(fields.iter().any(|f| f.ty
+            == TypeToken::Int {
+                width: 2,
+                endian: Some(Endianness::Little),
+            }));
+    }
+
+    #[test]
+    fn type_token_matching_respects_width_and_byte_order() {
+        let be = TypeToken::Int {
+            width: 2,
+            endian: Some(Endianness::Big),
+        };
+        let le = TypeToken::Int {
+            width: 2,
+            endian: Some(Endianness::Little),
+        };
+        assert!(be.matches(&be));
+        assert!(
+            !be.matches(&le),
+            "byte order must agree for multi-byte ints"
+        );
+        assert!(
+            !be.matches(&TypeToken::Int {
+                width: 4,
+                endian: Some(Endianness::Big)
+            }),
+            "width must agree"
+        );
+        // A single byte has no byte order, so it always matches on width.
+        let u8a = TypeToken::Int {
+            width: 1,
+            endian: None,
+        };
+        assert!(u8a.matches(&u8a));
+        // Undeterminable inferred byte order is not penalized.
+        let unknown = TypeToken::Int {
+            width: 2,
+            endian: None,
+        };
+        assert!(unknown.matches(&be));
     }
 }

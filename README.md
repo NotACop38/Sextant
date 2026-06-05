@@ -124,12 +124,12 @@ These numbers are produced by `sextant bench` over the ground-truth corpus and a
 
 | Format | Samples | Boundary F1 | Perfect | Role acc. | Type acc. | Parser validity |
 |---|--:|--:|:-:|--:|--:|--:|
-| tlv | 3 | 0.943 | no | 0.889 | 0.667 | 100% |
+| tlv | 3 | 0.943 | no | 0.778 | 0.556 | 100% |
 | scma | 5 | 0.834 | no | 0.333 | 0.333 | 100% |
 | stot | 5 | 1.000 | yes | 1.000 | 1.000 | 100% |
 | sdlp | 5 | 1.000 | yes | 1.000 | 1.000 | 100% |
 | png | 3 | 1.000 | yes | 0.923 | 0.692 | 100% |
-| **corpus** | **21** | **0.956** | **60%** | **0.829** | **0.738** | **100%** |
+| **corpus** | **21** | **0.956** | **60%** | **0.807** | **0.716** | **100%** |
 
 Targets (PRD Section 15): field-boundary F1 at least 0.85, perfection rate at least 0.50, parser validity 100%. The corpus run meets them: F1 0.956, perfection 60%, validity 100%.
 
