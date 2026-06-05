@@ -1,0 +1,291 @@
+{
+  "schema_version": "1.0",
+  "metadata": {
+    "tool_version": "0.0.0",
+    "sample_count": 3,
+    "total_bytes": 61,
+    "no_llm": true
+  },
+  "format": {
+    "name": "tlv",
+    "endianness": "little",
+    "root": {
+      "fields": [
+        {
+          "name": "magic",
+          "kind": {
+            "type": "bytes"
+          },
+          "size": {
+            "rule": "fixed",
+            "bytes": 4
+          },
+          "role": "magic",
+          "constraints": [
+            {
+              "constant": {
+                "value": "53544c56"
+              }
+            }
+          ],
+          "confidence": 1.0,
+          "evidence": {
+            "detector": "hand-authored",
+            "notes": [
+              "The four ASCII bytes STLV begin every container."
+            ]
+          }
+        },
+        {
+          "name": "version",
+          "kind": {
+            "type": "integer",
+            "width": 1,
+            "signed": "unsigned"
+          },
+          "role": "version",
+          "constraints": [
+            {
+              "constant": {
+                "value": "01"
+              }
+            }
+          ],
+          "confidence": 1.0,
+          "evidence": {
+            "detector": "hand-authored",
+            "notes": [
+              "The format version, always 1 in the corpus."
+            ]
+          }
+        },
+        {
+          "name": "record_count",
+          "kind": {
+            "type": "integer",
+            "width": 1,
+            "signed": "unsigned"
+          },
+          "role": "count",
+          "confidence": 1.0,
+          "evidence": {
+            "detector": "hand-authored",
+            "notes": [
+              "How many records follow the header."
+            ]
+          }
+        },
+        {
+          "name": "records",
+          "kind": {
+            "type": "array",
+            "element": {
+              "name": "record",
+              "kind": {
+                "type": "struct",
+                "structure": {
+                  "fields": [
+                    {
+                      "name": "tag",
+                      "kind": {
+                        "type": "integer",
+                        "width": 1,
+                        "signed": "unsigned"
+                      },
+                      "role": "enum",
+                      "confidence": 0.9,
+                      "evidence": {
+                        "detector": "hand-authored",
+                        "notes": [
+                          "A one-byte record type tag."
+                        ]
+                      }
+                    },
+                    {
+                      "name": "length",
+                      "kind": {
+                        "type": "integer",
+                        "width": 2,
+                        "signed": "unsigned"
+                      },
+                      "role": "length",
+                      "confidence": 1.0,
+                      "evidence": {
+                        "detector": "hand-authored",
+                        "notes": [
+                          "Little-endian byte length of the value that follows."
+                        ]
+                      }
+                    },
+                    {
+                      "name": "value",
+                      "kind": {
+                        "type": "bytes"
+                      },
+                      "size": {
+                        "rule": "derived",
+                        "length_field": "length"
+                      },
+                      "role": "payload",
+                      "confidence": 0.95,
+                      "evidence": {
+                        "detector": "hand-authored",
+                        "notes": [
+                          "Opaque value bytes sized by the preceding length field."
+                        ]
+                      }
+                    }
+                  ]
+                }
+              },
+              "confidence": 1.0,
+              "evidence": {
+                "detector": "hand-authored",
+                "notes": [
+                  "One TLV record: a tag, a length, and the value bytes."
+                ]
+              }
+            },
+            "count": {
+              "rule": "from_field",
+              "count_field": "record_count"
+            }
+          },
+          "confidence": 1.0,
+          "evidence": {
+            "detector": "hand-authored",
+            "notes": [
+              "The records that follow the header, one per record_count."
+            ]
+          }
+        }
+      ]
+    },
+    "metadata": {
+      "description": "Sextant custom TLV container: a four-byte magic, a version byte, a record count, and that many records, each a tag byte, a little-endian length, and a value of that length. Hand-authored ground truth matching corpus/tlv.",
+      "source": "Authored by hand for the Sextant project to match corpus/tlv/generate.py."
+    }
+  },
+  "score": {
+    "overall": 1.0,
+    "coverage": 1.0,
+    "consistency": 1.0,
+    "generality": 1.0,
+    "weights": {
+      "coverage": 0.45,
+      "consistency": 0.35,
+      "generality": 0.2
+    },
+    "samples": [
+      {
+        "index": 0,
+        "sample_len": 21,
+        "explained_bytes": 21,
+        "overlap_bytes": 0,
+        "gap_bytes": 0,
+        "trailing_bytes": 0,
+        "coverage": 1.0,
+        "consistency": 1.0,
+        "parsed": true,
+        "constraints_total": 2,
+        "constraints_passed": 2,
+        "failure": null
+      },
+      {
+        "index": 1,
+        "sample_len": 24,
+        "explained_bytes": 24,
+        "overlap_bytes": 0,
+        "gap_bytes": 0,
+        "trailing_bytes": 0,
+        "coverage": 1.0,
+        "consistency": 1.0,
+        "parsed": true,
+        "constraints_total": 2,
+        "constraints_passed": 2,
+        "failure": null
+      },
+      {
+        "index": 2,
+        "sample_len": 16,
+        "explained_bytes": 16,
+        "overlap_bytes": 0,
+        "gap_bytes": 0,
+        "trailing_bytes": 0,
+        "coverage": 1.0,
+        "consistency": 1.0,
+        "parsed": true,
+        "constraints_total": 2,
+        "constraints_passed": 2,
+        "failure": null
+      }
+    ]
+  },
+  "field_map": [
+    {
+      "depth": 0,
+      "name": "magic",
+      "role": "magic",
+      "kind": "bytes",
+      "size": "4 bytes",
+      "confidence": 1.0
+    },
+    {
+      "depth": 0,
+      "name": "version",
+      "role": "version",
+      "kind": "u8",
+      "size": "1 bytes",
+      "confidence": 1.0
+    },
+    {
+      "depth": 0,
+      "name": "record_count",
+      "role": "count",
+      "kind": "u8",
+      "size": "1 bytes",
+      "confidence": 1.0
+    },
+    {
+      "depth": 0,
+      "name": "records",
+      "role": "unknown",
+      "kind": "array",
+      "size": "count from record_count",
+      "confidence": 1.0
+    },
+    {
+      "depth": 1,
+      "name": "record",
+      "role": "unknown",
+      "kind": "struct",
+      "size": "from fields",
+      "confidence": 1.0
+    },
+    {
+      "depth": 2,
+      "name": "tag",
+      "role": "enum",
+      "kind": "u8",
+      "size": "1 bytes",
+      "confidence": 0.9
+    },
+    {
+      "depth": 2,
+      "name": "length",
+      "role": "length",
+      "kind": "u16",
+      "size": "2 bytes",
+      "confidence": 1.0
+    },
+    {
+      "depth": 2,
+      "name": "value",
+      "role": "payload",
+      "kind": "bytes",
+      "size": "derived from length",
+      "confidence": 0.95
+    }
+  ],
+  "refinement": []
+}

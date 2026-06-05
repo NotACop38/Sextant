@@ -15,6 +15,7 @@
 //! language-model semantic pass and its richer proposals arrive in Step 9 and
 //! flow through the very same non-regression gate.
 
+use serde::{Deserialize, Serialize};
 use sextant_ir::{Endianness, Field, Format, Kind, SizeRule, Structure};
 
 use crate::limits::Limits;
@@ -32,7 +33,8 @@ const MAX_PASSES: usize = 64;
 const WIDTHS: [u8; 4] = [1, 2, 4, 8];
 
 /// Whether a refinement proposal was accepted or rejected by the scorer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RefineOutcome {
     /// The change improved the verified score and was applied.
     Accepted,
@@ -41,7 +43,7 @@ pub enum RefineOutcome {
 }
 
 /// One step in the refinement history (FR-28).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RefineStep {
     /// A human-readable description of the proposed change.
     pub description: String,

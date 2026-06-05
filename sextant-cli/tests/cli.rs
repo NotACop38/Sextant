@@ -88,6 +88,63 @@ fn infer_ingests_a_directory_and_reports_count_and_sizes() {
 }
 
 #[test]
+fn infer_writes_a_report_that_inspect_can_render() {
+    let samples = corpus_dir("tlv/samples");
+    let report_path =
+        std::env::temp_dir().join(format!("sextant-test-report-{}.json", std::process::id()));
+
+    let infer = sextant()
+        .arg("infer")
+        .arg(&samples)
+        .arg("--out")
+        .arg(&report_path)
+        .output()
+        .expect("run sextant infer with --out");
+    assert!(
+        infer.status.success(),
+        "infer --out should succeed, stderr: {}",
+        String::from_utf8_lossy(&infer.stderr)
+    );
+    assert!(report_path.exists(), "infer should write the report file");
+
+    let inspect = sextant()
+        .arg("inspect")
+        .arg(&report_path)
+        .arg("--sample")
+        .arg(corpus_dir("tlv/samples/sample_01.tlv"))
+        .output()
+        .expect("run sextant inspect");
+    assert!(
+        inspect.status.success(),
+        "inspect should succeed, stderr: {}",
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&inspect.stdout);
+    assert!(stdout.contains("Offset"), "inspect output was: {stdout}");
+    assert!(stdout.contains("Hex:"), "inspect output was: {stdout}");
+    // The annotated hex dump shows the magic bytes in the ascii gutter.
+    assert!(stdout.contains("STLV"), "inspect output was: {stdout}");
+
+    let _ = std::fs::remove_file(&report_path);
+}
+
+#[test]
+fn inspect_on_a_missing_report_is_an_input_error() {
+    let output = sextant()
+        .arg("inspect")
+        .arg("this/report/does/not/exist.json")
+        .arg("--sample")
+        .arg(corpus_dir("tlv/samples/sample_01.tlv"))
+        .output()
+        .expect("run sextant inspect on a missing report");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a missing report should exit with the PRD input-error code"
+    );
+}
+
+#[test]
 fn infer_on_a_missing_path_is_an_input_error() {
     let output = sextant()
         .arg("infer")

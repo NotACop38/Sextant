@@ -1,0 +1,457 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/NotACop38/Sextant/schemas/report.schema.json/1.0",
+  "title": "Sextant inference report",
+  "description": "The machine-readable report produced by a Sextant inference run (FR-34): the chosen Format Hypothesis IR, the verified fit score and its breakdown, a flattened field map, the refinement history, and run metadata.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "metadata",
+    "format",
+    "score",
+    "field_map",
+    "refinement"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "The version of this report structure.",
+      "const": "1.0"
+    },
+    "metadata": { "$ref": "#/$defs/run_metadata" },
+    "format": { "$ref": "#/$defs/format" },
+    "score": { "$ref": "#/$defs/score" },
+    "field_map": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/field_map_entry" }
+    },
+    "refinement": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/refine_step" }
+    }
+  },
+  "$defs": {
+    "run_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool_version", "sample_count", "total_bytes", "no_llm"],
+      "properties": {
+        "tool_version": { "type": "string" },
+        "sample_count": { "type": "integer", "minimum": 0 },
+        "total_bytes": { "type": "integer", "minimum": 0 },
+        "no_llm": { "type": "boolean" }
+      }
+    },
+    "format": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "endianness", "root"],
+      "properties": {
+        "name": { "type": "string" },
+        "endianness": { "$ref": "#/$defs/endianness" },
+        "root": { "$ref": "#/$defs/structure" },
+        "enums": { "type": "object" },
+        "metadata": { "type": "object" }
+      }
+    },
+    "structure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fields"],
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/field" }
+        }
+      }
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "confidence"],
+      "properties": {
+        "name": { "type": "string" },
+        "kind": { "$ref": "#/$defs/kind" },
+        "size": { "$ref": "#/$defs/size_rule" },
+        "offset": { "$ref": "#/$defs/field_offset" },
+        "role": { "$ref": "#/$defs/role" },
+        "constraints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/constraint" }
+        },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "kind": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "width", "signed"],
+          "properties": {
+            "type": { "const": "integer" },
+            "width": { "type": "integer", "enum": [1, 2, 4, 8] },
+            "signed": { "$ref": "#/$defs/signedness" },
+            "endianness": { "$ref": "#/$defs/endianness" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": { "type": { "const": "bytes" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "encoding"],
+          "properties": {
+            "type": { "const": "string" },
+            "encoding": { "$ref": "#/$defs/string_encoding" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "enum", "width"],
+          "properties": {
+            "type": { "const": "enum" },
+            "enum": { "type": "string" },
+            "width": { "type": "integer", "enum": [1, 2, 4, 8] },
+            "endianness": { "$ref": "#/$defs/endianness" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "structure"],
+          "properties": {
+            "type": { "const": "struct" },
+            "structure": { "$ref": "#/$defs/structure" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "element", "count"],
+          "properties": {
+            "type": { "const": "array" },
+            "element": { "$ref": "#/$defs/field" },
+            "count": { "$ref": "#/$defs/count_rule" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": { "type": { "const": "opaque" } }
+        }
+      ]
+    },
+    "size_rule": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rule", "bytes"],
+          "properties": {
+            "rule": { "const": "fixed" },
+            "bytes": { "type": "integer", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rule", "length_field"],
+          "properties": {
+            "rule": { "const": "derived" },
+            "length_field": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rule", "terminator"],
+          "properties": {
+            "rule": { "const": "delimited" },
+            "terminator": { "type": "string" },
+            "include_terminator": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rule"],
+          "properties": { "rule": { "const": "to_end" } }
+        }
+      ]
+    },
+    "count_rule": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rule", "count"],
+          "properties": {
+            "rule": { "const": "fixed" },
+            "count": { "type": "integer", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rule", "count_field"],
+          "properties": {
+            "rule": { "const": "from_field" },
+            "count_field": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rule", "length_field"],
+          "properties": {
+            "rule": { "const": "bounded_by" },
+            "length_field": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rule"],
+          "properties": { "rule": { "const": "to_end" } }
+        }
+      ]
+    },
+    "field_offset": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "bytes"],
+          "properties": {
+            "mode": { "const": "absolute" },
+            "bytes": { "type": "integer", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "offset_field"],
+          "properties": {
+            "mode": { "const": "derived" },
+            "offset_field": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "constraint": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["constant"],
+          "properties": {
+            "constant": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["value"],
+              "properties": { "value": { "type": "string" } }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["int_range"],
+          "properties": {
+            "int_range": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["min", "max"],
+              "properties": {
+                "min": { "type": "integer" },
+                "max": { "type": "integer" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["checksum"],
+          "properties": {
+            "checksum": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["spec"],
+              "properties": { "spec": { "$ref": "#/$defs/checksum_spec" } }
+            }
+          }
+        }
+      ]
+    },
+    "checksum_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "covered"],
+      "properties": {
+        "algorithm": { "$ref": "#/$defs/checksum_algorithm" },
+        "covered": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["from", "to"],
+          "properties": {
+            "from": { "$ref": "#/$defs/range_anchor" },
+            "to": { "$ref": "#/$defs/range_anchor" }
+          }
+        }
+      }
+    },
+    "range_anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["anchor", "field"],
+      "properties": {
+        "anchor": { "enum": ["field_start", "field_end"] },
+        "field": { "type": "string" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "detector": { "type": "string" },
+        "support": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["agreeing", "total"],
+          "properties": {
+            "agreeing": { "type": "integer", "minimum": 0 },
+            "total": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "model_rationale": { "type": "string" },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "score": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "overall",
+        "coverage",
+        "consistency",
+        "generality",
+        "weights",
+        "samples"
+      ],
+      "properties": {
+        "overall": { "$ref": "#/$defs/unit_interval" },
+        "coverage": { "$ref": "#/$defs/unit_interval" },
+        "consistency": { "$ref": "#/$defs/unit_interval" },
+        "generality": { "$ref": "#/$defs/unit_interval" },
+        "weights": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["coverage", "consistency", "generality"],
+          "properties": {
+            "coverage": { "type": "number", "minimum": 0 },
+            "consistency": { "type": "number", "minimum": 0 },
+            "generality": { "type": "number", "minimum": 0 }
+          }
+        },
+        "samples": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/sample_score" }
+        }
+      }
+    },
+    "sample_score": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "sample_len",
+        "explained_bytes",
+        "overlap_bytes",
+        "gap_bytes",
+        "trailing_bytes",
+        "coverage",
+        "consistency",
+        "parsed",
+        "constraints_total",
+        "constraints_passed",
+        "failure"
+      ],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "sample_len": { "type": "integer", "minimum": 0 },
+        "explained_bytes": { "type": "integer", "minimum": 0 },
+        "overlap_bytes": { "type": "integer", "minimum": 0 },
+        "gap_bytes": { "type": "integer", "minimum": 0 },
+        "trailing_bytes": { "type": "integer", "minimum": 0 },
+        "coverage": { "$ref": "#/$defs/unit_interval" },
+        "consistency": { "$ref": "#/$defs/unit_interval" },
+        "parsed": { "type": "boolean" },
+        "constraints_total": { "type": "integer", "minimum": 0 },
+        "constraints_passed": { "type": "integer", "minimum": 0 },
+        "failure": { "type": ["object", "null"] }
+      }
+    },
+    "field_map_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["depth", "name", "role", "kind", "size", "confidence"],
+      "properties": {
+        "depth": { "type": "integer", "minimum": 0 },
+        "name": { "type": "string" },
+        "role": { "type": "string" },
+        "kind": { "type": "string" },
+        "size": { "type": "string" },
+        "confidence": { "$ref": "#/$defs/unit_interval" }
+      }
+    },
+    "refine_step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "outcome", "score_before", "score_after"],
+      "properties": {
+        "description": { "type": "string" },
+        "outcome": { "enum": ["accepted", "rejected"] },
+        "score_before": { "$ref": "#/$defs/unit_interval" },
+        "score_after": { "$ref": "#/$defs/unit_interval" }
+      }
+    },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "unit_interval": { "type": "number", "minimum": 0, "maximum": 1 },
+    "endianness": { "enum": ["little", "big"] },
+    "signedness": { "enum": ["unsigned", "signed"] },
+    "string_encoding": {
+      "enum": ["ascii", "utf8", "utf16_le", "utf16_be", "latin1"]
+    },
+    "checksum_algorithm": {
+      "enum": ["crc32", "crc16", "additive", "xor"]
+    },
+    "role": {
+      "enum": [
+        "magic",
+        "version",
+        "length",
+        "count",
+        "offset",
+        "checksum",
+        "timestamp",
+        "flags",
+        "enum",
+        "reserved",
+        "payload",
+        "unknown"
+      ]
+    }
+  }
+}

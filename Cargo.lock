@@ -243,6 +243,8 @@ version = "0.0.0"
 dependencies = [
  "bitvec",
  "glob",
+ "serde",
+ "serde_json",
  "sextant-ir",
 ]
 

@@ -4,19 +4,22 @@
 //! (Step 6): it ingests files, directories, and glob patterns into a normalized
 //! sample set (Step 4), generates and scores candidate hypotheses, selects the
 //! best, refines it under the non-regression invariant, and prints a scored field
-//! map. With `--no-llm` (and today in every mode, since the language-model pass
-//! is layered on in a later step) the run is fully offline and performs zero
-//! network egress (NFR-4). Reporting to JSON and the exporters are wired in by
-//! later checklist steps, so `inspect`, `export`, and `bench` still print a
-//! not-yet-implemented message.
+//! map. With `--out` it also writes the machine-readable JSON report (FR-34).
+//! With `--no-llm` (and today in every mode, since the language-model pass is
+//! layered on in a later step) the run is fully offline and performs zero network
+//! egress (NFR-4).
+//!
+//! The `inspect` subcommand reads a sample through a report and renders an
+//! annotated hex view (FR-35). The exporters are wired in by a later checklist
+//! step, so `export` and `bench` still print a not-yet-implemented message.
 
 use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use sextant_engine::{
-    DEFAULT_MAX_BYTES_PER_SAMPLE, DEFAULT_MAX_TOTAL_BYTES, DraftReport, InferenceOptions,
-    IngestOptions, Limits, SampleSet, infer, ingest,
+    DEFAULT_MAX_BYTES_PER_SAMPLE, DEFAULT_MAX_TOTAL_BYTES, InferenceOptions, IngestOptions,
+    InspectOptions, Limits, Report, SampleSet, infer, ingest, render,
 };
 
 /// The PRD exit code for an input error (Section 14): a path that does not
@@ -59,12 +62,21 @@ enum Command {
         /// Wall-clock cap, in seconds, for executing the IR against each sample.
         #[arg(long, value_name = "SECONDS")]
         timeout: Option<u64>,
+        /// Write the machine-readable JSON report to this path (FR-34).
+        #[arg(long, value_name = "FILE")]
+        out: Option<String>,
     },
-    /// Read a sample through an inferred field map (annotated hex view).
+    /// Read a sample through an inferred field map (annotated hex view, FR-35).
     Inspect {
-        /// Report produced by `sextant infer`.
+        /// Report produced by `sextant infer --out` (a JSON report file).
         #[arg(value_name = "REPORT")]
         report: String,
+        /// The sample file to render through the report.
+        #[arg(long, value_name = "FILE")]
+        sample: String,
+        /// Color each field's bytes in the hex dump and its name in the table.
+        #[arg(long)]
+        color: bool,
     },
     /// Export a verified parser from a report.
     Export {
@@ -86,6 +98,7 @@ fn main() -> ExitCode {
             max_total_bytes,
             no_llm,
             timeout,
+            out,
         } => run_infer(
             &inputs,
             recursive,
@@ -93,8 +106,13 @@ fn main() -> ExitCode {
             max_total_bytes,
             no_llm,
             timeout,
+            out.as_deref(),
         ),
-        Command::Inspect { .. } => not_implemented("inspect"),
+        Command::Inspect {
+            report,
+            sample,
+            color,
+        } => run_inspect(&report, &sample, color),
         Command::Export { .. } => not_implemented("export"),
         Command::Bench => not_implemented("bench"),
     }
@@ -102,6 +120,7 @@ fn main() -> ExitCode {
 
 /// Ingest the inputs, run statistics-only inference, and print a scored field
 /// map (Step 6). The `--no-llm` path is fully offline (NFR-4).
+#[allow(clippy::too_many_arguments)]
 fn run_infer(
     inputs: &[String],
     recursive: bool,
@@ -109,6 +128,7 @@ fn run_infer(
     max_total_bytes: usize,
     no_llm: bool,
     timeout: Option<u64>,
+    out: Option<&str>,
 ) -> ExitCode {
     let options = IngestOptions {
         max_bytes_per_sample,
@@ -143,6 +163,16 @@ fn run_infer(
     let report = infer(&set, &inference);
     print_report(&report);
 
+    if let Some(path) = out {
+        match write_report(&report, path) {
+            Ok(()) => println!("\nWrote report to {path}"),
+            Err(error) => {
+                eprintln!("sextant infer: could not write report to {path}: {error}");
+                return ExitCode::from(EXIT_INPUT_ERROR);
+            }
+        }
+    }
+
     if report.field_map.is_empty() {
         eprintln!("sextant infer: no usable hypothesis was produced");
         ExitCode::from(EXIT_NO_HYPOTHESIS)
@@ -151,8 +181,48 @@ fn run_infer(
     }
 }
 
-/// Print the scored field map and the fit-score breakdown of a draft report.
-fn print_report(report: &DraftReport) {
+/// Serialize a report to pretty JSON and write it to `path` (FR-34).
+fn write_report(report: &Report, path: &str) -> std::io::Result<()> {
+    let json = report
+        .to_json()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    std::fs::write(path, json)
+}
+
+/// Read a report and a sample, then print the annotated hex view (FR-35).
+fn run_inspect(report_path: &str, sample_path: &str, color: bool) -> ExitCode {
+    let report_text = match std::fs::read_to_string(report_path) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("sextant inspect: could not read report {report_path}: {error}");
+            return ExitCode::from(EXIT_INPUT_ERROR);
+        }
+    };
+    let report = match Report::from_json(&report_text) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("sextant inspect: {report_path} is not a valid report: {error}");
+            return ExitCode::from(EXIT_INPUT_ERROR);
+        }
+    };
+    let sample = match std::fs::read(sample_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("sextant inspect: could not read sample {sample_path}: {error}");
+            return ExitCode::from(EXIT_INPUT_ERROR);
+        }
+    };
+
+    let options = InspectOptions {
+        color,
+        ..InspectOptions::default()
+    };
+    print!("{}", render(&report, &sample, &options));
+    ExitCode::SUCCESS
+}
+
+/// Print the scored field map and the fit-score breakdown of a report.
+fn print_report(report: &Report) {
     let score = &report.score;
     println!();
     println!(

@@ -4,7 +4,7 @@
 //! [`SampleSet`], generates candidate IRs ([`infer_candidates`]), selects the
 //! best by verified score, runs the heuristic refinement loop ([`refine`]) under
 //! the non-regression invariant (FR-26), and assembles the outcome into a
-//! [`DraftReport`].
+//! [`Report`].
 //!
 //! This is the `--no-llm` path in full. It depends only on `sextant-engine` and
 //! `sextant-ir`, neither of which links any network, async, or HTTP crate, so a
@@ -17,7 +17,7 @@ use crate::candidate::infer_candidates;
 use crate::ingest::{Sample, SampleSet};
 use crate::limits::Limits;
 use crate::refine::refine;
-use crate::report::{DraftReport, RunMetadata};
+use crate::report::{Report, RunMetadata};
 use crate::scorer::{ScoreWeights, score_with};
 
 /// Options controlling an inference run.
@@ -45,7 +45,7 @@ impl Default for InferenceOptions {
 /// when no structure is recovered the pipeline returns a valid covering
 /// hypothesis rather than nothing.
 #[must_use]
-pub fn infer(samples: &SampleSet, options: &InferenceOptions) -> DraftReport {
+pub fn infer(samples: &SampleSet, options: &InferenceOptions) -> Report {
     let slices: Vec<&[u8]> = samples.samples.iter().map(Sample::bytes).collect();
 
     let candidates = infer_candidates(&slices, &options.limits);
@@ -71,7 +71,7 @@ pub fn infer(samples: &SampleSet, options: &InferenceOptions) -> DraftReport {
         no_llm: options.no_llm,
     };
 
-    DraftReport::build(refinement.format, score, refinement.history, metadata)
+    Report::build(refinement.format, score, refinement.history, metadata)
 }
 
 /// A trivial empty format, used only as an unreachable fallback so [`infer`]

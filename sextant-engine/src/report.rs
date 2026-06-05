@@ -1,18 +1,33 @@
-//! The draft report object produced by an inference run (FR-34, partial).
+//! The machine-readable inference report (FR-34).
 //!
-//! Step 6 wires the end-to-end pipeline into an in-memory [`DraftReport`]: the
-//! chosen Format Hypothesis IR, its verified fit [`Score`], a flattened field
-//! map for display, the refinement history, and run metadata. The full
-//! machine-readable JSON report and its schema arrive in Step 7; this object is
-//! the structured result the rest of the tool reads in the meantime.
+//! A [`Report`] is the single JSON document an inference run produces. It carries
+//! the chosen Format Hypothesis IR (which embeds each field's confidence and
+//! evidence), the verified fit [`Score`] and its breakdown, a flattened field map
+//! for display, the refinement history, and run metadata. The structure is
+//! described by the JSON Schema committed at `schemas/report.schema.json`, and
+//! every report serialized by [`Report::to_json`] validates against it.
+//!
+//! The report is fully serializable to and from JSON (FR-19, FR-34): the chosen
+//! IR round-trips through `sextant-ir`, and the score, refinement, and metadata
+//! round-trip through the derives here. The `inspect` view (FR-35) reads a report
+//! back from disk and renders a sample through it.
 
+use serde::{Deserialize, Serialize};
 use sextant_ir::{Field, Format, Kind, Role, SizeRule};
 
 use crate::refine::RefineStep;
 use crate::scorer::Score;
 
-/// Metadata about an inference run, recorded in the report for reproducibility.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The version of the report JSON structure (FR-34).
+///
+/// It is written into every report as `schema_version` and matches the `$id`
+/// version of the committed JSON Schema. Bump it when the structure changes in a
+/// way that is not backward compatible.
+pub const REPORT_SCHEMA_VERSION: &str = "1.0";
+
+/// Metadata about an inference run, recorded in the report for reproducibility
+/// (FR-34, PRD Section 13: tool version, inputs, configuration, model usage).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunMetadata {
     /// The tool version that produced the report.
     pub tool_version: String,
@@ -27,7 +42,7 @@ pub struct RunMetadata {
 
 /// One row of the flattened field map: a single field rendered for display, with
 /// its nesting depth so a reader can see the tree (FR-34, FR-35 groundwork).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldMapEntry {
     /// The field's nesting depth (zero at the root).
     pub depth: usize,
@@ -43,25 +58,31 @@ pub struct FieldMapEntry {
     pub confidence: f64,
 }
 
-/// The structured result of an inference run (FR-34, partial; completed in
-/// Step 7).
-#[derive(Debug, Clone)]
-pub struct DraftReport {
-    /// The chosen, refined Format Hypothesis IR.
+/// The machine-readable result of an inference run (FR-34).
+///
+/// This is the canonical JSON report. It is built by the orchestrator at the end
+/// of a run and is the document `sextant inspect` and the exporters read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Report {
+    /// The version of the report structure (see [`REPORT_SCHEMA_VERSION`]).
+    pub schema_version: String,
+    /// Metadata about the run.
+    pub metadata: RunMetadata,
+    /// The chosen, refined Format Hypothesis IR. Each field carries its own
+    /// confidence and evidence (FR-18).
     pub format: Format,
-    /// The verified fit score of the chosen IR over the sample set.
+    /// The verified fit score of the chosen IR over the sample set, with its
+    /// per-dimension and per-sample breakdown (FR-23).
     pub score: Score,
-    /// The chosen IR's fields, flattened for display.
+    /// The chosen IR's fields, flattened for display, in parse order.
     pub field_map: Vec<FieldMapEntry>,
     /// The refinement steps that were accepted, in order (FR-28).
     pub refinement: Vec<RefineStep>,
-    /// Metadata about the run.
-    pub metadata: RunMetadata,
 }
 
-impl DraftReport {
-    /// Build a draft report from a chosen IR, its score, the refinement history,
-    /// and run metadata. The field map is derived from the IR.
+impl Report {
+    /// Build a report from a chosen IR, its score, the refinement history, and
+    /// run metadata. The flattened field map is derived from the IR.
     #[must_use]
     pub fn build(
         format: Format,
@@ -74,12 +95,33 @@ impl DraftReport {
             flatten_field(field, 0, &mut field_map);
         }
         Self {
+            schema_version: REPORT_SCHEMA_VERSION.to_owned(),
+            metadata,
             format,
             score,
             field_map,
             refinement,
-            metadata,
         }
+    }
+
+    /// Serialize the report to pretty-printed JSON (FR-19, FR-34).
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`serde_json::Error`] if serialization fails,
+    /// which should not happen for a well-formed in-memory value.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Deserialize a report from JSON (FR-19, FR-34).
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`serde_json::Error`] if the text is not a valid
+    /// JSON encoding of a [`Report`].
+    pub fn from_json(text: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(text)
     }
 }
 
@@ -107,7 +149,8 @@ fn flatten_field(field: &Field, depth: usize, out: &mut Vec<FieldMapEntry>) {
 }
 
 /// A short label for a field role.
-fn role_label(role: Option<Role>) -> String {
+#[must_use]
+pub(crate) fn role_label(role: Option<Role>) -> String {
     let label = match role {
         Some(Role::Magic) => "magic",
         Some(Role::Version) => "version",
@@ -126,7 +169,8 @@ fn role_label(role: Option<Role>) -> String {
 }
 
 /// A short label for a field kind, including byte order for integers.
-fn kind_label(kind: &Kind) -> String {
+#[must_use]
+pub(crate) fn kind_label(kind: &Kind) -> String {
     match kind {
         Kind::Integer {
             width, endianness, ..
@@ -148,7 +192,8 @@ fn kind_label(kind: &Kind) -> String {
 }
 
 /// A short label for how a field's size is determined.
-fn size_label(field: &Field) -> String {
+#[must_use]
+pub(crate) fn size_label(field: &Field) -> String {
     if let Kind::Array { count, .. } = &field.kind {
         return match count {
             sextant_ir::CountRule::Fixed { count } => format!("{count} elements"),
