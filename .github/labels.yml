@@ -1,0 +1,94 @@
+# Issue and pull-request labels for Sextant.
+#
+# This file is the single source of truth for the repository's labels. Apply it
+# with `scripts/setup-labels.sh` (which shells out to the GitHub CLI), and keep
+# it in sync when labels change. The triage process that uses these labels is
+# documented in docs/TRIAGE.md.
+#
+# Colors are hex without the leading '#'. Each label has a one-line description
+# that shows in the GitHub label picker.
+
+# --- Triage status: where an issue sits in the intake flow ---
+- name: "triage"
+  color: "d4c5f9"
+  description: "Needs an initial maintainer review."
+- name: "needs-info"
+  color: "fef2c0"
+  description: "Waiting on more detail from the reporter before it can proceed."
+- name: "blocked"
+  color: "b60205"
+  description: "Cannot proceed until something else is resolved."
+
+# --- Type: what kind of work this is ---
+- name: "bug"
+  color: "d73a4a"
+  description: "Something is not behaving as documented."
+- name: "enhancement"
+  color: "a2eeef"
+  description: "A new feature or an improvement to an existing one."
+- name: "documentation"
+  color: "0075ca"
+  description: "Docs, examples, README, or the agent guide."
+- name: "question"
+  color: "d876e3"
+  description: "A question rather than a defect or request. Consider Discussions."
+- name: "security"
+  color: "b60205"
+  description: "Security-relevant. Report privately first; see SECURITY.md."
+- name: "format-request"
+  color: "c2e0c6"
+  description: "A binary format or protocol someone would like Sextant to handle."
+- name: "corpus"
+  color: "bfdadc"
+  description: "Test corpus, ground truth, or benchmark samples."
+
+# --- Area: which part of the workspace is involved ---
+- name: "area: ir"
+  color: "ededed"
+  description: "sextant-ir: the Format Hypothesis IR."
+- name: "area: engine"
+  color: "ededed"
+  description: "sextant-engine: ingestion, inference, executor, scorer."
+- name: "area: llm"
+  color: "ededed"
+  description: "sextant-llm: the provider-agnostic model interface."
+- name: "area: export"
+  color: "ededed"
+  description: "sextant-export: Kaitai, ImHex, Wireshark, and 010 exporters."
+- name: "area: cli"
+  color: "ededed"
+  description: "sextant-cli: the command-line interface."
+- name: "area: bench"
+  color: "ededed"
+  description: "The evaluation and benchmark harness."
+- name: "area: ci"
+  color: "ededed"
+  description: "CI, release, packaging, and tooling."
+
+# --- Priority: how soon it should be addressed ---
+- name: "priority: high"
+  color: "e11d21"
+  description: "Address soon: correctness, safety, or a release blocker."
+- name: "priority: medium"
+  color: "fbca04"
+  description: "Address in the normal course of work."
+- name: "priority: low"
+  color: "0e8a16"
+  description: "Nice to have; no urgency."
+
+# --- Invitation and resolution ---
+- name: "good first issue"
+  color: "7057ff"
+  description: "A well-scoped starting point for new contributors."
+- name: "help wanted"
+  color: "008672"
+  description: "Maintainers would welcome a contributor on this."
+- name: "duplicate"
+  color: "cfd3d7"
+  description: "Already tracked by another issue or pull request."
+- name: "wontfix"
+  color: "ffffff"
+  description: "Out of scope or intentionally not being changed."
+- name: "invalid"
+  color: "e4e669"
+  description: "Not reproducible, not actionable, or off-topic."

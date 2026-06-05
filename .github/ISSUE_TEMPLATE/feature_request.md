@@ -2,7 +2,7 @@
 name: Feature request
 about: Suggest an idea, a format, or a protocol for Sextant
 title: ""
-labels: enhancement
+labels: ["enhancement", "triage"]
 assignees: ""
 ---
 

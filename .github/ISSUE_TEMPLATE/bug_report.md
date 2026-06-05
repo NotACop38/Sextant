@@ -2,7 +2,7 @@
 name: Bug report
 about: Report a problem with Sextant
 title: ""
-labels: bug
+labels: ["bug", "triage"]
 assignees: ""
 ---
 

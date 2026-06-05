@@ -8,16 +8,17 @@
 
 Sextant infers the structure of unknown binary file formats and network protocols from sample data, then generates a parser it has **verified against your samples**: a tested artifact, not an unchecked guess.
 
-![Status](https://img.shields.io/badge/status-early%20development-orange)
-![Built with Rust](https://img.shields.io/badge/built%20with-Rust-000000?logo=rust&logoColor=white)
-![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
+[![CI](https://github.com/NotACop38/Sextant/actions/workflows/ci.yml/badge.svg)](https://github.com/NotACop38/Sextant/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/sextant-re.svg)](https://crates.io/crates/sextant-re)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+[![Built with Rust](https://img.shields.io/badge/built%20with-Rust-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 </div>
 
 -----
 
-> [!WARNING]
-> **Project status: early development.** Sextant is being built in the open and is **not yet usable**. This README describes the architecture and the target interface. Watch or star the repo to follow progress. The first working release will infer simple file formats end to end.
+> [!NOTE]
+> **Project status: v0.1.0, the first public release.** Sextant infers simple binary file formats and protocols end to end today, and the verified core runs fully offline under `--no-llm`. It is pre-1.0, so interfaces may still change before v1.0. See the [roadmap](#roadmap), the [changelog](CHANGELOG.md), and the [benchmarks](#benchmarks) for what is verified.
 
 -----
 
@@ -30,7 +31,7 @@ Sextant infers the structure of unknown binary file formats and network protocol
 - [Documentation](#documentation)
 - [How Sextant is positioned](#how-sextant-is-positioned)
 - [Output formats](#output-formats)
-- [Usage (target interface)](#usage-target-interface)
+- [Usage](#usage)
 - [Installation](#installation)
 - [Design principles](#design-principles)
 - [Roadmap](#roadmap)
@@ -170,9 +171,9 @@ How to read this against the academic baselines: the protocol-reverse-engineerin
 |010 Editor template (`.bt`) |`--format 010`      |Templated hex inspection in 010 Editor                                           |
 |Annotated hex (terminal)    |`sextant inspect`   |Reading a single sample through the inferred structure                           |
 
-## Usage (target interface)
+## Usage
 
-> This section describes the intended command-line interface. It is a design sketch for the in-development tool.
+> These commands work today against the bundled corpus. The protocol example needs a packet capture; see the [workflows guide](docs/workflows.md) for the full reference.
 
 ```bash
 # Infer structure from a directory of sample files
@@ -274,13 +275,13 @@ Sextant ships as a single static binary. Optional dependencies:
 - **The model is an accelerant, not a dependency.** The statistical engine stands on its own and runs offline. The language model adds semantics on top, and can always be switched off.
 - **Editable, standard outputs.** Sextant hands you a Kaitai spec or a Wireshark dissector (open formats you can read, correct, and own), not a black box.
 
-## Roadmap
+All of the v0.1.0 phases below are complete. Post-1.0 work is tracked in the [issues](https://github.com/NotACop38/Sextant/issues) and the [discussions](https://github.com/NotACop38/Sextant/discussions).
 
-- [ ] **Phase 0: Scaffold.** CLI skeleton, sample-corpus harness, the IR type definitions, and a suite of *known* formats with hand-verified ground truth for measuring accuracy from day one.
-- [ ] **Phase 1: MVP engine (no model).** Statistical inference + IR executor + accuracy scoring against the known-format suite.
-- [ ] **Phase 2: The novel core.** Language-model semantic pass and the generate-test-refine loop.
-- [ ] **Phase 3: Exporters.** Kaitai, ImHex, Wireshark, 010, and the annotated hex view.
-- [ ] **Phase 4: Protocols and showcases.** pcap ingestion, an industrial/IoT protocol case study, a malware-config case study, and published benchmarks against the academic baselines.
+- [x] **Phase 0: Scaffold.** CLI skeleton, sample-corpus harness, the IR type definitions, and a suite of *known* formats with hand-verified ground truth for measuring accuracy from day one.
+- [x] **Phase 1: MVP engine (no model).** Statistical inference + IR executor + accuracy scoring against the known-format suite.
+- [x] **Phase 2: The novel core.** Language-model semantic pass and the generate-test-refine loop.
+- [x] **Phase 3: Exporters.** Kaitai, ImHex, Wireshark, 010, and the annotated hex view.
+- [x] **Phase 4: Protocols and showcases.** pcap ingestion, an industrial/IoT protocol case study (Modbus/TCP), and published benchmarks against the academic baselines.
 
 ## Project documents
 
@@ -294,11 +295,13 @@ Sextant stands on a great deal of prior work. The academic protocol-reverse-engi
 
 ## Contributing
 
-Contributions are welcome once the scaffold lands. In the meantime, issues describing **formats or protocols you’d like to be able to reverse**, or **public sample corpora** suitable for benchmarking, are especially valuable. They directly shape the test suite. A `CONTRIBUTING.md` will follow with the first release.
+Contributions are welcome. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) and the [agent guide](AGENTS.md), which together describe how the project is built one checklist step at a time and the verification invariant every change must respect. The maintainers triage incoming issues against the labels and process in [`docs/TRIAGE.md`](docs/TRIAGE.md).
+
+Open-ended questions, format requests, and corpus suggestions are best raised in [GitHub Discussions](https://github.com/NotACop38/Sextant/discussions). Issues describing **formats or protocols you would like to be able to reverse**, or **public sample corpora** suitable for benchmarking, are especially valuable: they directly shape the test suite. Report security vulnerabilities privately as described in [`SECURITY.md`](SECURITY.md).
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option, the standard dual license in the Rust ecosystem. *(Adjust if you prefer a single license.)*
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option, the standard dual license in the Rust ecosystem. Unless you state otherwise, any contribution you submit is dual licensed the same way, with no additional terms.
 
 ## Disclaimer
 
