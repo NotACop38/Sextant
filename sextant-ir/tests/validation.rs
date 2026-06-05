@@ -549,3 +549,132 @@ fn multiple_errors_are_all_reported() {
         }
     ));
 }
+
+#[test]
+fn overlap_through_positioned_nested_struct_is_detected() {
+    // The nested struct's only child is absolute-positioned, yet its byte
+    // extent is still statically known, so an overlap with a sibling must be
+    // caught.
+    let inner = Field {
+        name: Some("inner".to_owned()),
+        kind: Kind::Struct {
+            structure: Structure::new(vec![Field {
+                offset: Some(FieldOffset::Absolute { bytes: 0 }),
+                ..Field::new(Kind::Bytes, Confidence::CERTAIN)
+                    .with_name("a")
+                    .with_size(SizeRule::Fixed { bytes: 8 })
+            }]),
+        },
+        size: None,
+        offset: Some(FieldOffset::Absolute { bytes: 0 }),
+        role: None,
+        constraints: Vec::new(),
+        confidence: Confidence::CERTAIN,
+        evidence: Default::default(),
+    };
+    let sibling = Field {
+        offset: Some(FieldOffset::Absolute { bytes: 4 }),
+        ..Field::new(Kind::Bytes, Confidence::CERTAIN)
+            .with_name("b")
+            .with_size(SizeRule::Fixed { bytes: 4 })
+    };
+    let kinds = error_kinds(&format_of(vec![inner, sibling]));
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, ValidationErrorKind::OverlappingFields { .. })),
+        "expected an overlap through the nested struct, got {kinds:?}"
+    );
+}
+
+#[test]
+fn enum_width_conflict_is_rejected() {
+    let mut enums = BTreeMap::new();
+    enums.insert(
+        "kinds".to_owned(),
+        EnumDef {
+            width: Some(1),
+            variants: vec![EnumVariant {
+                value: 1,
+                name: "one".to_owned(),
+                description: None,
+            }],
+        },
+    );
+    let format = Format {
+        name: "test".to_owned(),
+        endianness: Endianness::Little,
+        root: Structure::new(vec![Field {
+            name: Some("k".to_owned()),
+            kind: Kind::Enum {
+                enum_ref: "kinds".to_owned(),
+                width: 4,
+                endianness: None,
+            },
+            size: None,
+            offset: None,
+            role: Some(Role::Enum),
+            constraints: Vec::new(),
+            confidence: Confidence::CERTAIN,
+            evidence: Default::default(),
+        }]),
+        enums,
+        metadata: Default::default(),
+    };
+    assert!(has_kind(
+        &error_kinds(&format),
+        &ValidationErrorKind::EnumWidthMismatch {
+            enum_name: "kinds".to_owned(),
+            field_width: 4,
+            enum_width: 1,
+        }
+    ));
+}
+
+#[test]
+fn inverted_checksum_range_is_rejected() {
+    // The covered range starts at the end of a later field and ends at the
+    // start of an earlier one, which is not a real byte span.
+    let crc = Field {
+        name: Some("crc".to_owned()),
+        kind: Kind::Integer {
+            width: 4,
+            signed: Signedness::Unsigned,
+            endianness: None,
+        },
+        size: None,
+        offset: None,
+        role: Some(Role::Checksum),
+        constraints: vec![Constraint::Checksum {
+            spec: ChecksumSpec {
+                algorithm: ChecksumAlgorithm::Crc32,
+                covered: CoveredRange {
+                    from: RangeAnchor::FieldEnd {
+                        field: FieldRef::new("body"),
+                    },
+                    to: RangeAnchor::FieldStart {
+                        field: FieldRef::new("header"),
+                    },
+                },
+            },
+        }],
+        confidence: Confidence::CERTAIN,
+        evidence: Default::default(),
+    };
+    let format = format_of(vec![
+        Field::new(Kind::Bytes, Confidence::CERTAIN)
+            .with_name("header")
+            .with_size(SizeRule::Fixed { bytes: 4 }),
+        Field::new(Kind::Bytes, Confidence::CERTAIN)
+            .with_name("body")
+            .with_size(SizeRule::Fixed { bytes: 4 }),
+        crc,
+    ]);
+    assert!(has_kind(
+        &error_kinds(&format),
+        &ValidationErrorKind::InvertedChecksumRange {
+            from: "body".to_owned(),
+            to: "header".to_owned(),
+        }
+    ));
+}

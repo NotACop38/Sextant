@@ -144,6 +144,24 @@ pub enum ValidationErrorKind {
         /// The repeated value.
         value: i128,
     },
+    /// An enum field's declared width disagrees with the fixed width of the
+    /// enum it references.
+    EnumWidthMismatch {
+        /// The referenced enum name.
+        enum_name: String,
+        /// The width the field declares.
+        field_width: u8,
+        /// The width the enum fixes.
+        enum_width: u8,
+    },
+    /// A checksum covered range starts after it ends, so it is not a real byte
+    /// span.
+    InvertedChecksumRange {
+        /// The field the range starts from.
+        from: String,
+        /// The field the range ends at.
+        to: String,
+    },
 }
 
 impl fmt::Display for ValidationErrorKind {
@@ -218,6 +236,19 @@ impl fmt::Display for ValidationErrorKind {
                     "enum {enum_name:?} lists the value {value} more than once"
                 )
             }
+            ValidationErrorKind::EnumWidthMismatch {
+                enum_name,
+                field_width,
+                enum_width,
+            } => write!(
+                f,
+                "enum field width of {field_width} bytes disagrees with enum {enum_name:?} \
+                 fixed width of {enum_width} bytes"
+            ),
+            ValidationErrorKind::InvertedChecksumRange { from, to } => write!(
+                f,
+                "checksum covered range runs backward, from field {from:?} to field {to:?}"
+            ),
         }
     }
 }
@@ -313,14 +344,23 @@ fn fixed_len(field: &Field) -> Option<u64> {
 }
 
 fn struct_fixed_len(structure: &Structure) -> Option<u64> {
-    let mut total: u64 = 0;
+    // The struct's byte extent is the furthest end reached by any field. This
+    // handles both sequential layouts (the running cursor) and absolute
+    // positioned fields, so a positioned but statically sized child struct
+    // still reports a known extent and is overlap-checked in its parent.
+    let mut cursor: u64 = 0;
+    let mut extent: u64 = 0;
     for field in &structure.fields {
-        if field.offset.is_some() {
-            return None;
-        }
-        total = total.checked_add(fixed_len(field)?)?;
+        let start = match &field.offset {
+            None => cursor,
+            Some(FieldOffset::Absolute { bytes }) => *bytes,
+            Some(FieldOffset::Derived { .. }) => return None,
+        };
+        let end = start.checked_add(fixed_len(field)?)?;
+        cursor = end;
+        extent = extent.max(end);
     }
-    Some(total)
+    Some(extent)
 }
 
 fn field_label(field: &Field, index: usize) -> String {
@@ -508,16 +548,30 @@ impl<'a> Validator<'a> {
                     0,
                 );
             }
-            Kind::Enum { enum_ref, .. } => {
-                if !self.format.enums.contains_key(enum_ref) {
-                    self.push(
-                        format!("{path}.kind"),
-                        ValidationErrorKind::DanglingEnumRef {
-                            name: enum_ref.clone(),
-                        },
-                    );
+            Kind::Enum {
+                enum_ref, width, ..
+            } => match self.format.enums.get(enum_ref) {
+                None => self.push(
+                    format!("{path}.kind"),
+                    ValidationErrorKind::DanglingEnumRef {
+                        name: enum_ref.clone(),
+                    },
+                ),
+                Some(def) => {
+                    if let Some(enum_width) = def.width {
+                        if enum_width != *width {
+                            self.push(
+                                format!("{path}.kind"),
+                                ValidationErrorKind::EnumWidthMismatch {
+                                    enum_name: enum_ref.clone(),
+                                    field_width: *width,
+                                    enum_width,
+                                },
+                            );
+                        }
+                    }
                 }
-            }
+            },
             Kind::Integer { .. } | Kind::Bytes | Kind::String { .. } | Kind::Opaque => {}
         }
     }
@@ -671,8 +725,25 @@ impl<'a> Validator<'a> {
                             },
                         );
                     }
-                    self.resolve_anchor(&spec.covered.from, ancestors, current, &cpath);
-                    self.resolve_anchor(&spec.covered.to, ancestors, current, &cpath);
+                    let from_idx =
+                        self.resolve_anchor(&spec.covered.from, ancestors, current, &cpath);
+                    let to_idx = self.resolve_anchor(&spec.covered.to, ancestors, current, &cpath);
+                    // When both anchors resolve within this structure, the range
+                    // must run forward. A range that starts after it ends is not
+                    // a real byte span.
+                    if let (Some(from_idx), Some(to_idx)) = (from_idx, to_idx) {
+                        if anchor_key(&spec.covered.from, from_idx)
+                            > anchor_key(&spec.covered.to, to_idx)
+                        {
+                            self.push(
+                                cpath,
+                                ValidationErrorKind::InvertedChecksumRange {
+                                    from: spec.covered.from.field().0.clone(),
+                                    to: spec.covered.to.field().0.clone(),
+                                },
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -760,14 +831,18 @@ impl<'a> Validator<'a> {
     }
 
     /// Resolve a checksum range anchor. Anchors may reference any field in
-    /// scope, with no ordering requirement.
+    /// scope. Returns the anchor field's index within the current structure
+    /// when it resolves there, so the caller can check the range ordering;
+    /// returns `None` when it resolves in an ancestor (where indices are not
+    /// comparable) or, after pushing a dangling-reference error, when it does
+    /// not resolve at all.
     fn resolve_anchor(
         &mut self,
         anchor: &RangeAnchor,
         ancestors: &[Frame<'a>],
         current: &'a [Field],
         path: &str,
-    ) {
+    ) -> Option<usize> {
         let name = anchor.field().as_str();
         if resolve_field(ancestors, current, current.len(), name).is_none() {
             self.push(
@@ -776,7 +851,20 @@ impl<'a> Validator<'a> {
                     name: name.to_owned(),
                 },
             );
+            return None;
         }
+        current
+            .iter()
+            .position(|field| field.name.as_deref() == Some(name))
+    }
+}
+
+/// A comparable position for a checksum range anchor: the field index paired
+/// with 0 for its start and 1 for its end.
+fn anchor_key(anchor: &RangeAnchor, index: usize) -> (usize, u8) {
+    match anchor {
+        RangeAnchor::FieldStart { .. } => (index, 0),
+        RangeAnchor::FieldEnd { .. } => (index, 1),
     }
 }
 

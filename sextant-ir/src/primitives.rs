@@ -191,13 +191,15 @@ impl Confidence {
     }
 
     /// Create a confidence by clamping `value` into 0.0 to 1.0. A non-finite
-    /// value clamps to 0.0.
+    /// value (`NaN` or either infinity) clamps to 0.0, so a broken confidence
+    /// calculation degrades to the conservative low value rather than to
+    /// [`Confidence::CERTAIN`].
     #[must_use]
     pub fn clamped(value: f64) -> Self {
-        if value.is_nan() {
-            Self(0.0)
-        } else {
+        if value.is_finite() {
             Self(value.clamp(0.0, 1.0))
+        } else {
+            Self(0.0)
         }
     }
 
@@ -239,6 +241,14 @@ mod tests {
         assert_eq!(Confidence::clamped(5.0).get(), 1.0);
         assert_eq!(Confidence::clamped(f64::NAN).get(), 0.0);
         assert_eq!(Confidence::clamped(0.25).get(), 0.25);
+    }
+
+    #[test]
+    fn confidence_clamped_treats_non_finite_as_zero() {
+        // A non-finite value must degrade to the conservative low value, not
+        // become CERTAIN.
+        assert_eq!(Confidence::clamped(f64::INFINITY).get(), 0.0);
+        assert_eq!(Confidence::clamped(f64::NEG_INFINITY).get(), 0.0);
     }
 
     #[test]
