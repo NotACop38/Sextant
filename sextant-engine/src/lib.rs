@@ -1,10 +1,19 @@
 //! Inference engine for Sextant.
 //!
-//! This crate holds sample ingestion and the native IR executor and scorer (the
-//! verification substrate), and will grow to include the statistical inference
-//! pass and the refinement loop in later checklist steps. The executor and
+//! This crate holds sample ingestion, the native IR executor and scorer (the
+//! verification substrate), and the statistical inference pass, and will grow to
+//! include the refinement loop in later checklist steps. The executor and
 //! scorer are native Rust, free of any JVM, the Kaitai compiler, and network
 //! access, so they run under `--no-llm` and offline (FR-21).
+//!
+//! # Statistical inference (Step 5)
+//!
+//! [`infer_candidates`] turns a sample set into one or more candidate
+//! [`Format`](sextant_ir::Format) hypotheses using classical techniques:
+//! byte statistics (FR-6), positional [`align`]ment (FR-7), magic, length,
+//! count, offset, checksum, and sub-byte field detection (FR-8 to FR-11). Each
+//! candidate is validated and scored by the executor and scorer, so the list is
+//! ranked by a verified preliminary score (FR-12).
 //!
 //! # Ingestion (Step 4)
 //!
@@ -38,12 +47,22 @@
 //! assert!(report.overall <= 1.0);
 //! ```
 
+pub mod align;
+pub mod candidate;
 pub mod checksum;
+pub mod detect;
 pub mod executor;
 pub mod ingest;
 pub mod limits;
 pub mod scorer;
+pub mod stats;
 
+pub use align::{Alignment, Column, Region, align};
+pub use candidate::{Candidate, infer_candidates};
+pub use detect::{
+    Bitfield, ChecksumField, ChecksumStart, IntField, IntRelation, Magic, OffsetField,
+    detect_bitfields, detect_int_fields, detect_magic, detect_offsets, detect_trailing_checksum,
+};
 pub use executor::{
     CheckKind, ConstraintCheck, Execution, FailureReason, FieldInstance, ParseFailure, Value,
     execute,
@@ -54,3 +73,4 @@ pub use ingest::{
 };
 pub use limits::Limits;
 pub use scorer::{SampleScore, Score, ScoreWeights, score, score_with};
+pub use stats::{ByteHistogram, ngram_counts, shannon_entropy, windowed_entropy};

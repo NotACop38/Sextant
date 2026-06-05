@@ -132,19 +132,19 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Implement entropy, byte-frequency, and n-gram statistics across the sample set.
-- [ ] Implement multi-sample sequence alignment to find invariant and variable regions and candidate boundaries.
-- [ ] Implement magic or signature detection (FR-8).
-- [ ] Implement length, count, and offset field detection across endianness and width hypotheses (FR-9).
-- [ ] Implement checksum field detection over plausible ranges (FR-10).
-- [ ] Implement sub-byte field detection for flags and packed integers (FR-11, using `bitvec`).
-- [ ] Emit one or more candidate IRs with preliminary scores (FR-12).
+- [x] Implement entropy, byte-frequency, and n-gram statistics across the sample set.
+- [x] Implement multi-sample sequence alignment to find invariant and variable regions and candidate boundaries.
+- [x] Implement magic or signature detection (FR-8).
+- [x] Implement length, count, and offset field detection across endianness and width hypotheses (FR-9).
+- [x] Implement checksum field detection over plausible ranges (FR-10).
+- [x] Implement sub-byte field detection for flags and packed integers (FR-11, using `bitvec`).
+- [x] Emit one or more candidate IRs with preliminary scores (FR-12).
 
 ### Acceptance criteria
 
-- [ ] On at least three corpus formats, the statistical pass recovers the magic and at least one length or count relationship, expressed as a candidate IR.
-- [ ] Candidate IRs are valid (pass Step 2 validation) and executable by the Step 3 executor.
-- [ ] Detected boundaries on the corpus meet an initial field-boundary recall bar (set a starting number, refine later).
+- [x] On at least three corpus formats, the statistical pass recovers the magic and at least one length or count relationship, expressed as a candidate IR.
+- [x] Candidate IRs are valid (pass Step 2 validation) and executable by the Step 3 executor.
+- [x] Detected boundaries on the corpus meet an initial field-boundary recall bar (set a starting number, refine later).
 
 ---
 

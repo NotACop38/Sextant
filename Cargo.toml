@@ -25,6 +25,7 @@ keywords = ["reverse-engineering", "binary", "parser", "protocol", "kaitai"]
 categories = ["command-line-utilities", "parser-implementations", "development-tools"]
 
 [workspace.dependencies]
+bitvec = "1"
 clap = { version = "4", features = ["derive"] }
 glob = "0.3"
 serde = { version = "1", features = ["derive"] }

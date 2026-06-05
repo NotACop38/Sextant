@@ -12,6 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+bitvec.workspace = true
 glob.workspace = true
 sextant-ir.workspace = true
 

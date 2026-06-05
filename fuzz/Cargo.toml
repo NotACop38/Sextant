@@ -20,6 +20,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "infer"
+path = "fuzz_targets/infer.rs"
+test = false
+doc = false
+bench = false
+
 # A standalone workspace so the nightly-only fuzzing dependencies never enter the
 # stable workspace build.
 [workspace]
