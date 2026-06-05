@@ -1,10 +1,20 @@
 //! Inference engine for Sextant.
 //!
 //! This crate holds sample ingestion, the native IR executor and scorer (the
-//! verification substrate), and the statistical inference pass, and will grow to
-//! include the refinement loop in later checklist steps. The executor and
-//! scorer are native Rust, free of any JVM, the Kaitai compiler, and network
-//! access, so they run under `--no-llm` and offline (FR-21).
+//! verification substrate), the statistical inference pass, the refinement loop,
+//! and the language-model semantic pass. The executor and scorer are native
+//! Rust, free of any JVM, the Kaitai compiler, and network access, so they run
+//! under `--no-llm` and offline (FR-21).
+//!
+//! # The semantic pass (Step 9)
+//!
+//! [`semantic_pass`] sends a candidate's field summary and a byte-capped view of
+//! the samples to a model, receives a structured [`ModelProposal`] (never
+//! free-form text, FR-30), and applies each proposed annotation or refinement
+//! only when the scorer confirms the verified fit does not regress (FR-26,
+//! FR-31). [`infer_with_llm`] layers this on top of the statistics-only pipeline
+//! and guarantees the final score never drops below the statistics-only
+//! baseline. The model accelerates the search; it never overrules the executor.
 //!
 //! # Statistical inference (Step 5)
 //!
@@ -60,6 +70,7 @@ pub mod orchestrate;
 pub mod refine;
 pub mod report;
 pub mod scorer;
+pub mod semantic;
 pub mod stats;
 
 pub use align::{Alignment, Column, Region, align};
@@ -79,8 +90,12 @@ pub use ingest::{
 };
 pub use inspect::{InspectOptions, render};
 pub use limits::Limits;
-pub use orchestrate::{InferenceOptions, infer};
+pub use orchestrate::{InferenceOptions, infer, infer_with_llm};
 pub use refine::{RefineOutcome, RefineStep, Refinement, refine};
 pub use report::{FieldMapEntry, REPORT_SCHEMA_VERSION, Report, RunMetadata};
 pub use scorer::{SampleScore, Score, ScoreWeights, score, score_with};
+pub use semantic::{
+    DEFAULT_MAX_PROMPT_BYTES_PER_SAMPLE, DEFAULT_MAX_SAMPLES_IN_PROMPT, FieldProposal,
+    ModelProposal, SemanticOptions, SemanticOutcome, semantic_pass,
+};
 pub use stats::{ByteHistogram, ngram_counts, shannon_entropy, windowed_entropy};

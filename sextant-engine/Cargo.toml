@@ -17,6 +17,12 @@ glob.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sextant-ir.workspace = true
+# The model layer is depended on with its default features only, which compile
+# no network code at all (no provider feature is on). The engine gains the
+# provider trait, the mock, the client, the cache, and the budgeting logic so
+# the semantic pass can be built and tested offline; turning on a network
+# provider stays a deliberate choice made higher up (the CLI's `llm` feature).
+sextant-llm.workspace = true
 
 [lints]
 workspace = true

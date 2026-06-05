@@ -68,11 +68,45 @@ pub struct Refinement {
 
 /// One segment of a path to a field inside a format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Seg {
+pub(crate) enum Seg {
     /// Select a field by index within the current structure.
     Field(usize),
     /// Descend into the element of the current array field.
     Element,
+}
+
+/// Enumerate a path to every field in `format`, in pre-order (each field before
+/// its descendants). The order matches the flattened field map in
+/// [`crate::report`], so a position in this list is a stable index a caller can
+/// hand to and receive back from an external proposer such as the semantic pass.
+#[must_use]
+pub(crate) fn field_paths(format: &Format) -> Vec<Vec<Seg>> {
+    let mut out = Vec::new();
+    let mut prefix = Vec::new();
+    collect_paths(&format.root, &mut prefix, &mut out);
+    out
+}
+
+/// Walk a structure in pre-order, recording the path to each field and
+/// descending into nested structures and array elements.
+fn collect_paths(structure: &Structure, prefix: &mut Vec<Seg>, out: &mut Vec<Vec<Seg>>) {
+    for (index, field) in structure.fields.iter().enumerate() {
+        prefix.push(Seg::Field(index));
+        out.push(prefix.clone());
+        match &field.kind {
+            Kind::Struct { structure } => collect_paths(structure, prefix, out),
+            Kind::Array { element, .. } => {
+                prefix.push(Seg::Element);
+                out.push(prefix.clone());
+                if let Kind::Struct { structure } = &element.kind {
+                    collect_paths(structure, prefix, out);
+                }
+                prefix.pop();
+            }
+            _ => {}
+        }
+        prefix.pop();
+    }
 }
 
 /// A local change to a single field.
@@ -242,7 +276,7 @@ fn apply_at(format: &Format, path: &[Seg], mutation: Mutation) -> Option<Format>
 }
 
 /// Resolve a path to a mutable field reference inside a structure.
-fn navigate<'a>(root: &'a mut Structure, path: &[Seg]) -> Option<&'a mut Field> {
+pub(crate) fn navigate<'a>(root: &'a mut Structure, path: &[Seg]) -> Option<&'a mut Field> {
     let (first, rest) = path.split_first()?;
     let Seg::Field(index) = first else {
         return None;

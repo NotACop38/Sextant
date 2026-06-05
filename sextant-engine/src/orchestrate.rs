@@ -12,13 +12,14 @@
 //! on in later steps and always flows through the same executor and scorer.
 
 use sextant_ir::Format;
+use sextant_llm::{LlmClient, LlmProvider};
 
 use crate::candidate::infer_candidates;
 use crate::ingest::{Sample, SampleSet};
 use crate::limits::Limits;
-use crate::refine::refine;
+use crate::refine::{Refinement, refine};
 use crate::report::{Report, RunMetadata};
-use crate::scorer::{ScoreWeights, score_with};
+use crate::semantic::{SemanticOptions, semantic_pass};
 
 /// Options controlling an inference run.
 #[derive(Debug, Clone)]
@@ -47,31 +48,79 @@ impl Default for InferenceOptions {
 #[must_use]
 pub fn infer(samples: &SampleSet, options: &InferenceOptions) -> Report {
     let slices: Vec<&[u8]> = samples.samples.iter().map(Sample::bytes).collect();
+    let refinement = statistics_refinement(&slices, &options.limits);
+    let metadata = run_metadata(samples, options.no_llm);
+    Report::build(
+        refinement.format,
+        refinement.score,
+        refinement.history,
+        metadata,
+    )
+}
 
-    let candidates = infer_candidates(&slices, &options.limits);
+/// Run statistics-only inference and then the language-model semantic pass over
+/// the best candidate, returning a report (milestone M2).
+///
+/// The semantic pass flows through the same scorer the heuristic loop uses, so a
+/// model proposal is applied only when the verified fit does not regress (FR-26,
+/// FR-31). The function is defensive about the central invariant: even if the
+/// pass somehow returned a worse IR, or the model call fails (a tripped call cap
+/// or budget, a transport error, or an unparseable response), the run degrades
+/// gracefully to the verified statistics-only result and never reports a score
+/// below the statistics-only baseline (PRD Section 12, NFR-9).
+#[must_use]
+pub fn infer_with_llm<P: LlmProvider>(
+    samples: &SampleSet,
+    options: &InferenceOptions,
+    client: &LlmClient<P>,
+    semantic: &SemanticOptions,
+) -> Report {
+    let slices: Vec<&[u8]> = samples.samples.iter().map(Sample::bytes).collect();
+    let baseline = statistics_refinement(&slices, &options.limits);
+
+    // The semantic pass records the model's format-family guess directly in the
+    // returned format's metadata, so the outcome's format carries it already.
+    let (format, score, mut semantic_history) =
+        match semantic_pass(&baseline.format, &slices, client, &options.limits, semantic) {
+            // The pass guarantees non-regression, but guard the invariant here
+            // too: never accept a result below the statistics-only baseline.
+            Ok(outcome) if outcome.score.overall + 1e-9 >= baseline.score.overall => {
+                (outcome.format, outcome.score, outcome.history)
+            }
+            _ => (baseline.format.clone(), baseline.score.clone(), Vec::new()),
+        };
+
+    // The report's refinement history is the statistics-only steps followed by
+    // the semantic pass's accepted and rejected proposals (FR-28).
+    let mut history = baseline.history;
+    history.append(&mut semantic_history);
+
+    let metadata = run_metadata(samples, false);
+    Report::build(format, score, history, metadata)
+}
+
+/// Run candidate generation and the heuristic refinement loop, returning the
+/// best verified IR with its score and accepted-step history. This is the shared
+/// statistics-only core of both [`infer`] and [`infer_with_llm`].
+fn statistics_refinement(slices: &[&[u8]], limits: &Limits) -> Refinement {
+    let candidates = infer_candidates(slices, limits);
     // `infer_candidates` always returns at least the opaque fallback, so `best`
-    // is present; guard anyway so this function never panics.
+    // is present; guard anyway so this never panics.
     let best = candidates
         .into_iter()
         .next()
         .map_or_else(empty_format, |candidate| candidate.format);
+    refine(&best, slices, limits)
+}
 
-    let refinement = refine(&best, &slices, &options.limits);
-    let score = score_with(
-        &refinement.format,
-        &slices,
-        &options.limits,
-        ScoreWeights::default(),
-    );
-
-    let metadata = RunMetadata {
+/// Assemble run metadata from a sample set.
+fn run_metadata(samples: &SampleSet, no_llm: bool) -> RunMetadata {
+    RunMetadata {
         tool_version: env!("CARGO_PKG_VERSION").to_owned(),
         sample_count: samples.len(),
         total_bytes: samples.total_bytes,
-        no_llm: options.no_llm,
-    };
-
-    Report::build(refinement.format, score, refinement.history, metadata)
+        no_llm,
+    }
 }
 
 /// A trivial empty format, used only as an unreachable fallback so [`infer`]
