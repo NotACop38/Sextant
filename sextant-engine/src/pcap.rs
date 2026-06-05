@@ -371,6 +371,10 @@ fn read_pcapng(bytes: &[u8], options: &ExtractOptions) -> Result<Vec<ExtractedMe
         let is_shb = type_le == PCAPNG_SHB_TYPE;
         if is_shb {
             order = pcapng_section_order(bytes, cursor)?;
+            // Interface ids are scoped to their section, so a new section starts
+            // its interface table fresh; otherwise a later section's interface 0
+            // would inherit the previous section's link type.
+            interfaces.clear();
         }
         let total_len = order.u32([
             bytes[cursor + 4],
@@ -593,6 +597,14 @@ fn parse_ipv4(bytes: &[u8]) -> Option<(u8, IpAddr, IpAddr, &[u8])> {
         return None;
     }
     let total_len = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+    // Skip fragmented datagrams. Only the first fragment carries the transport
+    // header; a later fragment begins with arbitrary payload that could be
+    // misread as ports. The more-fragments flag (0x2000) or a nonzero fragment
+    // offset (low 13 bits) marks a fragment, and reassembly is out of scope.
+    let frag = u16::from_be_bytes([bytes[6], bytes[7]]);
+    if frag & 0x2000 != 0 || frag & 0x1fff != 0 {
+        return None;
+    }
     let protocol = bytes[9];
     let src = Ipv4Addr::new(bytes[12], bytes[13], bytes[14], bytes[15]);
     let dst = Ipv4Addr::new(bytes[16], bytes[17], bytes[18], bytes[19]);
@@ -853,6 +865,27 @@ mod tests {
         assert_eq!(Transport::parse("tcp"), Some(Transport::Tcp));
         assert_eq!(Transport::parse("UDP"), Some(Transport::Udp));
         assert_eq!(Transport::parse("sctp"), None);
+    }
+
+    #[test]
+    fn fragmented_ipv4_packets_are_skipped() {
+        // A non-first fragment carries no transport header, so its payload must
+        // never be parsed as ports. The IPv4 flags/fragment-offset field sits at
+        // global header (24) + record header (16) + Ethernet (14) + 6 = 60.
+        let mut pcap = build_pcap(Transport::Tcp, 502, &[(b"fragment", true)]);
+        let frag_field = 24 + 16 + 14 + 6;
+        // Set a nonzero fragment offset (a later fragment).
+        pcap[frag_field] = 0x00;
+        pcap[frag_field + 1] = 0x01;
+        let messages = extract_messages(
+            &pcap,
+            &ExtractOptions {
+                transport: Transport::Tcp,
+                port: 502,
+            },
+        )
+        .expect("parse");
+        assert!(messages.is_empty(), "a fragment was parsed as a message");
     }
 
     /// Build a minimal little-endian pcapng with one Ethernet interface and one

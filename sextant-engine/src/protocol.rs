@@ -369,17 +369,34 @@ fn build_verified(
     port: u16,
     limits: &Limits,
 ) -> (Format, Score) {
-    let baseline = baseline_format(datas, limits);
+    let (mut baseline_format, baseline_score) = baseline_format(datas, limits);
 
     if let Some(format) = assemble(messages, datas, clustering, transport, port) {
         if format.validate().is_ok() {
             let score = score_with(&format, datas, limits, ScoreWeights::default());
-            if score.overall + 1e-9 >= baseline.1.overall {
+            if score.overall + 1e-9 >= baseline_score.overall {
                 return (format, score);
             }
         }
     }
-    baseline
+    // The protocol-specific assembly was absent or did not beat the baseline. The
+    // baseline still came from a capture, so it carries the transport and port so
+    // the Wireshark exporter binds the dissector to the port in this case too.
+    set_protocol_metadata(&mut baseline_format, transport, port);
+    (baseline_format, baseline_score)
+}
+
+/// Record the capture's transport and port in a format's metadata, so the
+/// Wireshark exporter binds the generated dissector to the port (Step 11).
+fn set_protocol_metadata(format: &mut Format, transport: Transport, port: u16) {
+    format
+        .metadata
+        .extra
+        .insert("protocol.transport".to_owned(), transport.to_string());
+    format
+        .metadata
+        .extra
+        .insert("protocol.port".to_owned(), port.to_string());
 }
 
 /// The statistics-only baseline: the best refined candidate from the file-format
