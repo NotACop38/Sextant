@@ -41,3 +41,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and sizes, with `--recursive`, `--max-bytes-per-sample`, and
   `--max-total-bytes` options. Pathological inputs (empty, single-byte, very
   large, identical, and single-sample) are handled without error.
+- End-to-end statistics-only inference orchestration in `sextant-engine`:
+  `infer` ingests, generates and scores candidate hypotheses, selects the best,
+  refines it, and assembles a draft report with a scored field map (milestone
+  M1, FR-25 to FR-28, NFR-3, NFR-4).
+- A repeating length-prefixed record detector that recovers chunked and
+  tag-length-value layouts (such as PNG chunks and the corpus TLV records),
+  including per-record checksums (FR-9, FR-10).
+- A heuristic-only refinement loop (endianness swaps, integer width swaps, and
+  fixed-size boundary nudges) that applies a change only when the native scorer
+  confirms the verified fit does not regress (the non-regression invariant,
+  FR-26), records its accepted steps, and always terminates (FR-27, FR-28).
+- `sextant infer <dir> --no-llm` now prints a scored field map with a fit-score
+  breakdown and the refinement history, with a `--timeout` option. The
+  statistics-only path is fully offline and links no network crate (NFR-4).
+- Field-boundary accuracy metrics (precision, recall, F1, and perfection rate)
+  in the `bench` crate, with a test confirming the statistics-only pipeline
+  clears the PRD Section 15 file-format targets (F1 at least 0.85, perfection at
+  least 0.5).

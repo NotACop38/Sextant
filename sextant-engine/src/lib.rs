@@ -50,15 +50,20 @@
 pub mod align;
 pub mod candidate;
 pub mod checksum;
+pub mod chunk;
 pub mod detect;
 pub mod executor;
 pub mod ingest;
 pub mod limits;
+pub mod orchestrate;
+pub mod refine;
+pub mod report;
 pub mod scorer;
 pub mod stats;
 
 pub use align::{Alignment, Column, Region, align};
 pub use candidate::{Candidate, infer_candidates};
+pub use chunk::{ChunkChecksum, ChunkChecksumStart, ChunkLayout, detect_chunks};
 pub use detect::{
     Bitfield, ChecksumField, ChecksumStart, IntField, IntRelation, Magic, OffsetField,
     detect_bitfields, detect_int_fields, detect_magic, detect_offsets, detect_trailing_checksum,
@@ -72,5 +77,8 @@ pub use ingest::{
     Provenance, Sample, SampleSet, ingest,
 };
 pub use limits::Limits;
+pub use orchestrate::{InferenceOptions, infer};
+pub use refine::{RefineOutcome, RefineStep, Refinement, refine};
+pub use report::{DraftReport, FieldMapEntry, RunMetadata};
 pub use scorer::{SampleScore, Score, ScoreWeights, score, score_with};
 pub use stats::{ByteHistogram, ngram_counts, shannon_entropy, windowed_entropy};
