@@ -12,8 +12,10 @@
 //! The `inspect` subcommand reads a sample through a report and renders an
 //! annotated hex view (FR-35). The `export` subcommand reads a report and emits
 //! an editable parser (Kaitai, ImHex, Wireshark, or 010) from the chosen IR
-//! (FR-36, FR-37), with an optional Kaitai cross-check (FR-38). Only `bench`
-//! still prints a not-yet-implemented message.
+//! (FR-36, FR-37), with an optional Kaitai cross-check (FR-38). The `bench`
+//! subcommand runs the accuracy benchmark over the ground-truth corpus and
+//! prints the PRD Section 15 metrics table (Step 12), exiting non-zero if any
+//! configured target is missed so it doubles as the CI regression guard.
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -33,6 +35,8 @@ const EXIT_INPUT_ERROR: u8 = 2;
 const EXIT_NO_HYPOTHESIS: u8 = 3;
 /// The PRD exit code for an export error (Section 14).
 const EXIT_EXPORT_ERROR: u8 = 4;
+/// The PRD exit code for an internal error (Section 14).
+const EXIT_INTERNAL_ERROR: u8 = 5;
 
 /// Infer the structure of unknown binary formats and protocols from samples,
 /// then emit parsers verified against those samples.
@@ -110,8 +114,15 @@ enum Command {
         #[arg(long, value_name = "DIR")]
         cross_validate: Option<String>,
     },
-    /// Run the accuracy benchmark over the ground-truth corpus.
-    Bench,
+    /// Run the accuracy benchmark over the ground-truth corpus (PRD Section 15).
+    Bench {
+        /// The corpus directory to evaluate. Defaults to the repository corpus.
+        #[arg(long, value_name = "DIR")]
+        corpus: Option<String>,
+        /// Write the machine-readable JSON results to this path.
+        #[arg(long, value_name = "FILE")]
+        out: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -149,7 +160,58 @@ fn main() -> ExitCode {
             out,
             cross_validate,
         } => run_export(&report, &format, out.as_deref(), cross_validate.as_deref()),
-        Command::Bench => not_implemented("bench"),
+        Command::Bench { corpus, out } => run_bench(corpus.as_deref(), out.as_deref()),
+    }
+}
+
+/// Run the accuracy benchmark over the ground-truth corpus and print the results
+/// table (PRD Section 15). With `--out` it also writes the machine-readable JSON
+/// results. The benchmark is statistics-only and fully offline: it runs the
+/// verified core over the corpus and reports field-boundary precision, recall,
+/// and F1, the perfection rate, role and type accuracy, and parser validity.
+/// It exits non-zero if any configured target is missed, so the same command CI
+/// runs as a regression guard fails the build on an accuracy drop.
+fn run_bench(corpus: Option<&str>, out: Option<&str>) -> ExitCode {
+    let mut options = bench::BenchOptions::default();
+    if let Some(dir) = corpus {
+        options.corpus_dir = std::path::PathBuf::from(dir);
+    }
+
+    let report = match bench::run_benchmark(&options) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("sextant bench: could not evaluate the corpus: {error}");
+            return ExitCode::from(EXIT_INPUT_ERROR);
+        }
+    };
+
+    print!("{}", bench::render_table(&report));
+
+    if let Some(path) = out {
+        match report.to_json() {
+            Ok(json) => {
+                if let Err(error) = std::fs::write(path, format!("{json}\n")) {
+                    eprintln!("sextant bench: could not write results to {path}: {error}");
+                    return ExitCode::from(EXIT_INPUT_ERROR);
+                }
+                println!("\nWrote machine-readable results to {path}");
+            }
+            Err(error) => {
+                eprintln!("sextant bench: could not serialize results: {error}");
+                return ExitCode::from(EXIT_INTERNAL_ERROR);
+            }
+        }
+    }
+
+    let failures = report.regression_failures();
+    if failures.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("\nsextant bench: metrics below configured thresholds:");
+        for failure in &failures {
+            eprintln!("  {failure}");
+        }
+        ExitCode::from(EXIT_NO_HYPOTHESIS)
     }
 }
 
@@ -592,14 +654,6 @@ fn print_sample_set(set: &SampleSet) {
 /// Choose the singular or plural word for a count.
 fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
     if count == 1 { singular } else { plural }
-}
-
-/// Report a subcommand that is not yet wired up and exit non-zero.
-fn not_implemented(command: &str) -> ExitCode {
-    eprintln!(
-        "sextant {command}: not yet implemented. See docs/ENGINEERING_CHECKLIST.md for the build plan."
-    );
-    ExitCode::FAILURE
 }
 
 #[cfg(test)]

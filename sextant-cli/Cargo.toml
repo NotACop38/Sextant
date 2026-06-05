@@ -19,6 +19,10 @@ path = "src/main.rs"
 clap.workspace = true
 sextant-engine.workspace = true
 sextant-export.workspace = true
+# The benchmark harness is an internal, non-published workspace crate. The CLI
+# wires `sextant bench` to it so the published accuracy numbers and the
+# command-line benchmark share one implementation (PRD Section 15).
+bench = { path = "../bench" }
 
 [lints]
 workspace = true

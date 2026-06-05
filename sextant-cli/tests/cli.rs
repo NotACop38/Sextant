@@ -1,7 +1,7 @@
 //! Integration tests for the `sextant` binary skeleton.
 //!
 //! These run the compiled binary so that `--version`, `--help`, and the
-//! stubbed subcommands are exercised exactly as a user would invoke them.
+//! subcommands are exercised exactly as a user would invoke them.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -48,17 +48,43 @@ fn help_flag_lists_all_subcommands() {
 }
 
 #[test]
-fn stub_subcommand_reports_not_implemented() {
+fn bench_runs_over_the_corpus_and_prints_a_metrics_table() {
     let output = sextant().arg("bench").output().expect("run sextant bench");
     assert!(
-        !output.status.success(),
-        "a stubbed subcommand should exit non-zero"
+        output.status.success(),
+        "bench should exit zero when the corpus meets its targets; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The table reports every PRD Section 15 metric and the per-format rows.
+    for token in ["format", "f1", "perfect", "role", "type", "valid", "macro"] {
+        assert!(
+            stdout.contains(token),
+            "metrics table is missing `{token}`:\n{stdout}"
+        );
+    }
     assert!(
-        stderr.contains("not yet implemented"),
-        "stderr was: {stderr}"
+        stdout.contains("field-boundary F1"),
+        "metrics table is missing the targets block:\n{stdout}"
     );
+}
+
+#[test]
+fn bench_writes_machine_readable_results() {
+    let dir = std::env::temp_dir().join(format!("sextant-bench-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let out = dir.join("results.json");
+    let output = sextant()
+        .arg("bench")
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .expect("run sextant bench --out");
+    assert!(output.status.success(), "bench --out should exit zero");
+    let json = std::fs::read_to_string(&out).expect("results.json written");
+    assert!(json.contains("\"boundary_f1\""), "results JSON: {json}");
+    assert!(json.contains("\"parser_validity\""), "results JSON: {json}");
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

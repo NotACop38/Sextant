@@ -1,9 +1,13 @@
 //! Evaluation and benchmark harness for the Sextant ground-truth corpus.
 //!
-//! This crate loads the corpus under `corpus/` and, in a later checklist step
-//! (Step 12), will run inference over it and compute accuracy metrics. For now
-//! it provides the corpus data model and a loader so the seed corpus can be
-//! read and validated.
+//! This crate loads the corpus under `corpus/`, runs statistics-only inference
+//! over each format, and computes the accuracy metrics that PRD Section 15
+//! defines: field-boundary precision, recall, and F1; the perfection rate;
+//! semantic role and type accuracy; and parser validity. [`run_benchmark`]
+//! produces a [`BenchReport`] that renders both a human-readable results table
+//! and machine-readable JSON, and that the README benchmark numbers and the CI
+//! regression guard are generated from (so the published numbers are never
+//! hand-written and cannot silently drift).
 //!
 //! The ground-truth schema here is intentionally independent of the engine's
 //! internal IR (`sextant-ir`). Keeping the corpus description stable as the
@@ -14,8 +18,21 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod accuracy;
+pub mod report;
 
 pub use accuracy::{CorpusMetrics, FormatMetrics, SampleMetrics, evaluate_corpus, evaluate_format};
+pub use report::{
+    Baseline, BenchOptions, BenchReport, FormatReport, Summary, TargetCheck, Targets,
+    render_readme_section, render_table, run_benchmark,
+};
+
+/// The file-format corpus the statistics-only MVP is measured against (PRD
+/// Section 15). These are the formats present under `corpus/` with the
+/// header-and-record ground-truth schema this harness evaluates. The protocol
+/// track (Modbus/TCP and the toy protocol) is captured-packet input with its own
+/// ground-truth schema and is exercised by the Step 11 protocol tests and the
+/// Wireshark dissector round-trip, not by these file-format metrics.
+pub const FILE_FORMAT_CORPUS: [&str; 5] = ["tlv", "scma", "stot", "sdlp", "png"];
 
 /// A hand-verified description of a single corpus format.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -117,14 +134,27 @@ pub fn parse_ground_truth(text: &str) -> serde_json::Result<GroundTruth> {
     serde_json::from_str(text)
 }
 
-/// Loads and parses the ground-truth description for one corpus format.
+/// Loads and parses the ground-truth description for one format under the
+/// repository corpus directory.
 ///
 /// # Errors
 ///
 /// Returns an error if the `ground_truth.json` file cannot be read or does not
 /// parse as a valid ground-truth description.
 pub fn load_ground_truth(format: &str) -> std::io::Result<GroundTruth> {
-    let path = corpus_dir().join(format).join("ground_truth.json");
+    load_ground_truth_in(&corpus_dir(), format)
+}
+
+/// Loads and parses the ground-truth description for one format under an
+/// arbitrary corpus directory, so the benchmark can run against a corpus passed
+/// on the command line (the PRD `--corpus` option, Section 14).
+///
+/// # Errors
+///
+/// Returns an error if the `ground_truth.json` file cannot be read or does not
+/// parse as a valid ground-truth description.
+pub fn load_ground_truth_in(corpus_dir: &Path, format: &str) -> std::io::Result<GroundTruth> {
+    let path = corpus_dir.join(format).join("ground_truth.json");
     let text = std::fs::read_to_string(&path)?;
     parse_ground_truth(&text).map_err(|error| {
         std::io::Error::new(
@@ -134,13 +164,45 @@ pub fn load_ground_truth(format: &str) -> std::io::Result<GroundTruth> {
     })
 }
 
-/// Reads the raw bytes of a sample listed in a ground-truth description.
+/// Reads the raw bytes of a sample listed in a ground-truth description, under
+/// the repository corpus directory.
 ///
 /// # Errors
 ///
 /// Returns an error if the sample file cannot be read.
 pub fn read_sample(format: &str, sample: &SampleEntry) -> std::io::Result<Vec<u8>> {
-    std::fs::read(corpus_dir().join(format).join(&sample.path))
+    read_sample_in(&corpus_dir(), format, sample)
+}
+
+/// The per-sample byte cap the benchmark reads under. A corpus passed with
+/// `--corpus` is untrusted: its ground truth could name an arbitrarily large
+/// sample, so each read is bounded to keep `sextant bench` within the repository
+/// resource-limit invariant (FR-24, NFR-2) rather than allocating a whole file
+/// up front. It matches the engine's per-sample ingestion cap so the bytes the
+/// benchmark evaluates are the same the pipeline would ingest. The corpus
+/// samples are tiny, so this never clips a real sample.
+pub const SAMPLE_READ_CAP: usize = sextant_engine::DEFAULT_MAX_BYTES_PER_SAMPLE;
+
+/// Reads the raw bytes of a sample listed in a ground-truth description, under
+/// an arbitrary corpus directory, bounded by [`SAMPLE_READ_CAP`] so a hostile
+/// corpus cannot drive an unbounded allocation.
+///
+/// # Errors
+///
+/// Returns an error if the sample file cannot be read.
+pub fn read_sample_in(
+    corpus_dir: &Path,
+    format: &str,
+    sample: &SampleEntry,
+) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let path = corpus_dir.join(format).join(&sample.path);
+    let file = std::fs::File::open(path)?;
+    let mut data = Vec::new();
+    // `take` bounds both the bytes read and the allocation: an attacker-sized
+    // sample costs at most the cap, not the file's full length.
+    file.take(SAMPLE_READ_CAP as u64).read_to_end(&mut data)?;
+    Ok(data)
 }
 
 #[cfg(test)]
