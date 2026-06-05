@@ -206,6 +206,27 @@ pub trait LlmProvider {
     }
 }
 
+/// Forward the trait through a boxed provider so a dynamically resolved
+/// [`Box<dyn LlmProvider>`] (for example from [`crate::build_provider`]) can be
+/// wrapped in an [`crate::LlmClient`], which is generic over `P: LlmProvider`.
+impl LlmProvider for Box<dyn LlmProvider> {
+    fn kind(&self) -> ProviderKind {
+        (**self).kind()
+    }
+
+    fn model(&self) -> &str {
+        (**self).model()
+    }
+
+    fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        (**self).complete(request)
+    }
+
+    fn complete_json(&self, request: &JsonRequest) -> Result<JsonResponse, LlmError> {
+        (**self).complete_json(request)
+    }
+}
+
 /// Extract a single JSON value from model output that may wrap it in prose or a
 /// fenced code block.
 ///

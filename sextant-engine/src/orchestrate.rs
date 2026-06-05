@@ -12,22 +12,24 @@
 //! on in later steps and always flows through the same executor and scorer.
 
 use sextant_ir::Format;
+use sextant_llm::{LlmClient, LlmProvider};
 
 use crate::candidate::infer_candidates;
 use crate::ingest::{Sample, SampleSet};
 use crate::limits::Limits;
-use crate::refine::refine;
+use crate::refine::{RefineOutcome, Refinement, refine};
 use crate::report::{Report, RunMetadata};
-use crate::scorer::{ScoreWeights, score_with};
+use crate::semantic::{SemanticOptions, semantic_pass};
 
 /// Options controlling an inference run.
 #[derive(Debug, Clone)]
 pub struct InferenceOptions {
     /// Executor and scorer resource limits (FR-24).
     pub limits: Limits,
-    /// Whether to run statistics-only with the language model disabled. The
-    /// model is not yet wired in, so this is effectively always true today; the
-    /// flag records intent and guarantees the offline, zero-egress path (NFR-4).
+    /// Whether to run statistics-only with the language model disabled. When
+    /// set, [`infer_with_llm`] never consults the provider and the run is fully
+    /// offline with zero network egress (NFR-4). [`infer`] is always
+    /// statistics-only regardless of this flag.
     pub no_llm: bool,
 }
 
@@ -47,31 +49,96 @@ impl Default for InferenceOptions {
 #[must_use]
 pub fn infer(samples: &SampleSet, options: &InferenceOptions) -> Report {
     let slices: Vec<&[u8]> = samples.samples.iter().map(Sample::bytes).collect();
+    let refinement = statistics_refinement(&slices, &options.limits);
+    let metadata = run_metadata(samples, options.no_llm);
+    Report::build(
+        refinement.format,
+        refinement.score,
+        refinement.history,
+        metadata,
+    )
+}
 
-    let candidates = infer_candidates(&slices, &options.limits);
+/// Run statistics-only inference and then the language-model semantic pass over
+/// the best candidate, returning a report (milestone M2).
+///
+/// The semantic pass flows through the same scorer the heuristic loop uses, so a
+/// model proposal is applied only when the verified fit does not regress (FR-26,
+/// FR-31). The function is defensive about the central invariant: even if the
+/// pass somehow returned a worse IR, or the model call fails (a tripped call cap
+/// or budget, a transport error, or an unparseable response), the run degrades
+/// gracefully to the verified statistics-only result and never reports a score
+/// below the statistics-only baseline (PRD Section 12, NFR-9).
+///
+/// When `options.no_llm` is set, the model is never consulted: the function
+/// returns the statistics-only result without making any provider call, which
+/// preserves the documented zero-egress guarantee for that flag (FR-32, NFR-4).
+#[must_use]
+pub fn infer_with_llm<P: LlmProvider>(
+    samples: &SampleSet,
+    options: &InferenceOptions,
+    client: &LlmClient<P>,
+    semantic: &SemanticOptions,
+) -> Report {
+    let slices: Vec<&[u8]> = samples.samples.iter().map(Sample::bytes).collect();
+    let baseline = statistics_refinement(&slices, &options.limits);
+
+    // Honor `--no-llm`: do not touch the provider, and report the statistics-only
+    // result so no bytes can leave the machine (NFR-4).
+    if options.no_llm {
+        let metadata = run_metadata(samples, true);
+        return Report::build(baseline.format, baseline.score, baseline.history, metadata);
+    }
+
+    // The semantic pass records the model's format-family guess directly in the
+    // returned format's metadata, so the outcome's format carries it already.
+    let (format, score, semantic_history) =
+        match semantic_pass(&baseline.format, &slices, client, &options.limits, semantic) {
+            // The pass guarantees non-regression, but guard the invariant here
+            // too: never accept a result below the statistics-only baseline.
+            Ok(outcome) if outcome.score.overall + 1e-9 >= baseline.score.overall => {
+                (outcome.format, outcome.score, outcome.history)
+            }
+            _ => (baseline.format.clone(), baseline.score.clone(), Vec::new()),
+        };
+
+    // The report's refinement field is the list of accepted changes (FR-28), so
+    // only accepted semantic steps are appended after the statistics-only steps.
+    // Rejected proposals are retained in the semantic outcome for explainability
+    // but must not appear here, where a consumer would count them as applied.
+    let mut history = baseline.history;
+    history.extend(
+        semantic_history
+            .into_iter()
+            .filter(|step| step.outcome == RefineOutcome::Accepted),
+    );
+
+    let metadata = run_metadata(samples, false);
+    Report::build(format, score, history, metadata)
+}
+
+/// Run candidate generation and the heuristic refinement loop, returning the
+/// best verified IR with its score and accepted-step history. This is the shared
+/// statistics-only core of both [`infer`] and [`infer_with_llm`].
+fn statistics_refinement(slices: &[&[u8]], limits: &Limits) -> Refinement {
+    let candidates = infer_candidates(slices, limits);
     // `infer_candidates` always returns at least the opaque fallback, so `best`
-    // is present; guard anyway so this function never panics.
+    // is present; guard anyway so this never panics.
     let best = candidates
         .into_iter()
         .next()
         .map_or_else(empty_format, |candidate| candidate.format);
+    refine(&best, slices, limits)
+}
 
-    let refinement = refine(&best, &slices, &options.limits);
-    let score = score_with(
-        &refinement.format,
-        &slices,
-        &options.limits,
-        ScoreWeights::default(),
-    );
-
-    let metadata = RunMetadata {
+/// Assemble run metadata from a sample set.
+fn run_metadata(samples: &SampleSet, no_llm: bool) -> RunMetadata {
+    RunMetadata {
         tool_version: env!("CARGO_PKG_VERSION").to_owned(),
         sample_count: samples.len(),
         total_bytes: samples.total_bytes,
-        no_llm: options.no_llm,
-    };
-
-    Report::build(refinement.format, score, refinement.history, metadata)
+        no_llm,
+    }
 }
 
 /// A trivial empty format, used only as an unreachable fallback so [`infer`]

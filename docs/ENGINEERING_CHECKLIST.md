@@ -214,18 +214,18 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Tasks
 
-- [ ] Implement the semantic pass: send candidate structure plus a bounded byte view, receive JSON field annotations (names, roles, types, enum meanings, format-family guess).
-- [ ] Implement model-proposed refinement operations expressed against the IR (FR-30).
-- [ ] Integrate proposals into the generate, test, refine loop. Apply a proposal only if the executor confirms the verified score does not regress (FR-26, FR-31).
-- [ ] Enforce byte caps on what is sent in prompts (NFR-4) and cost guardrails (NFR-9).
-- [ ] Add tests using the mock provider with canned proposals, including a bad proposal that must be rejected by the executor.
+- [x] Implement the semantic pass: send candidate structure plus a bounded byte view, receive JSON field annotations (names, roles, types, enum meanings, format-family guess).
+- [x] Implement model-proposed refinement operations expressed against the IR (FR-30).
+- [x] Integrate proposals into the generate, test, refine loop. Apply a proposal only if the executor confirms the verified score does not regress (FR-26, FR-31).
+- [x] Enforce byte caps on what is sent in prompts (NFR-4) and cost guardrails (NFR-9).
+- [x] Add tests using the mock provider with canned proposals, including a bad proposal that must be rejected by the executor.
 
 ### Acceptance criteria
 
-- [ ] With a canned good proposal, role and type annotations improve on a held-out format.
-- [ ] With a canned bad proposal, the loop rejects it and the verified score does not drop (the non-regression invariant holds in test).
-- [ ] The refine loop always terminates (convergence, max iterations, or target score).
-- [ ] Enabling the model never lowers the verified parse score below the statistics-only baseline on the corpus.
+- [x] With a canned good proposal, role and type annotations improve on a held-out format.
+- [x] With a canned bad proposal, the loop rejects it and the verified score does not drop (the non-regression invariant holds in test).
+- [x] The refine loop always terminates (convergence, max iterations, or target score).
+- [x] Enabling the model never lowers the verified parse score below the statistics-only baseline on the corpus.
 
 ---
 
