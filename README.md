@@ -32,6 +32,7 @@ Sextant infers the structure of unknown binary file formats and network protocol
 - [Installation](#installation)
 - [Design principles](#design-principles)
 - [Roadmap](#roadmap)
+- [Project documents](#project-documents)
 - [Prior art and acknowledgements](#prior-art-and-acknowledgements)
 - [Contributing](#contributing)
 - [License](#license)
@@ -192,6 +193,12 @@ Sextant ships as a single static binary. Optional dependencies:
 - [ ] **Phase 2: The novel core.** Language-model semantic pass and the generate-test-refine loop.
 - [ ] **Phase 3: Exporters.** Kaitai, ImHex, Wireshark, 010, and the annotated hex view.
 - [ ] **Phase 4: Protocols and showcases.** pcap ingestion, an industrial/IoT protocol case study, a malware-config case study, and published benchmarks against the academic baselines.
+
+## Project documents
+
+- [Product Requirements Document](docs/PRD.md): the source of truth for what Sextant does and why.
+- [Engineering Checklist](docs/ENGINEERING_CHECKLIST.md): the step-by-step build plan.
+- [Agent guide](AGENTS.md): how contributors and AI coding agents work in this repository.
 
 ## Prior art and acknowledgements
 

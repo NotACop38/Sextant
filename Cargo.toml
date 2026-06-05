@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = [
+    "sextant-ir",
+    "sextant-engine",
+    "sextant-llm",
+    "sextant-export",
+    "sextant-cli",
+    "bench",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/NotACop38/Sextant"
+homepage = "https://github.com/NotACop38/Sextant"
+authors = ["The Sextant contributors"]
+description = "Infers the structure of unknown binary formats and protocols from samples and emits verified parsers."
+keywords = ["reverse-engineering", "binary", "parser", "protocol", "kaitai"]
+categories = ["command-line-utilities", "parser-implementations", "development-tools"]
+
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sextant-ir = { path = "sextant-ir", version = "0.0.0" }
+sextant-engine = { path = "sextant-engine", version = "0.0.0" }
+sextant-llm = { path = "sextant-llm", version = "0.0.0" }
+sextant-export = { path = "sextant-export", version = "0.0.0" }
+
+[workspace.lints.rust]
+# The parsing core handles untrusted input, so unsafe is denied by default
+# (NFR-1). Any exception requires a written justification and a covering test.
+unsafe_code = "deny"

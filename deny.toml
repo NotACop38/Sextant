@@ -1,0 +1,35 @@
+# cargo-deny configuration for Sextant.
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# The advisory database is fetched from its default source. Security
+# vulnerabilities fail the check. List specific advisory ids here to ignore one
+# with a written justification.
+yanked = "warn"
+ignore = []
+
+[licenses]
+# Permissive licenses compatible with this project's MIT or Apache-2.0 license.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+# Several permissive licenses are allowed ahead of need, for dependencies added
+# in later steps. Do not warn when one of them is not currently in the tree.
+unused-allowed-license = "allow"
+
+[bans]
+# Duplicate dependency versions are reported but do not fail the build yet.
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

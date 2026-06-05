@@ -1,0 +1,25 @@
+# Build artifacts
+/target
+**/*.rs.bk
+
+# Note: Cargo.lock is intentionally committed. This workspace builds a binary
+# application, so a pinned lock file keeps builds reproducible (NFR-6, NFR-10).
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.iml
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local secrets and environment overrides. Never commit API keys.
+.env
+.env.*
+*.pem
+
+# Sextant on-disk model response cache
+.sextant-cache/

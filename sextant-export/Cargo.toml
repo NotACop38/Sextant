@@ -1,0 +1,15 @@
+[package]
+name = "sextant-export"
+description = "Exporters that turn a verified Sextant IR into Kaitai, ImHex, Wireshark, and 010 Editor parsers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
