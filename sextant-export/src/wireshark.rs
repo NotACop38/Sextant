@@ -206,10 +206,11 @@ impl Gen {
             Kind::Struct { structure } => {
                 let sub = self.temp("sub");
                 let start = self.temp("start");
+                let label = lua_escape(&name);
                 self.line(indent, &format!("local {start} = offset"));
                 self.line(
                     indent,
-                    &format!("local {sub} = {parent}:add(buffer(offset), \"{name}\")"),
+                    &format!("local {sub} = {parent}:add(buffer(offset), \"{label}\")"),
                 );
                 self.emit_struct(structure, &sub, &key, indent);
                 self.line(indent, &format!("{sub}:set_len(offset - {start})"));
@@ -277,7 +278,11 @@ impl Gen {
                     );
                     return;
                 }
-                let ctor = format!("ProtoField.bytes(\"{}.{key}\", \"{label}\")", self.proto);
+                let ctor = format!(
+                    "ProtoField.bytes(\"{}.{key}\", \"{}\")",
+                    self.proto,
+                    lua_escape(label)
+                );
                 self.register(key, &ctor);
                 let size = self.size_expr(field.size.as_ref(), prefix);
                 self.line(
@@ -303,7 +308,11 @@ impl Gen {
                     );
                     return;
                 }
-                let ctor = format!("ProtoField.string(\"{}.{key}\", \"{label}\")", self.proto);
+                let ctor = format!(
+                    "ProtoField.string(\"{}.{key}\", \"{}\")",
+                    self.proto,
+                    lua_escape(label)
+                );
                 self.register(key, &ctor);
                 let size = self.size_expr(field.size.as_ref(), prefix);
                 let adder = if matches!(encoding, StringEncoding::Utf16Le) {
@@ -339,6 +348,7 @@ impl Gen {
         let order = endianness.unwrap_or(self.endianness);
         let little = matches!(order, Endianness::Little);
         let pf_type = proto_int_type(width, signed);
+        let label = lua_escape(label);
         let ctor = match enum_ref.and_then(|name| self.value_string_table(name)) {
             Some(table) => format!(
                 "ProtoField.{pf_type}(\"{}.{key}\", \"{label}\", base.DEC, {table})",
@@ -380,6 +390,7 @@ impl Gen {
         parent: &str,
         indent: usize,
     ) {
+        let label = lua_escape(label);
         let ctor = if is_string {
             format!("ProtoField.string(\"{}.{key}\", \"{label}\")", self.proto)
         } else {
@@ -439,6 +450,7 @@ impl Gen {
     ) {
         let arr = self.temp("arr");
         let astart = self.temp("astart");
+        let label = lua_escape(label);
         self.line(indent, &format!("local {astart} = offset"));
         self.line(
             indent,
@@ -481,7 +493,7 @@ impl Gen {
     fn emit_element(&mut self, element: &Field, key: &str, arr: &str, indent: usize) {
         match &element.kind {
             Kind::Struct { structure } => {
-                let label = element.name.clone().unwrap_or_else(|| "item".to_owned());
+                let label = lua_escape(&element.name.clone().unwrap_or_else(|| "item".to_owned()));
                 let el = self.temp("el");
                 let estart = self.temp("estart");
                 self.line(indent, &format!("local {estart} = offset"));
@@ -519,9 +531,34 @@ impl Gen {
     }
 }
 
-/// Escape a string for inclusion in a Lua double-quoted literal.
+/// Escape a string for safe inclusion in a Lua double-quoted literal.
+///
+/// Field names, enum variant names, and other labels are derived from untrusted
+/// samples and from model responses, both of which may contain a double quote, a
+/// backslash, a newline, or other control bytes. A Lua double-quoted literal
+/// cannot contain a raw newline and an unescaped quote or backslash would let
+/// crafted text break out of the string and inject arbitrary Lua into the
+/// generated dissector, which the user runs in Wireshark. This escapes the quote
+/// and backslash and renders every control character (and the raw quote and
+/// backslash) as a numeric `\ddd` escape so no input can leave the literal.
 fn lua_escape(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // Other ASCII control characters become numeric escapes; Lua reads
+            // `\ddd` as a single byte, keeping the literal well formed.
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                let _ = write!(out, "\\{:03}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// The Wireshark `ProtoField` constructor name for an integer width and sign.
@@ -691,6 +728,70 @@ mod tests {
             !lua.contains("-- DissectorTable.get(\"udp.port\")"),
             "got:\n{lua}"
         );
+    }
+
+    #[test]
+    fn malicious_array_element_name_cannot_inject_lua() {
+        // An array element's display label is taken from its raw name, which may
+        // come from a hostile model response or a crafted sample. A name carrying
+        // a double quote and Lua code must be escaped into the label literal, not
+        // injected into the dissector the user loads in Wireshark.
+        let element = Field::new(Kind::Bytes, Confidence::CERTAIN)
+            .with_name("x\") os.execute(\"id\")--")
+            .with_size(SizeRule::Fixed { bytes: 1 });
+        let array = Field::new(
+            Kind::Array {
+                element: Box::new(element),
+                count: CountRule::Fixed { count: 1 },
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name("items");
+        let lua = export(&format_of(vec![array], BTreeMap::new()));
+        // The injected quote is escaped, so the label literal stays closed.
+        assert!(
+            lua.contains("x\\\") os.execute"),
+            "name not escaped:\n{lua}"
+        );
+        // The raw breakout sequence (an unescaped quote then Lua) never appears.
+        assert!(
+            !lua.contains("\"x\") os.execute"),
+            "lua injection in dissector:\n{lua}"
+        );
+    }
+
+    #[test]
+    fn malicious_enum_variant_name_is_escaped() {
+        // Enum variant names flow into a Lua value-string table. A newline or
+        // quote in a variant name must be escaped so the table stays well formed.
+        let mut enums = BTreeMap::new();
+        enums.insert(
+            "kind".to_owned(),
+            EnumDef {
+                width: Some(1),
+                variants: vec![EnumVariant {
+                    value: 1,
+                    name: "a\"]=os.execute(\"id\")\n--".to_owned(),
+                    description: None,
+                }],
+            },
+        );
+        let field = Field::new(
+            Kind::Enum {
+                enum_ref: "kind".to_owned(),
+                width: 1,
+                endianness: None,
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name("kind");
+        let lua = export(&format_of(vec![field], enums));
+        // No raw newline survives inside the generated source line.
+        assert!(
+            !lua.contains("os.execute(\"id\")\n"),
+            "unescaped newline in lua:\n{lua}"
+        );
+        assert!(lua.contains("\\n"), "newline not escaped:\n{lua}");
     }
 
     #[test]

@@ -36,7 +36,14 @@ such as malware configuration blobs and command-and-control captures.
   the language-model pass is enabled, review what is transmitted and use the
   per-sample byte caps to limit it.
 - Treat generated parsers as you would any generated code: read them before
-  running them against data you care about.
+  running them against data you care about. Sextant sanitizes identifiers and
+  escapes string literals derived from samples and from model output so a
+  crafted name cannot inject executable content into a generated dissector or
+  template, but reviewing generated code before running it remains good
+  practice.
+
+A short threat model, listing the assets, entry points, and trust boundaries,
+is in [docs/threat-model.md](docs/threat-model.md).
 
 ## Data handling and privacy
 

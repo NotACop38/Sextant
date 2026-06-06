@@ -329,6 +329,12 @@ fn resolve_input(
     seen: &mut BTreeSet<PathBuf>,
 ) -> Result<(), IngestError> {
     if is_glob(input) {
+        // A glob is expanded by the `glob` crate. Note that a recursive `**`
+        // pattern resolves symlinked directories while matching, so the
+        // no-follow guarantee that `collect_dir` gives literal directory inputs
+        // does not extend to glob expansion. This is documented in
+        // `docs/threat-model.md`; pass a directory as a literal input when the
+        // tree may contain symlink cycles or links that lead outside it.
         let matches = glob(input).map_err(|error| IngestError::BadPattern {
             pattern: input.to_string(),
             message: error.to_string(),
@@ -421,11 +427,21 @@ fn collect_dir(
     entries.sort();
 
     for entry in entries {
-        // Skip entries that cannot be stat'd (a broken symlink, a race) rather
-        // than failing the whole run.
-        let Ok(metadata) = fs::metadata(&entry) else {
+        // Read the link's own metadata, not its target's. A symlink encountered
+        // while walking a directory is never followed: following it could escape
+        // the intended input tree (reading files the user did not select) and a
+        // symlink that points back at an ancestor would drive unbounded recursion
+        // and exhaust the stack (NFR-2, FR-24). A symlink given explicitly as a
+        // top-level input is still honored; only directory traversal refuses to
+        // follow links.
+        let Ok(metadata) = fs::symlink_metadata(&entry) else {
+            // Skip entries that cannot be stat'd (a broken link, a race) rather
+            // than failing the whole run.
             continue;
         };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
         if metadata.is_dir() {
             if recursive {
                 collect_dir(&entry, recursive, out, seen)?;
@@ -584,6 +600,35 @@ mod tests {
             offset: 0,
         };
         assert!(!whole.is_truncated());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_ingest_does_not_follow_a_symlink_cycle() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "sextant-ingest-symlink-{}-{unique}",
+            std::process::id()
+        ));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("create dirs");
+        fs::write(nested.join("real.bin"), b"data").expect("write file");
+        // A symlink inside the tree that points back at the root would loop
+        // forever if the walker followed it.
+        std::os::unix::fs::symlink(&root, nested.join("loop")).expect("symlink");
+
+        let result = ingest(
+            &[root.to_string_lossy().into_owned()],
+            &IngestOptions::default().with_recursive(true),
+        );
+        let _ = fs::remove_dir_all(&root);
+
+        let set = result.expect("ingest terminates without following the cycle");
+        // The one real file is ingested exactly once; the symlink is skipped.
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.samples[0].data, b"data");
     }
 
     #[test]
