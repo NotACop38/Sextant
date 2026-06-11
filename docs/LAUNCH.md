@@ -11,7 +11,8 @@ Throughout, `OWNER/REPO` is `NotACop38/Sextant`.
 
 ## 0. Pre-flight (already done in the repository)
 
-- README badges are live: CI status, crates.io version, and license.
+- README badges are configured: CI status, crates.io version, and license. The
+  crates.io badge resolves after `sextant-re` is published.
 - The roadmap, contributing, and license notes reflect the v0.1.0 release.
 - `SECURITY.md`, the responsible-use disclaimer, and the data-handling notes are
   current.

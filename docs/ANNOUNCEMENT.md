@@ -11,11 +11,11 @@ Working out the layout by hand is slow, and the existing tools each solve only
 part of the problem. Manual editors like Kaitai Struct, ImHex, and 010 make you
 write the spec yourself. Academic protocol-reverse-engineering tools infer
 structure but emit raw field boundaries, often need expert hints, and tend to
-choke on sub-byte fields. The recent wave of LLM tools has gone almost entirely
-into disassembly, not format structure.
+struggle with packed flag evidence. The recent wave of LLM tools has gone
+almost entirely into disassembly, not format structure.
 
 Nobody sits in the middle. Sextant is built for that gap: statistical inference
-for the boundaries, an optional language model for the semantics, and, the part
+for the boundaries, an optional semantic layer in the engine, and, the part
 everyone is missing, **verification that the result actually parses the input**.
 
 ## The idea: a falsifiable hypothesis
@@ -42,9 +42,9 @@ Inference is a generate-test-refine loop:
    boundaries, multi-sample alignment (the same math as aligning biological
    sequences), magic detection, and length/count/offset/checksum heuristics
    across endianness and width hypotheses.
-2. **The optional model pass** adds semantics on top: names, roles, types, enum
-   meanings, a format-family guess, and refinement proposals expressed as edits
-   to the IR.
+2. **The optional engine model path** can add semantics on top: names, roles,
+   types, enum meanings, a format-family guess, and refinement proposals
+   expressed as edits to the IR. The v0.1.0 CLI itself runs statistics-only.
 3. **The executor disposes.** Every proposal, statistical or model-driven, is
    executed and scored. A change is accepted only if the verified parse score
    does not regress on the full sample set. The model proposes; the executor

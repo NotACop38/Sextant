@@ -39,7 +39,7 @@ An IR is a `Format` containing one or more `Structure` definitions, each a list
 of `Field`s. A field has:
 
 - a **kind**: a fixed-size integer or bytes, a string, an array, a nested
-  struct, a sub-byte bit field, and so on;
+  struct, an opaque payload, and so on;
 - a **size rule**: a fixed size, a size derived from another field (a
   length-prefix relationship), or "to the end";
 - a **count rule** for arrays: a fixed count, or a count driven by another
@@ -92,19 +92,20 @@ points at the dimension that failed, which is what makes the failure useful.
 
 Sextant starts from the candidates that statistical inference proposed, executes
 and scores each, and keeps the best. It then tries to improve it: nudging field
-boundaries, swapping endianness and width hypotheses, and, when the model pass is
-enabled, applying model-proposed refinements. Every candidate change is run
-through the same executor and scorer, and a change is kept only if the verified
-score does not regress on the full sample set. The loop always terminates, by
-convergence, a target score, or a maximum iteration count.
+boundaries and swapping endianness and width hypotheses. The engine also has an
+optional model semantic path for callers that invoke it directly; the v0.1.0 CLI
+does not expose provider flags and runs statistics-only. Every candidate change
+is run through the same executor and scorer, and a change is kept only if the
+verified score does not regress on the full sample set. The loop always
+terminates, by convergence, a target score, or a maximum iteration count.
 
 ### The non-negotiable invariant
 
 The model proposes; the executor disposes. A model or heuristic change is never
 accepted if it lowers the verified parse score on the full sample set (FR-26,
-FR-31). The language model can suggest better names, roles, and refinements and
-can speed up the search, but it never decides the result and it can never
-substitute an unchecked guess for a tested one. This is why enabling the model
+FR-31). The engine model path can suggest better names, roles, and refinements
+and can speed up the search, but it never decides the result and it can never
+substitute an unchecked guess for a tested one. This is why enabling that path
 can only improve on the statistics-only baseline, never fall below it.
 
 ## Why this matters

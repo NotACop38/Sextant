@@ -120,18 +120,19 @@ fn decode_hex(text: &str) -> Result<Vec<u8>, HexError> {
         });
     }
     let mut out = Vec::with_capacity(chars.len() / 2);
-    for pair in chars.chunks_exact(2) {
-        let hi = hex_value(pair[0])?;
-        let lo = hex_value(pair[1])?;
+    for (pair_index, pair) in chars.chunks_exact(2).enumerate() {
+        let index = pair_index * 2;
+        let hi = hex_value(pair[0], index)?;
+        let lo = hex_value(pair[1], index + 1)?;
         out.push((hi << 4) | lo);
     }
     Ok(out)
 }
 
-fn hex_value(ch: char) -> Result<u8, HexError> {
+fn hex_value(ch: char, index: usize) -> Result<u8, HexError> {
     ch.to_digit(16)
         .map(|value| value as u8)
-        .ok_or(HexError::InvalidChar { index: 0, ch })
+        .ok_or(HexError::InvalidChar { index, ch })
 }
 
 impl Serialize for Bytes {
@@ -161,15 +162,7 @@ impl<'de> Deserialize<'de> for Bytes {
             where
                 E: de::Error,
             {
-                // Re-locate an invalid character against the original string so
-                // the error message points at the right offset.
-                decode_hex(value).map(Bytes).map_err(|err| match err {
-                    HexError::InvalidChar { ch, .. } => {
-                        let index = value.find(ch).unwrap_or(0);
-                        E::custom(HexError::InvalidChar { index, ch })
-                    }
-                    other => E::custom(other),
-                })
+                decode_hex(value).map(Bytes).map_err(E::custom)
             }
         }
 
@@ -218,6 +211,14 @@ mod tests {
     fn invalid_character_is_rejected_with_its_index() {
         let err = serde_json::from_str::<Bytes>("\"00zz\"").expect_err("must reject");
         assert!(err.to_string().contains("invalid hex character"));
+    }
+
+    #[test]
+    fn direct_hex_decode_reports_the_actual_invalid_index() {
+        assert_eq!(
+            Bytes::from_hex("00zz"),
+            Err(HexError::InvalidChar { index: 2, ch: 'z' })
+        );
     }
 
     #[test]

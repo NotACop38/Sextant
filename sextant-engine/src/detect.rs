@@ -16,8 +16,8 @@
 //!   marker (FR-9).
 //! - [`detect_trailing_checksum`]: a trailing checksum over a plausible covered
 //!   range (FR-10).
-//! - [`detect_bitfields`]: sub-byte packed fields, found with `bitvec` so the
-//!   engine never assumes byte-aligned fields only (FR-11).
+//! - [`detect_bitfields`]: packed flag bytes with bit-level evidence, found
+//!   with `bitvec` so the engine can reason about partly varying bits (FR-11).
 
 use bitvec::prelude::*;
 use sextant_ir::ChecksumAlgorithm;
@@ -498,8 +498,8 @@ fn checksum_holds<S: AsRef<[u8]>>(
         })
 }
 
-/// A sub-byte packed field: a header byte whose bits are partly constant and
-/// partly varying across the samples (FR-11).
+/// A packed flag byte whose bits are partly constant and partly varying across
+/// the samples (FR-11).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bitfield {
     /// The byte offset of the field.
@@ -515,8 +515,8 @@ pub struct Bitfield {
     pub groups: Vec<(u8, u8)>,
 }
 
-/// Detect sub-byte packed fields in the header (FR-11), using `bitvec` to track,
-/// per bit position, whether a bit ever changes across the samples.
+/// Detect packed flag bytes in the header (FR-11), using `bitvec` to track, per
+/// bit position, whether a bit ever changes across the samples.
 ///
 /// A byte is reported when some of its bits are constant and some vary, the
 /// signature of packed flags or a small packed integer sharing a byte with other
@@ -545,7 +545,7 @@ pub fn detect_bitfields<S: AsRef<[u8]>>(
 
         // A bit is "varying" once any sample differs from the first sample at
         // that bit position. The eight-bit presence set is held in a bitvec so
-        // the sub-byte analysis never falls back to whole-byte reasoning.
+        // the bit-level analysis never falls back to whole-byte reasoning.
         let mut varying: BitVec<u8, Lsb0> = BitVec::repeat(false, 8);
         for &byte in &bytes[1..] {
             let diff = byte ^ first;

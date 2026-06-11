@@ -5,9 +5,9 @@
 //! sample set (Step 4), generates and scores candidate hypotheses, selects the
 //! best, refines it under the non-regression invariant, and prints a scored field
 //! map. With `--out` it also writes the machine-readable JSON report (FR-34).
-//! With `--no-llm` (and today in every mode, since the language-model pass is
-//! layered on in a later step) the run is fully offline and performs zero network
-//! egress (NFR-4).
+//! With `--no-llm` (and today in every CLI mode, since provider flags are not
+//! exposed yet) the run is fully offline and performs zero network egress
+//! (NFR-4).
 //!
 //! The `inspect` subcommand reads a sample through a report and renders an
 //! annotated hex view (FR-35). The `export` subcommand reads a report and emits
@@ -64,7 +64,7 @@ enum Command {
         #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_TOTAL_BYTES)]
         max_total_bytes: usize,
         /// Run statistics-only with no language model and no network egress.
-        /// The model pass is not yet implemented, so this is the default
+        /// The CLI does not expose provider flags yet, so this is the default
         /// behavior today; the flag documents intent and guarantees the offline
         /// path.
         #[arg(long)]
@@ -285,13 +285,13 @@ fn run_infer(
 
     if !no_llm {
         eprintln!(
-            "sextant infer: the language-model pass is not yet available; running statistics-only."
+            "sextant infer: CLI model provider flags are not yet available; running statistics-only."
         );
     }
     let inference = InferenceOptions {
         limits: Limits::default().with_timeout(timeout.map(Duration::from_secs)),
-        // The model pass is not yet wired in, so every run is statistics-only
-        // and offline regardless of the flag (NFR-4).
+        // CLI provider flags are not yet wired in, so every run is
+        // statistics-only and offline regardless of the flag (NFR-4).
         no_llm: true,
     };
     let report = infer(&set, &inference);

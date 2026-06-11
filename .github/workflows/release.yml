@@ -83,6 +83,18 @@ jobs:
       - name: Build the release binary
         run: cargo build --release --locked -p ${{ env.CLI_PACKAGE }} --target ${{ matrix.target }}
 
+      - name: Smoke test the release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="${BIN_NAME}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            bin="${BIN_NAME}.exe"
+          fi
+          exe="target/${{ matrix.target }}/release/$bin"
+          "$exe" --version
+          "$exe" --help
+
       - name: Stage the archive contents
         shell: bash
         run: |

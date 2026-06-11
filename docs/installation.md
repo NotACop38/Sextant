@@ -1,8 +1,8 @@
 # Installation
 
-Sextant is in early development and is not yet published to crates.io or shipped
-as a prebuilt binary. For now you build it from source. This page describes the
-intended setup and what to expect.
+Sextant can be installed from a release artifact, from crates.io after the
+maintainer publishes the crate, or from source. Building from source is always
+the most direct path for contributors.
 
 ## Prerequisites
 
@@ -14,6 +14,21 @@ intended setup and what to expect.
 
 No JVM, no network service, and no language-model account are required to build
 or to run the core. Those are optional and are described below.
+
+## Prebuilt binaries
+
+Tagged releases publish archives for Linux, macOS, and Windows. Download the
+archive for your platform from the GitHub Releases page, verify it against the
+published `SHA256SUMS`, and place the `sextant` binary on your `PATH`.
+
+## From crates.io
+
+The crates.io name `sextant` belongs to an unrelated project, so the CLI package
+is published as `sextant-re`. It still installs a binary named `sextant`.
+
+```bash
+cargo install sextant-re
+```
 
 ## Build from source
 
@@ -46,9 +61,9 @@ optional and add external dependencies only when you choose to use them:
   (`kaitai-struct-compiler`), which requires a JVM. The core never depends on
   it: if the compiler is absent the cross-check is reported as skipped, not
   failed, and every other command works without it.
-- **The language-model pass.** The optional semantic pass reads an API key from
-  the environment or a config file (never from a command-line flag). Omit it, or
-  pass `--no-llm`, for offline operation. See
+- **The engine language-model path.** The optional semantic path reads API keys
+  from the environment or a config file only. The v0.1.0 CLI does not expose
+  provider flags, so CLI inference remains statistics-only and offline. See
   [Privacy and the `--no-llm` story](privacy.md).
 
 ## Running the test suite
@@ -63,7 +78,7 @@ cargo fmt --all --check
 ```
 
 All of these run in CI on every change. The benchmark regression guard
-(`cargo run -p bench -- --check`) runs there too.
+(`cargo run -p sextant-bench -- --check`) runs there too.
 
 ## Next steps
 

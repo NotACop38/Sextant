@@ -30,3 +30,6 @@ Thumbs.db
 
 # Sextant on-disk model response cache
 .sextant-cache/
+
+# Internal audit working notes. Public security guidance lives in SECURITY.md.
+/SECURITY_REVIEW.md

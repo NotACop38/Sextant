@@ -2,8 +2,9 @@
 //!
 //! [`infer_candidates`] runs the statistical pass end to end: it aligns the
 //! samples (FR-7), detects a magic signature (FR-8), length, count, and offset
-//! relationships (FR-9), a trailing checksum (FR-10), and sub-byte packed fields
-//! (FR-11), then assembles the findings into one or more Format Hypothesis IRs.
+//! relationships (FR-9), a trailing checksum (FR-10), and packed-flag byte
+//! evidence (FR-11), then assembles the findings into one or more Format
+//! Hypothesis IRs.
 //! Every candidate is validated against the Step 2 rules and scored by the Step
 //! 3 executor and scorer, so the returned list is ranked by a real, verified
 //! preliminary score rather than a guess (FR-12, FR-26).
@@ -17,15 +18,15 @@
 
 use sextant_ir::{
     Bytes, ChecksumSpec, Confidence, Constraint, CountRule, CoveredRange, Endianness, Evidence,
-    Field, FieldRef, Format, Kind, RangeAnchor, Role, SampleSupport, Signedness, SizeRule,
-    Structure,
+    Field, FieldOffset, FieldRef, Format, Kind, RangeAnchor, Role, SampleSupport, Signedness,
+    SizeRule, Structure,
 };
 
 use crate::align::{Alignment, align};
 use crate::chunk::{ChunkChecksum, ChunkChecksumStart, ChunkLayout, detect_chunks};
 use crate::detect::{
-    Bitfield, ChecksumField, ChecksumStart, IntField, IntRelation, Magic, detect_bitfields,
-    detect_int_fields, detect_magic, detect_trailing_checksum,
+    Bitfield, ChecksumField, ChecksumStart, IntField, IntRelation, Magic, OffsetField,
+    detect_bitfields, detect_int_fields, detect_magic, detect_offsets, detect_trailing_checksum,
 };
 use crate::limits::Limits;
 use crate::scorer::{Score, ScoreWeights, score_with};
@@ -62,10 +63,16 @@ pub fn infer_candidates<S: AsRef<[u8]>>(samples: &[S], limits: &Limits) -> Vec<C
     let alignment = align(&slices);
     let magic = detect_magic(&slices, &alignment);
     let int_fields = detect_int_fields(&slices);
+    let offset_fields = detect_offsets(&slices);
 
     let mut formats: Vec<(Format, usize)> = Vec::new();
     if let Some(chunked) = build_chunked(&slices, &alignment, magic.as_ref()) {
         formats.push(chunked);
+    }
+    if let Some(offset_candidate) =
+        build_offset_candidate(&slices, &alignment, magic.as_ref(), &offset_fields)
+    {
+        formats.push(offset_candidate);
     }
     if let Some(structured) = build_structured(&slices, &alignment, magic.as_ref(), &int_fields) {
         formats.push(structured);
@@ -186,6 +193,82 @@ fn build_structured(
         metadata: format_metadata(alignment),
     };
     Some((format, relations))
+}
+
+/// Build a candidate around a detected offset field. The field value is treated
+/// as an absolute pointer from the current structure base to the payload marker.
+/// Bytes between the pointer and the target may be padding or an unknown table,
+/// so the candidate models the verified jump instead of pretending the layout is
+/// purely sequential.
+fn build_offset_candidate(
+    slices: &[&[u8]],
+    alignment: &Alignment,
+    magic: Option<&Magic>,
+    offset_fields: &[OffsetField],
+) -> Option<(Format, usize)> {
+    let offset = offset_fields.iter().min_by(|a, b| {
+        a.offset
+            .cmp(&b.offset)
+            .then(a.width.cmp(&b.width))
+            .then(a.big_endian.cmp(&b.big_endian))
+    })?;
+    let total = slices.len();
+    let magic_len = magic.map_or(0, Magic::len).min(offset.offset);
+
+    let mut fields: Vec<Field> = Vec::new();
+    if magic_len >= 2 {
+        if let Some(magic) = magic {
+            fields.push(magic_field(&magic.bytes[..magic_len], total));
+        }
+    }
+
+    let bitfields = detect_bitfields(slices, magic_len, offset.offset);
+    for byte_offset in magic_len..offset.offset {
+        fields.push(filler_field(slices, byte_offset, &bitfields, total));
+    }
+
+    let mut offset_field = integer_field(
+        "data_offset",
+        offset.width,
+        offset.big_endian,
+        Role::Offset,
+        0.85,
+        total,
+        &["value points at an invariant downstream marker"],
+    );
+    offset_field.evidence.notes.push(values_note(&offset.values));
+    offset_field
+        .evidence
+        .notes
+        .push(format!("pointed marker byte: 0x{:02x}", offset.marker));
+    fields.push(offset_field);
+
+    let mut payload = payload_field(
+        SizeRule::ToEnd,
+        offset_payload_entropy(slices, offset),
+        total,
+    );
+    payload.offset = Some(FieldOffset::Derived {
+        offset_field: FieldRef::new("data_offset"),
+    });
+    payload
+        .evidence
+        .notes
+        .push("starts at the decoded data_offset value".to_owned());
+    fields.push(payload);
+
+    let format = Format {
+        name: "candidate-offset".to_owned(),
+        endianness: if offset.big_endian {
+            Endianness::Big
+        } else {
+            Endianness::Little
+        },
+        root: Structure::new(fields),
+        enums: Default::default(),
+        metadata: format_metadata(alignment),
+    };
+    Some((format, 1))
 }
 
 /// Choose the key relationship to drive the tail. A genuine length or count
@@ -642,8 +725,9 @@ fn checksum_field(checksum: &ChecksumField, has_magic: bool, total: usize) -> Fi
 /// undetermined integer otherwise.
 fn filler_field(slices: &[&[u8]], offset: usize, bitfields: &[Bitfield], total: usize) -> Field {
     if let Some(bits) = bitfields.iter().find(|b| b.offset == offset) {
+        let name = format!("flags_{offset}");
         let mut field = integer_field(
-            "flags",
+            &name,
             1,
             false,
             Role::Flags,
@@ -661,8 +745,9 @@ fn filler_field(slices: &[&[u8]], offset: usize, bitfields: &[Bitfield], total: 
     let bytes: Vec<u8> = slices.iter().map(|s| s[offset]).collect();
     let invariant = bytes.iter().all(|&b| Some(b) == bytes.first().copied());
     if invariant {
+        let name = format!("reserved_{offset}");
         let mut field = integer_field(
-            "reserved",
+            &name,
             1,
             false,
             Role::Reserved,
@@ -675,8 +760,9 @@ fn filler_field(slices: &[&[u8]], offset: usize, bitfields: &[Bitfield], total: 
         });
         field
     } else {
+        let name = format!("field_{offset}");
         integer_field(
-            "field",
+            &name,
             1,
             false,
             Role::Unknown,
@@ -773,6 +859,21 @@ fn tail_entropy(slices: &[&[u8]], start: usize) -> f64 {
     shannon_entropy(&buffer)
 }
 
+/// The entropy of every byte from each offset target through the end of the
+/// sample.
+fn offset_payload_entropy(slices: &[&[u8]], offset: &OffsetField) -> f64 {
+    let mut buffer = Vec::new();
+    for (slice, &target) in slices.iter().zip(&offset.values) {
+        let Ok(target) = usize::try_from(target) else {
+            continue;
+        };
+        if target <= slice.len() {
+            buffer.extend_from_slice(&slice[target..]);
+        }
+    }
+    shannon_entropy(&buffer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -820,5 +921,65 @@ mod tests {
             .collect();
         assert!(roles.contains(&Role::Magic));
         assert!(roles.contains(&Role::Length));
+    }
+
+    #[test]
+    fn structured_candidate_keeps_multiple_reserved_header_bytes() {
+        let make = |fill: u8, payload_len: u8| {
+            let mut data = vec![0xA5; 66];
+            data.push(payload_len);
+            data.extend(std::iter::repeat_n(fill, usize::from(payload_len)));
+            data
+        };
+        let samples = [make(1, 3), make(2, 5), make(3, 8)];
+        let candidates = infer_candidates(&samples, &limits());
+        let structured = candidates
+            .iter()
+            .find(|candidate| candidate.format.name == "candidate-structured")
+            .expect("structured candidate should survive validation");
+
+        let names: Vec<_> = structured
+            .format
+            .root
+            .fields
+            .iter()
+            .filter_map(|field| field.name.as_deref())
+            .collect();
+        assert!(
+            names.contains(&"reserved_64") && names.contains(&"reserved_65"),
+            "reserved filler bytes must get unique names, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn offset_relationships_are_assembled_into_candidates() {
+        let samples = [
+            b"OF\x05aaDxy".to_vec(),
+            b"OF\x07bbbbDzz".to_vec(),
+            b"OF\x06cccDq".to_vec(),
+        ];
+        let candidates = infer_candidates(&samples, &limits());
+        let offset = candidates
+            .iter()
+            .find(|candidate| candidate.format.name == "candidate-offset")
+            .expect("offset detector evidence should produce an offset candidate");
+
+        assert!(
+            offset
+                .format
+                .root
+                .fields
+                .iter()
+                .any(|field| field.role == Some(Role::Offset)),
+            "candidate must include the pointer field"
+        );
+        assert!(
+            offset.format.root.fields.iter().any(|field| matches!(
+                &field.offset,
+                Some(sextant_ir::FieldOffset::Derived { offset_field })
+                    if offset_field.as_str() == "data_offset"
+            )),
+            "candidate must include a payload field located through the pointer"
+        );
     }
 }

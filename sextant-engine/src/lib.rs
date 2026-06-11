@@ -21,9 +21,9 @@
 //! [`infer_candidates`] turns a sample set into one or more candidate
 //! [`Format`](sextant_ir::Format) hypotheses using classical techniques:
 //! byte statistics (FR-6), positional [`align`]ment (FR-7), magic, length,
-//! count, offset, checksum, and sub-byte field detection (FR-8 to FR-11). Each
-//! candidate is validated and scored by the executor and scorer, so the list is
-//! ranked by a verified preliminary score (FR-12).
+//! count, offset, checksum, and packed-flag evidence detection (FR-8 to FR-11).
+//! Each candidate is validated and scored by the executor and scorer, so the
+//! list is ranked by a verified preliminary score (FR-12).
 //!
 //! # Ingestion (Step 4)
 //!

@@ -133,16 +133,17 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 ### Tasks
 
 - [x] Implement entropy, byte-frequency, and n-gram statistics across the sample set.
-- [x] Implement multi-sample sequence alignment to find invariant and variable regions and candidate boundaries.
+- [x] Implement bounded positional multi-sample alignment to find invariant and variable regions and candidate boundaries; track gap-aware sequence alignment as a follow-up refinement.
 - [x] Implement magic or signature detection (FR-8).
 - [x] Implement length, count, and offset field detection across endianness and width hypotheses (FR-9).
 - [x] Implement checksum field detection over plausible ranges (FR-10).
-- [x] Implement sub-byte field detection for flags and packed integers (FR-11, using `bitvec`).
+- [x] Implement packed-flag byte detection with bit-level evidence (FR-11, using `bitvec`); true bit-level IR and exporter support remains follow-up work.
 - [x] Emit one or more candidate IRs with preliminary scores (FR-12).
 
 ### Acceptance criteria
 
 - [x] On at least three corpus formats, the statistical pass recovers the magic and at least one length or count relationship, expressed as a candidate IR.
+- [x] Offset relationships detected by the statistical pass are assembled into valid candidate IRs.
 - [x] Candidate IRs are valid (pass Step 2 validation) and executable by the Step 3 executor.
 - [x] Detected boundaries on the corpus meet an initial field-boundary recall bar (set a starting number, refine later).
 
@@ -210,7 +211,7 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ## Step 9: LLM semantic pass and refinement loop
 
-**Goal.** Use the model to add semantics and propose verified refinements (FR-29 to FR-32, FR-25 to FR-28). This realizes milestone M2.
+**Goal.** Use the engine model path to add semantics and propose verified refinements (FR-29 to FR-32, FR-25 to FR-28). This realizes the library portion of milestone M2; public CLI provider flags are deferred.
 
 ### Tasks
 
@@ -356,10 +357,10 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 ### Tasks
 
 - [x] Final review of README, docs, license headers, and the security and responsible-use notes. (README status note, roadmap, contributing, and license sections updated for v0.1.0; SECURITY.md, the responsible-use disclaimer, and the data-handling notes confirmed current. License is declared in `Cargo.toml` plus both LICENSE files; the codebase uses no per-file SPDX headers, uniformly.)
-- [x] Replace placeholder badges with live ones (a real CI status badge, crates.io version, license). (README now shows the live CI workflow badge, the `sextant-re` crates.io version badge, and a license badge.)
+- [x] Configure public badges (CI status, crates.io version, license). The crates.io badge resolves after the maintainer publishes `sextant-re`.
 - [ ] Flip the repository to public. (Maintainer action; exact command in `docs/LAUNCH.md` Step 1.)
 - [x] Enable Discussions and set up issue labels and a triage process. (Labels defined in `.github/labels.yml` and applied by `scripts/setup-labels.sh`; triage flow in `docs/TRIAGE.md`; issue templates apply a `triage` label. Enabling Discussions is the one maintainer toggle, in `docs/LAUNCH.md` Step 2.)
-- [x] Cut and publish the first tagged release. (Pipeline, version, and dated changelog section are ready; the tag push and crates.io publish are maintainer actions with exact commands in `docs/LAUNCH.md` Steps 4 and 5 and `docs/RELEASING.md`.)
+- [ ] Cut and publish the first tagged release. (Pipeline, version, and dated changelog section are ready; the tag push and crates.io publish are maintainer actions with exact commands in `docs/LAUNCH.md` Steps 4 and 5 and `docs/RELEASING.md`.)
 - [x] Optional: prepare a short write-up of the IR and the verification loop for sharing. (`docs/ANNOUNCEMENT.md`.)
 
 ### Acceptance criteria

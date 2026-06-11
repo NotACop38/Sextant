@@ -21,8 +21,8 @@ apart.
   verification loop, the heart of the tool.
 - [Privacy and the `--no-llm` story](privacy.md): what is and is not
   transmitted, and how to run fully offline.
-- [Model data handling](model-data-handling.md): exactly what the optional
-  language-model pass sends, and the controls over it.
+- [Model data handling](model-data-handling.md): what the optional engine
+  language-model path sends when an integrator enables it.
 - [Examples](examples.md): runnable examples against the bundled corpus and the
   recorded demo.
 
