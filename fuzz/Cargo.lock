@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "sextant-engine"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bitvec",
  "glob",
@@ -266,14 +266,14 @@ dependencies = [
 
 [[package]]
 name = "sextant-export"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "sextant-ir",
 ]
 
 [[package]]
 name = "sextant-ir"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "sextant-llm"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",

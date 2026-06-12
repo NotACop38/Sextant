@@ -47,6 +47,7 @@ Field map:
       tag: enum, bytes, 1 bytes (confidence 0.50)
       length: length, u16 little-endian, 2 bytes (confidence 0.90)
       data: payload, bytes, derived from length (confidence 0.70)
+  (confidence: 0.00 weak evidence to 1.00 verified against every sample; per-field evidence is in the report JSON)
 Refinement: no improving change was found (already converged).
 
 Wrote report to report.json

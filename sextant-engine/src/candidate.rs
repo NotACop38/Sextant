@@ -236,7 +236,10 @@ fn build_offset_candidate(
         total,
         &["value points at an invariant downstream marker"],
     );
-    offset_field.evidence.notes.push(values_note(&offset.values));
+    offset_field
+        .evidence
+        .notes
+        .push(values_note(&offset.values));
     offset_field
         .evidence
         .notes
@@ -925,13 +928,22 @@ mod tests {
 
     #[test]
     fn structured_candidate_keeps_multiple_reserved_header_bytes() {
-        let make = |fill: u8, payload_len: u8| {
-            let mut data = vec![0xA5; 66];
+        // A varying byte after the magic stops the invariant prefix, so the two
+        // invariant bytes that follow it become reserved fillers rather than
+        // part of the magic. Before filler names carried their offset, both
+        // were named "reserved", the duplicate name failed IR validation, and
+        // the whole structured candidate was silently dropped.
+        let make = |session: u8, fill: u8, payload_len: u8| {
+            let mut data = b"MAGC".to_vec();
+            data.push(session);
+            // Nonzero reserved bytes: zeros here would let the detector fold
+            // byte 6 into a wider big-endian integer ending at the length byte.
+            data.extend_from_slice(&[0xEE, 0xEE]);
             data.push(payload_len);
             data.extend(std::iter::repeat_n(fill, usize::from(payload_len)));
             data
         };
-        let samples = [make(1, 3), make(2, 5), make(3, 8)];
+        let samples = [make(0x11, 1, 3), make(0x57, 2, 5), make(0xd2, 3, 8)];
         let candidates = infer_candidates(&samples, &limits());
         let structured = candidates
             .iter()
@@ -946,7 +958,7 @@ mod tests {
             .filter_map(|field| field.name.as_deref())
             .collect();
         assert!(
-            names.contains(&"reserved_64") && names.contains(&"reserved_65"),
+            names.contains(&"reserved_5") && names.contains(&"reserved_6"),
             "reserved filler bytes must get unique names, got {names:?}"
         );
     }

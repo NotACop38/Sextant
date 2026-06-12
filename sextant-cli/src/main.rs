@@ -133,7 +133,7 @@ fn main() -> ExitCode {
             recursive,
             max_bytes_per_sample,
             max_total_bytes,
-            no_llm,
+            no_llm: _,
             timeout,
             transport,
             port,
@@ -143,7 +143,6 @@ fn main() -> ExitCode {
             recursive,
             max_bytes_per_sample,
             max_total_bytes,
-            no_llm,
             timeout,
             transport.as_deref(),
             port,
@@ -228,16 +227,16 @@ fn run_bench(corpus: Option<&str>, out: Option<&str>) -> ExitCode {
 }
 
 /// Ingest the inputs, run statistics-only inference, and print a scored field
-/// map (Step 6). The `--no-llm` path is fully offline (NFR-4). When a transport
-/// and port are given, the inputs are read as packet captures and protocol
-/// inference runs instead (Step 11, FR-2).
+/// map (Step 6). Every run is fully offline today, with or without `--no-llm`
+/// (NFR-4); the flag is accepted so scripts can pin the guarantee. When a
+/// transport and port are given, the inputs are read as packet captures and
+/// protocol inference runs instead (Step 11, FR-2).
 #[allow(clippy::too_many_arguments)]
 fn run_infer(
     inputs: &[String],
     recursive: bool,
     max_bytes_per_sample: usize,
     max_total_bytes: usize,
-    no_llm: bool,
     timeout: Option<u64>,
     transport: Option<&str>,
     port: Option<u16>,
@@ -283,15 +282,12 @@ fn run_infer(
 
     print_sample_set(&set);
 
-    if !no_llm {
-        eprintln!(
-            "sextant infer: CLI model provider flags are not yet available; running statistics-only."
-        );
-    }
     let inference = InferenceOptions {
         limits: Limits::default().with_timeout(timeout.map(Duration::from_secs)),
         // CLI provider flags are not yet wired in, so every run is
-        // statistics-only and offline regardless of the flag (NFR-4).
+        // statistics-only and offline whether or not --no-llm was given
+        // (NFR-4). The field map states the mode, so a default run is not
+        // warned at as if it were degraded.
         no_llm: true,
     };
     let report = infer(&set, &inference);
@@ -621,6 +617,10 @@ fn print_report(report: &Report) {
             conf = entry.confidence,
         );
     }
+    println!(
+        "  (confidence: 0.00 weak evidence to 1.00 verified against every sample; \
+         per-field evidence is in the report JSON)"
+    );
 
     if report.refinement.is_empty() {
         println!("Refinement: no improving change was found (already converged).");

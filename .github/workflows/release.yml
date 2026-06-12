@@ -94,6 +94,14 @@ jobs:
           exe="target/${{ matrix.target }}/release/$bin"
           "$exe" --version
           "$exe" --help
+          # End to end on the committed corpus: a binary that launches but
+          # cannot infer, inspect, or export must never ship.
+          mkdir -p smoke
+          "$exe" infer corpus/tlv/samples --out smoke/report.json
+          "$exe" inspect smoke/report.json --sample corpus/tlv/samples/sample_01.tlv
+          "$exe" export smoke/report.json --format kaitai --out smoke/tlv.ksy
+          test -s smoke/tlv.ksy
+          rm -rf smoke
 
       - name: Stage the archive contents
         shell: bash

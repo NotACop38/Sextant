@@ -321,6 +321,66 @@ fn inspect_on_a_missing_report_is_an_input_error() {
 }
 
 #[test]
+fn inspect_on_a_corrupt_report_is_an_input_error() {
+    // A report the user hand-edited into invalid JSON must produce a clear
+    // input error, never a panic or a stack trace.
+    let report_path = std::env::temp_dir().join(format!(
+        "sextant-corrupt-report-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(&report_path, "{ \"this is\": not valid json").expect("write corrupt report");
+
+    let output = sextant()
+        .arg("inspect")
+        .arg(&report_path)
+        .arg("--sample")
+        .arg(corpus_dir("tlv/samples/sample_01.tlv"))
+        .output()
+        .expect("run sextant inspect on a corrupt report");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a corrupt report should exit with the PRD input-error code"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not a valid report"),
+        "stderr should explain the report is invalid, got: {stderr}"
+    );
+
+    let _ = std::fs::remove_file(&report_path);
+}
+
+#[test]
+fn export_on_a_corrupt_report_is_an_input_error() {
+    let report_path = std::env::temp_dir().join(format!(
+        "sextant-corrupt-export-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(&report_path, "[1, 2, 3]").expect("write corrupt report");
+
+    let output = sextant()
+        .arg("export")
+        .arg(&report_path)
+        .arg("--format")
+        .arg("kaitai")
+        .output()
+        .expect("run sextant export on a corrupt report");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a corrupt report should exit with the PRD input-error code"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not a valid report"),
+        "stderr should explain the report is invalid, got: {stderr}"
+    );
+
+    let _ = std::fs::remove_file(&report_path);
+}
+
+#[test]
 fn infer_on_a_missing_path_is_an_input_error() {
     let output = sextant()
         .arg("infer")

@@ -352,6 +352,15 @@ fn timestamp_micros(ts_sec: u32, ts_frac: u32, nanos: bool) -> u64 {
 /// Block that fixes the byte order, with Interface Description Blocks giving the
 /// link type and Enhanced or Simple Packet Blocks carrying frames.
 fn read_pcapng(bytes: &[u8], options: &ExtractOptions) -> Result<Vec<ExtractedMessage>, PcapError> {
+    // A pcapng capture holds at least one complete block, and every block is at
+    // least 12 bytes, so the Section Header Block magic alone is not a capture.
+    // Truncation after the first block is tolerated below, the same way the
+    // classic reader keeps the complete records of a capture cut mid-write.
+    if bytes.len() < 12 {
+        return Err(PcapError::Truncated {
+            offset: bytes.len(),
+        });
+    }
     let mut messages = Vec::new();
     let mut cursor = 0usize;
     let mut order = ByteOrder::Little;
