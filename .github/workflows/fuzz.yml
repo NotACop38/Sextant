@@ -40,6 +40,7 @@ jobs:
         target:
           - executor
           - infer
+          - ir_json
           - pcap
           - ingest
           - export_kaitai

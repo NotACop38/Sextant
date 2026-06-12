@@ -424,12 +424,10 @@ pub fn render_readme_section(report: &BenchReport) -> String {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "How to read this against the academic baselines: the protocol-reverse-engineering \
-         literature (Netzob, NEMESYS, BinaryInferno) reports field-boundary F-measures that \
-         vary by corpus and typically sit below this bar, and those tools emit raw field \
-         boundaries rather than a runnable parser. Every number above is verified: the chosen \
-         IR parses every sample by construction, and the same IR exports a Kaitai, Wireshark, \
-         ImHex, or 010 parser."
+        "How to read this against academic baselines: compare numbers only within the same \
+         corpus and methodology. The important property here is not just the score, but that \
+         every number above is verified: the chosen IR parses every sample by construction, \
+         and the same IR exports a Kaitai, Wireshark, ImHex, or 010 parser."
     );
     out
 }

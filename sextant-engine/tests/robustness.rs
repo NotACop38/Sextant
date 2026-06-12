@@ -225,9 +225,20 @@ fn random_bytes_never_panic_and_respect_invariants() {
         let format = &formats[rng.below(formats.len())];
         let execution = execute(format, &sample, &limits);
         assert_invariants(&execution, sample.len(), &limits);
-        // Scoring a random sample always yields a finite value in 0..=1.
+        // Scoring a random sample always yields finite values in 0..=1, on
+        // the overall score and on every breakdown dimension (FR-22, FR-23).
         let report = score(format, std::slice::from_ref(&sample));
-        assert!(report.overall.is_finite() && (0.0..=1.0).contains(&report.overall));
+        for (dimension, value) in [
+            ("overall", report.overall),
+            ("coverage", report.coverage),
+            ("consistency", report.consistency),
+            ("generality", report.generality),
+        ] {
+            assert!(
+                value.is_finite() && (0.0..=1.0).contains(&value),
+                "{dimension} must be a finite value in 0..=1, got {value}"
+            );
+        }
     }
 }
 

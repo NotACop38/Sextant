@@ -258,6 +258,11 @@ The score is a value in 0 to 1 with a structured breakdown so that the report an
 
 ## 14. CLI specification
 
+This section specifies the v1 command surface. v0.1.0 implements a subset: the
+provider flags (`--provider`, `--model`, `--max-llm-calls`, `--budget`),
+`--format-hint`, and the global verbosity and logging flags are not wired into
+the CLI yet, and every release so far runs statistics-only.
+
 ```
 sextant infer <inputs...> [options]
   --no-llm                      Statistics-only; no network egress.
@@ -265,7 +270,9 @@ sextant infer <inputs...> [options]
   --model <id>                  Model identifier.
   --max-llm-calls <N>           Cap model calls for this run.
   --budget <amount>             Optional spend cap.
+  -r, --recursive               Descend into subdirectories.
   --max-bytes-per-sample <N>    Cap sample bytes used and sent.
+  --max-total-bytes <N>         Cap the total bytes read across all samples.
   --format-hint <name>          Optional hint about the format family.
   --transport <tcp|udp> --port <N>   Protocol extraction from a capture (v1.x).
   --timeout <seconds>           Wall-clock cap for inference.

@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A fuzz target (`ir_json`) for the two JSON deserializers that face hostile
+  input directly: the Format Hypothesis IR and the report, including a
+  round-trip losslessness check (FR-19, NFR-2).
+- Deterministic malformed-capture tests for the pcap reader (truncated
+  headers, oversized record lengths, byte-flipped real captures), corrupt
+  report JSON tests for `inspect` and `export`, and score-bounds assertions
+  over every breakdown dimension.
+- The release pipeline smoke test now runs `infer`, `inspect`, and `export`
+  end to end on the committed corpus, so a binary with a broken pipeline can
+  never ship.
+
+### Changed
+
+- `sextant infer` no longer prints a warning on default runs that provider
+  flags are unavailable. The field map's mode line already states that the
+  run is statistics-only with no network egress.
+- PRD Section 14 now documents the implemented `--recursive` and
+  `--max-total-bytes` flags and names the v1 flags that v0.1.0 omits.
+
+### Fixed
+
+- A pcapng input too short to hold a single block header is reported as
+  truncated instead of reading as an empty capture.
+- The bench harness generates the same benchmark prose the README commits, so
+  the README guard test passes again.
+- The reserved-filler naming regression test exercises a reachable scenario;
+  the previous one placed its length field beyond the detector's header scan
+  bound and silently asserted nothing.
+
 ## [0.1.0] - 2026-06-05
 
 ### Added

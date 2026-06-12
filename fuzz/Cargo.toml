@@ -38,6 +38,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "ir_json"
+path = "fuzz_targets/ir_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "pcap"
 path = "fuzz_targets/pcap.rs"
 test = false
