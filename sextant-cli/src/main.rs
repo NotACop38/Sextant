@@ -617,6 +617,10 @@ fn print_report(report: &Report) {
             conf = entry.confidence,
         );
     }
+    println!(
+        "  (confidence: 0.00 weak evidence to 1.00 verified against every sample; \
+         per-field evidence is in the report JSON)"
+    );
 
     if report.refinement.is_empty() {
         println!("Refinement: no improving change was found (already converged).");
