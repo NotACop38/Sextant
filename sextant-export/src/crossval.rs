@@ -209,8 +209,26 @@ fn driver_script(id: &str, format: &Format, samples: &[PathBuf]) -> String {
     script
 }
 
-/// Find the Kaitai compiler, preferring the canonical name.
+/// Environment variable that may name an absolute path to the Kaitai Struct
+/// compiler. Preferred over PATH lookup so operators can pin a reviewed binary
+/// (see `docs/threat-model.md`).
+pub const KAITAI_COMPILER_ENV: &str = "SEXTANT_KAITAI_COMPILER";
+
+/// Find the Kaitai compiler, preferring an absolute path from
+/// [`KAITAI_COMPILER_ENV`], then the canonical names on `PATH`.
 fn find_compiler() -> Option<String> {
+    if let Ok(path) = std::env::var(KAITAI_COMPILER_ENV) {
+        let trimmed = path.trim();
+        if !trimmed.is_empty()
+            && Command::new(trimmed)
+                .arg("--version")
+                .output()
+                .map(|out| out.status.success())
+                .unwrap_or(false)
+        {
+            return Some(trimmed.to_owned());
+        }
+    }
     for candidate in ["kaitai-struct-compiler", "ksc"] {
         if Command::new(candidate)
             .arg("--version")

@@ -503,9 +503,27 @@ fn role_word(role: sextant_ir::Role) -> &'static str {
 }
 
 /// Quote a YAML scalar so arbitrary text (including colons and `#`) is safe.
-/// Single quotes in the text are doubled, as YAML requires.
+///
+/// Single quotes are doubled (YAML single-quoted escaping). Newlines, carriage
+/// returns, and other control characters are escaped as visible `\n` / `\r` /
+/// `\u00XX` sequences so a hostile description cannot break the `.ksy` line
+/// structure or inject additional YAML keys.
 fn yaml_scalar(text: &str) -> String {
-    let escaped = text.replace('\'', "''");
+    let mut escaped = String::with_capacity(text.len() + 2);
+    for ch in text.chars() {
+        match ch {
+            '\'' => escaped.push_str("''"),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(escaped, "\\u{:04x}", u32::from(c));
+            }
+            c => escaped.push(c),
+        }
+    }
     format!("'{escaped}'")
 }
 
@@ -622,5 +640,27 @@ mod tests {
         let ksy = export(&format_of(vec![a, b]));
         assert!(ksy.contains("- id: a_b\n"), "got:\n{ksy}");
         assert!(ksy.contains("- id: a_b_2\n"), "got:\n{ksy}");
+    }
+
+    #[test]
+    fn yaml_scalar_escapes_newlines_and_controls() {
+        // A description carrying a newline or YAML breakout must not split the
+        // scalar across lines or inject a sibling key (same class of injection
+        // the Wireshark exporter guards against for Lua string literals).
+        let mut format = format_of(vec![
+            Field::new(Kind::Bytes, Confidence::CERTAIN)
+                .with_name("x")
+                .with_size(SizeRule::Fixed { bytes: 1 }),
+        ]);
+        format.metadata.description = Some("safe\ntitle: injected\r\n\u{0001}done".to_owned());
+        let ksy = export(&format);
+        assert!(
+            ksy.contains("title: 'safe\\ntitle: injected\\r\\n\\u0001done'"),
+            "controls not escaped:\n{ksy}"
+        );
+        assert!(
+            !ksy.contains("\ntitle: injected"),
+            "newline injection in ksy:\n{ksy}"
+        );
     }
 }
