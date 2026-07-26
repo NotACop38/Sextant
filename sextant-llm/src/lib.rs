@@ -38,8 +38,11 @@ mod provider;
 pub mod providers;
 
 pub use cache::{ResponseCache, request_key};
-pub use client::{Backoff, CallLimits, LlmClient, Pricing};
-pub use config::{EnvSource, ProcessEnv, ProviderKind, detect_available, resolve_provider};
+pub use client::{Backoff, CallLimits, DEFAULT_MAX_CALLS, LlmClient, Pricing};
+pub use config::{
+    ConfigFileSource, EnvSource, LayeredEnv, ProcessEnv, ProviderKind, SEXTANT_CONFIG_ENV,
+    default_secret_source, detect_available, resolve_provider,
+};
 pub use error::LlmError;
 pub use factory::build_provider;
 pub use mock::MockProvider;

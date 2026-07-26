@@ -3,14 +3,22 @@
 //! Secrets come only from the environment or a configuration file, never from a
 //! command-line flag (FR-40). This module has no API that accepts a key as an
 //! argument originating from a flag: credentials are read through an
-//! [`EnvSource`], which the CLI backs with the process environment.
+//! [`EnvSource`], which the CLI backs with a [`LayeredEnv`] of the process
+//! environment over an optional key=value config file.
 
+use std::collections::HashMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::LlmError;
+
+/// Environment variable naming a Sextant config file that may hold provider
+/// secrets as `KEY=VALUE` lines (FR-40). Process environment values still win
+/// when both are set.
+pub const SEXTANT_CONFIG_ENV: &str = "SEXTANT_CONFIG";
 
 /// The providers Sextant knows about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,10 +127,123 @@ impl EnvSource for ProcessEnv {
     }
 }
 
-impl EnvSource for std::collections::HashMap<String, String> {
+impl EnvSource for HashMap<String, String> {
     fn get(&self, key: &str) -> Option<String> {
-        std::collections::HashMap::get(self, key).cloned()
+        HashMap::get(self, key).cloned()
     }
+}
+
+/// A `KEY=VALUE` config file used as a secondary secret source (FR-40).
+///
+/// Lines that are empty or start with `#` are ignored. Values may be wrapped in
+/// single or double quotes. The file is optional: a missing path yields an empty
+/// source rather than an error, so callers can always layer it under the
+/// process environment.
+#[derive(Debug, Clone, Default)]
+pub struct ConfigFileSource {
+    values: HashMap<String, String>,
+    /// Path that was loaded, when any, for diagnostics.
+    pub path: Option<PathBuf>,
+}
+
+impl ConfigFileSource {
+    /// Load `KEY=VALUE` pairs from `path`. A missing file yields an empty source.
+    pub fn load(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref();
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Self {
+                values: HashMap::new(),
+                path: Some(path.to_path_buf()),
+            };
+        };
+        Self {
+            values: parse_config_file(&text),
+            path: Some(path.to_path_buf()),
+        }
+    }
+
+    /// Resolve the config path from `SEXTANT_CONFIG`, or the platform default
+    /// `~/.config/sextant/config` when that variable is unset.
+    pub fn from_default_location(env: &dyn EnvSource) -> Self {
+        if let Some(path) = env.get(SEXTANT_CONFIG_ENV).filter(|v| !v.trim().is_empty()) {
+            return Self::load(path);
+        }
+        if let Some(home) = env.get("HOME").filter(|v| !v.is_empty()) {
+            return Self::load(PathBuf::from(home).join(".config/sextant/config"));
+        }
+        Self::default()
+    }
+}
+
+impl EnvSource for ConfigFileSource {
+    fn get(&self, key: &str) -> Option<String> {
+        self.values.get(key).cloned()
+    }
+}
+
+/// Layer two secret sources: `primary` wins over `fallback` (FR-40).
+///
+/// Production wiring uses the process environment as primary and an optional
+/// config file as fallback, so exported env vars override file contents.
+#[derive(Debug, Clone)]
+pub struct LayeredEnv<P, F> {
+    /// Checked first (typically the process environment).
+    pub primary: P,
+    /// Checked when the primary has no value (typically a config file).
+    pub fallback: F,
+}
+
+impl<P: EnvSource, F: EnvSource> EnvSource for LayeredEnv<P, F> {
+    fn get(&self, key: &str) -> Option<String> {
+        self.primary
+            .get(key)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| self.fallback.get(key))
+    }
+}
+
+/// Build the default production secret source: process env over config file.
+#[must_use]
+pub fn default_secret_source() -> LayeredEnv<ProcessEnv, ConfigFileSource> {
+    let process = ProcessEnv;
+    let file = ConfigFileSource::from_default_location(&process);
+    LayeredEnv {
+        primary: process,
+        fallback: file,
+    }
+}
+
+/// Parse a simple `KEY=VALUE` config body.
+fn parse_config_file(text: &str) -> HashMap<String, String> {
+    let mut values = HashMap::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let value = strip_quotes(value.trim());
+        values.insert(key.to_owned(), value.to_owned());
+    }
+    values
+}
+
+fn strip_quotes(value: &str) -> &str {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
+        {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
 }
 
 /// Whether a provider's credential is present in the given environment.
@@ -254,5 +375,46 @@ mod tests {
     fn empty_credential_is_treated_as_absent() {
         let kind = resolve_provider(None, &env(&[("ANTHROPIC_API_KEY", "   ")]));
         assert!(matches!(kind, Err(LlmError::NoProviderConfigured)));
+    }
+
+    #[test]
+    fn config_file_supplies_secrets_when_env_is_empty() {
+        let file = ConfigFileSource {
+            values: env(&[("OPENAI_API_KEY", "from-file")]),
+            path: None,
+        };
+        let layered = LayeredEnv {
+            primary: env(&[]),
+            fallback: file,
+        };
+        assert_eq!(layered.get("OPENAI_API_KEY").as_deref(), Some("from-file"));
+    }
+
+    #[test]
+    fn process_env_wins_over_config_file() {
+        let file = ConfigFileSource {
+            values: env(&[("OPENAI_API_KEY", "from-file")]),
+            path: None,
+        };
+        let layered = LayeredEnv {
+            primary: env(&[("OPENAI_API_KEY", "from-env")]),
+            fallback: file,
+        };
+        assert_eq!(layered.get("OPENAI_API_KEY").as_deref(), Some("from-env"));
+    }
+
+    #[test]
+    fn parse_config_file_skips_comments_and_strips_quotes() {
+        let values = parse_config_file(
+            "# comment\nANTHROPIC_API_KEY=\"abc\"\n\nOLLAMA_HOST='http://127.0.0.1:11434'\n",
+        );
+        assert_eq!(
+            values.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("abc")
+        );
+        assert_eq!(
+            values.get("OLLAMA_HOST").map(String::as_str),
+            Some("http://127.0.0.1:11434")
+        );
     }
 }
