@@ -42,7 +42,7 @@ pub mod model;
 pub mod primitives;
 pub mod validate;
 
-pub use bytes::{Bytes, HexError};
+pub use bytes::{Bytes, HexError, MAX_BYTES_HEX_DECODE};
 pub use model::{
     ChecksumSpec, Constraint, CountRule, CoveredRange, EnumDef, EnumVariant, Evidence, Field,
     FieldOffset, Format, Kind, Metadata, RangeAnchor, SampleSupport, SizeRule, Structure,
@@ -51,7 +51,10 @@ pub use primitives::{
     ChecksumAlgorithm, Confidence, ConfidenceError, Endianness, FieldRef, Role, Signedness,
     StringEncoding,
 };
-pub use validate::{ValidationError, ValidationErrorKind, ValidationReport};
+pub use validate::{
+    MAX_ARRAY_COUNT, MAX_FIELD_COUNT, MAX_FIXED_FIELD_BYTES, MAX_NESTING_DEPTH, ValidationError,
+    ValidationErrorKind, ValidationReport,
+};
 
 impl Format {
     /// Validate the format against Sextant's semantic rules.

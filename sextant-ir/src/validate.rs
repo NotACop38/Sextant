@@ -16,13 +16,24 @@ use crate::model::{
 };
 
 /// The largest size, in bytes, a single fixed-size field may declare before it
-/// is treated as insane. Larger values are almost certainly a misparse and
-/// would invite unbounded allocation downstream (FR-24).
-pub const MAX_FIXED_FIELD_BYTES: u64 = 1 << 32;
+/// is treated as insane. Aligned with the executor's per-array element cap so a
+/// validated IR cannot declare a fixed blob the executor would refuse to allocate
+/// for (FR-24).
+pub const MAX_FIXED_FIELD_BYTES: u64 = 1 << 24;
 
 /// The largest element count a fixed-count array may declare before it is
-/// treated as insane (FR-24).
-pub const MAX_ARRAY_COUNT: u64 = 1 << 32;
+/// treated as insane. Aligned with [`MAX_FIXED_FIELD_BYTES`] and the executor's
+/// `max_array_elements` default (FR-24).
+pub const MAX_ARRAY_COUNT: u64 = 1 << 24;
+
+/// The deepest nesting of structures and arrays a format may declare. Matches
+/// the executor's default depth cap so validation rejects IR the executor would
+/// stop on for depth alone (FR-24).
+pub const MAX_NESTING_DEPTH: usize = 64;
+
+/// The most field nodes a format may contain (counting every nested field and
+/// array element descriptor). Bounds IR size independently of sample bytes.
+pub const MAX_FIELD_COUNT: usize = 1 << 20;
 
 /// The integer widths, in bytes, the IR supports (FR-16).
 pub const VALID_INT_WIDTHS: [u8; 4] = [1, 2, 4, 8];
@@ -130,6 +141,16 @@ pub enum ValidationErrorKind {
         /// The declared count.
         count: u64,
     },
+    /// The IR nests structures or arrays deeper than [`MAX_NESTING_DEPTH`].
+    NestingTooDeep {
+        /// The depth that exceeded the cap.
+        depth: usize,
+    },
+    /// The IR declares more field nodes than [`MAX_FIELD_COUNT`].
+    TooManyFields {
+        /// How many field nodes were found.
+        count: usize,
+    },
     /// Sample support claims more agreeing samples than total samples.
     SampleSupportInconsistent {
         /// How many samples were said to agree.
@@ -225,6 +246,14 @@ impl fmt::Display for ValidationErrorKind {
             ValidationErrorKind::InsaneArrayCount { count } => write!(
                 f,
                 "fixed array count of {count} is above the sane limit of {MAX_ARRAY_COUNT}"
+            ),
+            ValidationErrorKind::NestingTooDeep { depth } => write!(
+                f,
+                "nesting depth of {depth} exceeds the limit of {MAX_NESTING_DEPTH}"
+            ),
+            ValidationErrorKind::TooManyFields { count } => write!(
+                f,
+                "format declares {count} fields, above the limit of {MAX_FIELD_COUNT}"
             ),
             ValidationErrorKind::SampleSupportInconsistent { agreeing, total } => write!(
                 f,
@@ -375,9 +404,18 @@ pub(crate) fn validate(format: &Format) -> ValidationReport {
     let mut validator = Validator {
         format,
         errors: Vec::new(),
+        field_count: 0,
     };
-    validator.validate_structure(&format.root, "root", &[]);
+    validator.validate_structure(&format.root, "root", &[], 0);
     validator.validate_enums();
+    if validator.field_count > MAX_FIELD_COUNT {
+        validator.push(
+            "root",
+            ValidationErrorKind::TooManyFields {
+                count: validator.field_count,
+            },
+        );
+    }
     ValidationReport {
         errors: validator.errors,
     }
@@ -386,6 +424,7 @@ pub(crate) fn validate(format: &Format) -> ValidationReport {
 struct Validator<'a> {
     format: &'a Format,
     errors: Vec<ValidationError>,
+    field_count: usize,
 }
 
 impl<'a> Validator<'a> {
@@ -429,12 +468,27 @@ impl<'a> Validator<'a> {
         structure: &'a Structure,
         path: &str,
         ancestors: &[Frame<'a>],
+        depth: usize,
     ) {
+        if depth > MAX_NESTING_DEPTH {
+            self.push(
+                path.to_owned(),
+                ValidationErrorKind::NestingTooDeep { depth },
+            );
+            return;
+        }
         self.check_duplicate_names(structure, path);
         self.check_layout(structure, path);
         for (index, field) in structure.fields.iter().enumerate() {
             let field_path = format!("{path}.fields[{index}]");
-            self.validate_field(field, &field_path, ancestors, &structure.fields, index);
+            self.validate_field(
+                field,
+                &field_path,
+                ancestors,
+                &structure.fields,
+                index,
+                depth,
+            );
         }
     }
 
@@ -499,7 +553,9 @@ impl<'a> Validator<'a> {
         ancestors: &[Frame<'a>],
         current: &'a [Field],
         index: usize,
+        depth: usize,
     ) {
+        self.field_count = self.field_count.saturating_add(1);
         if !field.confidence.is_valid() {
             self.push(
                 format!("{path}.confidence"),
@@ -534,7 +590,12 @@ impl<'a> Validator<'a> {
         match &field.kind {
             Kind::Struct { structure } => {
                 let child = push_frame(ancestors, current, index);
-                self.validate_structure(structure, &format!("{path}.kind.structure"), &child);
+                self.validate_structure(
+                    structure,
+                    &format!("{path}.kind.structure"),
+                    &child,
+                    depth + 1,
+                );
             }
             Kind::Array { element, count } => {
                 self.validate_count(count, ancestors, current, index, path);
@@ -546,6 +607,7 @@ impl<'a> Validator<'a> {
                     &child,
                     element_slice,
                     0,
+                    depth + 1,
                 );
             }
             Kind::Enum {
