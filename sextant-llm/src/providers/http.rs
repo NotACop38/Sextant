@@ -12,10 +12,18 @@ use crate::config::ProviderKind;
 use crate::error::LlmError;
 use crate::provider::{Message, Role};
 
-/// Build a blocking HTTP client with a conservative timeout.
+/// Cap on a single provider response body so a hostile or misconfigured server
+/// cannot force an unbounded allocation into the process (FR-24).
+pub(crate) const MAX_RESPONSE_BODY_BYTES: usize = 4 << 20;
+
+/// Build a blocking HTTP client with a conservative timeout and no redirects.
+///
+/// Redirects are disabled so a compromised or unexpected endpoint cannot bounce
+/// credentials onto a different host.
 pub(crate) fn build_client(provider: ProviderKind) -> Result<reqwest::blocking::Client, LlmError> {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| LlmError::Provider {
             provider,
@@ -44,18 +52,41 @@ pub(crate) fn send<R: DeserializeOwned>(
 ) -> Result<R, LlmError> {
     let response = builder.send().map_err(|error| classify(error, provider))?;
     let status = response.status();
+    let body = read_body_capped(response, provider)?;
     if !status.is_success() {
         // A 429 or 5xx is transient and worth retrying; other statuses are not.
-        let body = response.text().unwrap_or_default();
         let message = format!("HTTP {status}: {body}");
         if status.as_u16() == 429 || status.is_server_error() {
             return Err(LlmError::Transport(format!("{provider}: {message}")));
         }
         return Err(LlmError::Provider { provider, message });
     }
-    response.json::<R>().map_err(|error| LlmError::Provider {
+    serde_json::from_str(&body).map_err(|error| LlmError::Provider {
         provider,
         message: format!("could not parse response: {error}"),
+    })
+}
+
+/// Read the response body with a hard byte cap.
+fn read_body_capped(
+    response: reqwest::blocking::Response,
+    provider: ProviderKind,
+) -> Result<String, LlmError> {
+    use std::io::Read as _;
+    let mut reader = response.take(MAX_RESPONSE_BODY_BYTES as u64 + 1);
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|error| LlmError::Transport(format!("{provider}: {error}")))?;
+    if bytes.len() > MAX_RESPONSE_BODY_BYTES {
+        return Err(LlmError::Provider {
+            provider,
+            message: format!("response body exceeds the {MAX_RESPONSE_BODY_BYTES}-byte cap"),
+        });
+    }
+    String::from_utf8(bytes).map_err(|error| LlmError::Provider {
+        provider,
+        message: format!("response body is not UTF-8: {error}"),
     })
 }
 

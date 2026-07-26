@@ -14,13 +14,27 @@ use crate::provider::{
     CompletionRequest, CompletionResponse, JsonRequest, JsonResponse, LlmProvider, Usage,
 };
 
+/// Default per-run model call cap. Finite so a runaway refinement loop cannot
+/// issue unbounded provider calls when the caller forgets to set limits (NFR-9).
+pub const DEFAULT_MAX_CALLS: u32 = 32;
+
 /// Cost-control limits for a single run (NFR-9).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct CallLimits {
-    /// The maximum number of model calls. `None` means unlimited.
+    /// The maximum number of model calls. `None` means unlimited (tests only;
+    /// production callers should keep the default finite cap).
     pub max_calls: Option<u32>,
     /// The spend budget in the same unit as [`Pricing`]. `None` means no cap.
     pub budget: Option<f64>,
+}
+
+impl Default for CallLimits {
+    fn default() -> Self {
+        Self {
+            max_calls: Some(DEFAULT_MAX_CALLS),
+            budget: None,
+        }
+    }
 }
 
 /// Per-thousand-token prices used to estimate spend for the budget (NFR-9).
@@ -85,8 +99,8 @@ pub struct LlmClient<P: LlmProvider> {
 }
 
 impl<P: LlmProvider> LlmClient<P> {
-    /// Build a client around a provider with default policy: no cache, no
-    /// limits, zero pricing, and the default backoff.
+    /// Build a client around a provider with default policy: no cache, the
+    /// finite default call cap, zero pricing, and the default backoff.
     pub fn new(provider: P) -> Self {
         Self {
             provider,
