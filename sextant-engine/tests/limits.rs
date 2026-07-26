@@ -139,3 +139,16 @@ fn the_default_and_fuzzing_limits_bound_every_dimension() {
     assert!(fuzz.max_total_fields <= def.max_total_fields);
     assert!(fuzz.max_steps <= def.max_steps);
 }
+
+#[test]
+fn with_timeout_sets_a_deadline_without_clearing_by_accident() {
+    // Omitting an optional CLI timeout must leave the default five-second cap.
+    // The builder takes a Duration (not Option) so `timeout.map(...)` cannot
+    // silently clear it when the flag is absent.
+    let defaults = Limits::default();
+    assert_eq!(defaults.timeout, Some(Duration::from_secs(5)));
+    let raised = defaults.clone().with_timeout(Duration::from_secs(30));
+    assert_eq!(raised.timeout, Some(Duration::from_secs(30)));
+    let cleared = Limits::default().clear_timeout();
+    assert!(cleared.timeout.is_none());
+}

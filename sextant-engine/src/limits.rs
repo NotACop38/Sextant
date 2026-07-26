@@ -62,9 +62,24 @@ impl Limits {
     }
 
     /// Set the wall-clock timeout (builder style).
+    ///
+    /// Prefer this over assigning [`Limits::timeout`] through
+    /// `Option::map` at a call site: passing `None` into a setter that took
+    /// `Option<Duration>` used to clear the default five-second cap when a CLI
+    /// flag was omitted.
     #[must_use]
-    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
-        self.timeout = timeout;
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Clear the wall-clock timeout so only the work cap bounds run time.
+    ///
+    /// Used by deterministic fuzzing and by callers that intentionally want no
+    /// clock deadline. Omitting a CLI `--timeout` flag must not call this.
+    #[must_use]
+    pub fn clear_timeout(mut self) -> Self {
+        self.timeout = None;
         self
     }
 

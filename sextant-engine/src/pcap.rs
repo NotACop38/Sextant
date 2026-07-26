@@ -64,6 +64,10 @@ impl fmt::Display for Transport {
     }
 }
 
+/// Default cap on how many transport messages may be extracted from captures in
+/// one run. Bounds association, scoring, and refinement work (FR-2, FR-24).
+pub const DEFAULT_MAX_MESSAGES: usize = 10_000;
+
 /// What to pull out of a capture: the transport and the port (FR-2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExtractOptions {
@@ -72,6 +76,21 @@ pub struct ExtractOptions {
     /// The port that identifies the protocol. A datagram is kept when either its
     /// source or its destination port equals this value.
     pub port: u16,
+    /// Stop extracting once this many messages have been kept. Caps memory and
+    /// the quadratic-to-linear association work that follows.
+    pub max_messages: usize,
+}
+
+impl ExtractOptions {
+    /// Build options with the default message cap.
+    #[must_use]
+    pub const fn new(transport: Transport, port: u16) -> Self {
+        Self {
+            transport,
+            port,
+            max_messages: DEFAULT_MAX_MESSAGES,
+        }
+    }
 }
 
 /// Which way a message travels relative to the selected port (FR-2).
@@ -285,6 +304,9 @@ fn read_classic(
     let mut cursor = 24usize;
     let mut kept = 0usize;
     while cursor + 16 <= bytes.len() {
+        if kept >= options.max_messages {
+            break;
+        }
         let record_offset = cursor;
         let ts_sec = order.u32([
             bytes[cursor],
@@ -368,6 +390,9 @@ fn read_pcapng(bytes: &[u8], options: &ExtractOptions) -> Result<Vec<ExtractedMe
     let mut kept = 0usize;
 
     while cursor + 8 <= bytes.len() {
+        if kept >= options.max_messages {
+            break;
+        }
         let block_offset = cursor;
         // The block type is stored in the section's byte order, but the Section
         // Header Block itself is identified by its order-independent type value.
@@ -427,25 +452,36 @@ fn read_pcapng(bytes: &[u8], options: &ExtractOptions) -> Result<Vec<ExtractedMe
                     kept += 1;
                 }
             }
-            // Simple Packet Block: original length, then the frame. It has no
-            // interface id, so it uses the first declared interface's link type.
+            // Simple Packet Block: original length, then the frame (padded to
+            // 32-bit alignment inside the block). It has no interface id, so it
+            // uses the first declared interface's link type. Trim to the
+            // declared original length the same way EPB trims to captured length,
+            // so padding bytes are not fed to the link-layer parser.
             0x0000_0003 => {
-                let link = interfaces.first().copied().unwrap_or(linktype::ETHERNET);
-                if let Some(frame) = body.get(4..) {
-                    if let Some((data, source, destination, direction)) =
-                        payload_from_frame(link, frame, options)
-                    {
-                        messages.push(ExtractedMessage {
-                            data: data.to_vec(),
-                            direction,
-                            flow: Flow::canonical(source, destination),
-                            source,
-                            destination,
-                            timestamp_micros: 0,
-                            capture_offset: block_offset as u64,
-                            index: kept,
-                        });
-                        kept += 1;
+                if kept >= options.max_messages {
+                    // Still advance `cursor` below; just skip extracting more.
+                } else {
+                    let link = interfaces.first().copied().unwrap_or(linktype::ETHERNET);
+                    if body.len() >= 4 {
+                        let original = order.u32([body[0], body[1], body[2], body[3]]) as usize;
+                        if let Some(raw) = body.get(4..) {
+                            let frame = &raw[..raw.len().min(original)];
+                            if let Some((data, source, destination, direction)) =
+                                payload_from_frame(link, frame, options)
+                            {
+                                messages.push(ExtractedMessage {
+                                    data: data.to_vec(),
+                                    direction,
+                                    flow: Flow::canonical(source, destination),
+                                    source,
+                                    destination,
+                                    timestamp_micros: 0,
+                                    capture_offset: block_offset as u64,
+                                    index: kept,
+                                });
+                                kept += 1;
+                            }
+                        }
                     }
                 }
             }
@@ -766,14 +802,8 @@ mod tests {
             502,
             &[(b"request-one", true), (b"response-one", false)],
         );
-        let messages = extract_messages(
-            &pcap,
-            &ExtractOptions {
-                transport: Transport::Tcp,
-                port: 502,
-            },
-        )
-        .expect("parse pcap");
+        let messages =
+            extract_messages(&pcap, &ExtractOptions::new(Transport::Tcp, 502)).expect("parse pcap");
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].data, b"request-one");
         assert_eq!(messages[0].direction, Direction::ToServer);
@@ -786,38 +816,20 @@ mod tests {
     fn filters_by_port_and_transport() {
         let pcap = build_pcap(Transport::Tcp, 502, &[(b"keep", true)]);
         // A different port matches nothing.
-        let none = extract_messages(
-            &pcap,
-            &ExtractOptions {
-                transport: Transport::Tcp,
-                port: 9999,
-            },
-        )
-        .expect("parse");
+        let none =
+            extract_messages(&pcap, &ExtractOptions::new(Transport::Tcp, 9999)).expect("parse");
         assert!(none.is_empty());
         // The wrong transport matches nothing.
-        let udp = extract_messages(
-            &pcap,
-            &ExtractOptions {
-                transport: Transport::Udp,
-                port: 502,
-            },
-        )
-        .expect("parse");
+        let udp =
+            extract_messages(&pcap, &ExtractOptions::new(Transport::Udp, 502)).expect("parse");
         assert!(udp.is_empty());
     }
 
     #[test]
     fn extracts_udp_payloads() {
         let pcap = build_pcap(Transport::Udp, 1234, &[(b"datagram", true)]);
-        let messages = extract_messages(
-            &pcap,
-            &ExtractOptions {
-                transport: Transport::Udp,
-                port: 1234,
-            },
-        )
-        .expect("parse");
+        let messages =
+            extract_messages(&pcap, &ExtractOptions::new(Transport::Udp, 1234)).expect("parse");
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].data, b"datagram");
     }
@@ -825,13 +837,7 @@ mod tests {
     #[test]
     fn rejects_non_capture_bytes() {
         assert_eq!(
-            extract_messages(
-                b"not a pcap file",
-                &ExtractOptions {
-                    transport: Transport::Tcp,
-                    port: 1,
-                }
-            ),
+            extract_messages(b"not a pcap file", &ExtractOptions::new(Transport::Tcp, 1)),
             Err(PcapError::UnknownFormat)
         );
     }
@@ -839,13 +845,7 @@ mod tests {
     #[test]
     fn empty_input_is_unknown_not_a_panic() {
         assert_eq!(
-            extract_messages(
-                &[],
-                &ExtractOptions {
-                    transport: Transport::Tcp,
-                    port: 1,
-                }
-            ),
+            extract_messages(&[], &ExtractOptions::new(Transport::Tcp, 1)),
             Err(PcapError::UnknownFormat)
         );
     }
@@ -858,14 +858,8 @@ mod tests {
         pcap.extend_from_slice(&0u32.to_le_bytes());
         pcap.extend_from_slice(&1000u32.to_le_bytes());
         pcap.extend_from_slice(&1000u32.to_le_bytes());
-        let messages = extract_messages(
-            &pcap,
-            &ExtractOptions {
-                transport: Transport::Tcp,
-                port: 502,
-            },
-        )
-        .expect("parse");
+        let messages =
+            extract_messages(&pcap, &ExtractOptions::new(Transport::Tcp, 502)).expect("parse");
         assert_eq!(messages.len(), 1);
     }
 
@@ -886,14 +880,8 @@ mod tests {
         // Set a nonzero fragment offset (a later fragment).
         pcap[frag_field] = 0x00;
         pcap[frag_field + 1] = 0x01;
-        let messages = extract_messages(
-            &pcap,
-            &ExtractOptions {
-                transport: Transport::Tcp,
-                port: 502,
-            },
-        )
-        .expect("parse");
+        let messages =
+            extract_messages(&pcap, &ExtractOptions::new(Transport::Tcp, 502)).expect("parse");
         assert!(messages.is_empty(), "a fragment was parsed as a message");
     }
 
@@ -944,14 +932,8 @@ mod tests {
     fn reads_pcapng_enhanced_packet_blocks() {
         let frame = build_frame(Transport::Tcp, 502, b"modbus-like", true);
         let pcapng = build_pcapng(&frame);
-        let messages = extract_messages(
-            &pcapng,
-            &ExtractOptions {
-                transport: Transport::Tcp,
-                port: 502,
-            },
-        )
-        .expect("parse pcapng");
+        let messages = extract_messages(&pcapng, &ExtractOptions::new(Transport::Tcp, 502))
+            .expect("parse pcapng");
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].data, b"modbus-like");
         assert_eq!(messages[0].direction, Direction::ToServer);

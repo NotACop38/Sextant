@@ -14,7 +14,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use sextant_engine::{
-    execute, extract_messages, infer_protocol, ExtractOptions, Limits, Transport,
+    ExtractOptions, Limits, Transport, execute, extract_messages, infer_protocol,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -29,7 +29,7 @@ fuzz_target!(|data: &[u8]| {
         Some(bytes) => u16::from_le_bytes([bytes[0], bytes[1]]),
         None => 0,
     };
-    let options = ExtractOptions { transport, port };
+    let options = ExtractOptions::new(transport, port);
 
     let Ok(messages) = extract_messages(data, &options) else {
         return;

@@ -17,14 +17,16 @@
 //! prints the PRD Section 15 metrics table (Step 12), exiting non-zero if any
 //! configured target is missed so it doubles as the CI regression guard.
 
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use sextant_engine::{
-    Clustering, DEFAULT_MAX_BYTES_PER_SAMPLE, DEFAULT_MAX_TOTAL_BYTES, ExtractOptions,
-    InferenceOptions, IngestOptions, InspectOptions, Limits, ProtocolInference, Report, SampleSet,
-    Transport, extract_messages, infer, infer_protocol, ingest, render,
+    Clustering, DEFAULT_MAX_BYTES_PER_SAMPLE, DEFAULT_MAX_MESSAGES, DEFAULT_MAX_REPORT_BYTES,
+    DEFAULT_MAX_TOTAL_BYTES, ExtractOptions, InferenceOptions, IngestOptions, InspectOptions,
+    Limits, ProtocolInference, Report, SampleSet, Transport, extract_messages, infer,
+    infer_protocol, ingest, render,
 };
 use sextant_export::{ExportFormat, export};
 
@@ -70,8 +72,12 @@ enum Command {
         #[arg(long)]
         no_llm: bool,
         /// Wall-clock cap, in seconds, for executing the IR against each sample.
+        /// When omitted, the default five-second executor timeout is kept.
         #[arg(long, value_name = "SECONDS")]
         timeout: Option<u64>,
+        /// Cap how many protocol messages are extracted from captures (FR-2).
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_MESSAGES)]
+        max_messages: usize,
         /// Treat the inputs as packet captures and extract this transport's
         /// payloads (tcp or udp). Requires --port (FR-2).
         #[arg(long, value_name = "TCP|UDP")]
@@ -83,6 +89,10 @@ enum Command {
         /// Write the machine-readable JSON report to this path (FR-34).
         #[arg(long, value_name = "FILE")]
         out: Option<String>,
+        /// Allow `--out` to overwrite an existing file or write outside the
+        /// current working directory.
+        #[arg(long)]
+        force: bool,
     },
     /// Read a sample through an inferred field map (annotated hex view, FR-35).
     Inspect {
@@ -95,6 +105,9 @@ enum Command {
         /// Color each field's bytes in the hex dump and its name in the table.
         #[arg(long)]
         color: bool,
+        /// Cap the bytes read from the sample file.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_BYTES_PER_SAMPLE)]
+        max_bytes_per_sample: usize,
     },
     /// Export a verified parser from a report (FR-36, FR-37).
     Export {
@@ -110,9 +123,14 @@ enum Command {
         /// For the Kaitai format, additionally compile the spec and parse the
         /// given samples through it as an independent cross-check (FR-38). This
         /// is optional and never required: it reports separately and a missing
-        /// compiler is reported as skipped, not failed.
+        /// compiler is reported as skipped, not failed. The compiler is taken
+        /// from `SEXTANT_KAITAI_COMPILER` when set, otherwise from PATH.
         #[arg(long, value_name = "DIR")]
         cross_validate: Option<String>,
+        /// Allow `--out` to overwrite an existing file or write outside the
+        /// current working directory.
+        #[arg(long)]
+        force: bool,
     },
     /// Run the accuracy benchmark over the ground-truth corpus (PRD Section 15).
     Bench {
@@ -122,6 +140,10 @@ enum Command {
         /// Write the machine-readable JSON results to this path.
         #[arg(long, value_name = "FILE")]
         out: Option<String>,
+        /// Allow `--out` to overwrite an existing file or write outside the
+        /// current working directory.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -135,31 +157,45 @@ fn main() -> ExitCode {
             max_total_bytes,
             no_llm: _,
             timeout,
+            max_messages,
             transport,
             port,
             out,
+            force,
         } => run_infer(
             &inputs,
             recursive,
             max_bytes_per_sample,
             max_total_bytes,
             timeout,
+            max_messages,
             transport.as_deref(),
             port,
             out.as_deref(),
+            force,
         ),
         Command::Inspect {
             report,
             sample,
             color,
-        } => run_inspect(&report, &sample, color),
+            max_bytes_per_sample,
+        } => run_inspect(&report, &sample, color, max_bytes_per_sample),
         Command::Export {
             report,
             format,
             out,
             cross_validate,
-        } => run_export(&report, &format, out.as_deref(), cross_validate.as_deref()),
-        Command::Bench { corpus, out } => run_bench(corpus.as_deref(), out.as_deref()),
+            force,
+        } => run_export(
+            &report,
+            &format,
+            out.as_deref(),
+            cross_validate.as_deref(),
+            force,
+        ),
+        Command::Bench { corpus, out, force } => {
+            run_bench(corpus.as_deref(), out.as_deref(), force)
+        }
     }
 }
 
@@ -170,10 +206,10 @@ fn main() -> ExitCode {
 /// and F1, the perfection rate, role and type accuracy, and parser validity.
 /// It exits non-zero if any configured target is missed, so the same command CI
 /// runs as a regression guard fails the build on an accuracy drop.
-fn run_bench(corpus: Option<&str>, out: Option<&str>) -> ExitCode {
+fn run_bench(corpus: Option<&str>, out: Option<&str>, force: bool) -> ExitCode {
     let mut options = bench::BenchOptions::default();
     if let Some(dir) = corpus {
-        options.corpus_dir = std::path::PathBuf::from(dir);
+        options.corpus_dir = PathBuf::from(dir);
     } else if !options.corpus_dir.is_dir() {
         // The default corpus is a sibling of the source tree, so it is present
         // in a workspace checkout but not in an installed binary. Guide the user
@@ -201,7 +237,7 @@ fn run_bench(corpus: Option<&str>, out: Option<&str>) -> ExitCode {
     if let Some(path) = out {
         match report.to_json() {
             Ok(json) => {
-                if let Err(error) = std::fs::write(path, format!("{json}\n")) {
+                if let Err(error) = write_output_file(path, format!("{json}\n").as_bytes(), force) {
                     eprintln!("sextant bench: could not write results to {path}: {error}");
                     return ExitCode::from(EXIT_INPUT_ERROR);
                 }
@@ -238,9 +274,11 @@ fn run_infer(
     max_bytes_per_sample: usize,
     max_total_bytes: usize,
     timeout: Option<u64>,
+    max_messages: usize,
     transport: Option<&str>,
     port: Option<u16>,
     out: Option<&str>,
+    force: bool,
 ) -> ExitCode {
     match (transport, port) {
         (Some(transport), Some(port)) => {
@@ -251,7 +289,9 @@ fn run_infer(
                 max_bytes_per_sample,
                 max_total_bytes,
                 timeout,
+                max_messages,
                 out,
+                force,
             );
         }
         (Some(_), None) | (None, Some(_)) => {
@@ -283,7 +323,7 @@ fn run_infer(
     print_sample_set(&set);
 
     let inference = InferenceOptions {
-        limits: Limits::default().with_timeout(timeout.map(Duration::from_secs)),
+        limits: limits_with_optional_timeout(timeout),
         // CLI provider flags are not yet wired in, so every run is
         // statistics-only and offline whether or not --no-llm was given
         // (NFR-4). The field map states the mode, so a default run is not
@@ -294,7 +334,7 @@ fn run_infer(
     print_report(&report);
 
     if let Some(path) = out {
-        match write_report(&report, path) {
+        match write_report(&report, path, force) {
             Ok(()) => println!("\nWrote report to {path}"),
             Err(error) => {
                 eprintln!("sextant infer: could not write report to {path}: {error}");
@@ -328,17 +368,25 @@ fn run_infer_protocol(
     max_bytes_per_sample: usize,
     max_total_bytes: usize,
     timeout: Option<u64>,
+    max_messages: usize,
     out: Option<&str>,
+    force: bool,
 ) -> ExitCode {
     let Some(transport) = Transport::parse(transport) else {
         eprintln!("sextant infer: unknown transport `{transport}`. Use tcp or udp.");
         return ExitCode::from(EXIT_INPUT_ERROR);
     };
-    let extract = ExtractOptions { transport, port };
+    let mut extract = ExtractOptions::new(transport, port);
+    extract.max_messages = max_messages;
 
     let mut messages = Vec::new();
     let mut total_read = 0usize;
+    let mut message_cap_hit = false;
     for input in inputs {
+        if messages.len() >= max_messages {
+            message_cap_hit = true;
+            break;
+        }
         // A capture is read with the same caps file ingestion enforces: at most
         // the per-sample cap from any one file, and never past the total cap.
         let remaining = max_total_bytes.saturating_sub(total_read);
@@ -358,6 +406,8 @@ fn run_infer_protocol(
             }
         };
         total_read += bytes.len();
+        // Leave room under the global message cap for this capture.
+        extract.max_messages = max_messages.saturating_sub(messages.len());
         match extract_messages(&bytes, &extract) {
             Ok(extracted) => messages.extend(extracted),
             Err(error) => {
@@ -365,6 +415,10 @@ fn run_infer_protocol(
                 return ExitCode::from(EXIT_INPUT_ERROR);
             }
         }
+    }
+    if messages.len() >= max_messages {
+        message_cap_hit = true;
+        messages.truncate(max_messages);
     }
 
     if messages.is_empty() {
@@ -380,13 +434,18 @@ fn run_infer_protocol(
         message.index = index;
     }
 
-    let limits = Limits::default().with_timeout(timeout.map(Duration::from_secs));
+    let limits = limits_with_optional_timeout(timeout);
     let inference = infer_protocol(&messages, transport, port, &limits);
 
     println!(
         "Extracted {} {transport} message(s) on port {port}.",
         inference.message_count
     );
+    if message_cap_hit {
+        println!(
+            "note: stopped at the --max-messages cap of {max_messages}; further messages were ignored."
+        );
+    }
     print_clustering(&inference);
     println!(
         "Request/response pairs associated: {}.",
@@ -395,7 +454,7 @@ fn run_infer_protocol(
     print_report(&inference.report);
 
     if let Some(path) = out {
-        match write_report(&inference.report, path) {
+        match write_report(&inference.report, path, force) {
             Ok(()) => {
                 println!("\nWrote report to {path}");
                 println!(
@@ -448,37 +507,132 @@ fn read_capped(path: &str, cap: usize) -> std::io::Result<Vec<u8>> {
     Ok(data)
 }
 
+/// Apply an optional CLI timeout without clearing the default five-second cap
+/// when the flag is omitted.
+fn limits_with_optional_timeout(timeout: Option<u64>) -> Limits {
+    match timeout {
+        Some(seconds) => Limits::default().with_timeout(Duration::from_secs(seconds)),
+        None => Limits::default(),
+    }
+}
+
 /// Serialize a report to pretty JSON and write it to `path` (FR-34).
-fn write_report(report: &Report, path: &str) -> std::io::Result<()> {
+fn write_report(report: &Report, path: &str, force: bool) -> std::io::Result<()> {
     let json = report
         .to_json()
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    std::fs::write(path, json)
+    write_output_file(path, json.as_bytes(), force)
+}
+
+/// Write `bytes` to `path`, refusing overwrites and cwd escapes without `--force`.
+fn write_output_file(path: &str, bytes: &[u8], force: bool) -> std::io::Result<()> {
+    check_output_path(path, force)?;
+    std::fs::write(path, bytes)
+}
+
+/// Refuse to overwrite an existing file or write outside the current working
+/// directory unless `force` is set.
+fn check_output_path(path: &str, force: bool) -> std::io::Result<()> {
+    let target = Path::new(path);
+    if !force && target.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("refusing to overwrite existing file `{path}` without --force"),
+        ));
+    }
+    if force {
+        return Ok(());
+    }
+    let cwd = std::env::current_dir()?;
+    let absolute = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        cwd.join(target)
+    };
+    // Compare the parent directory (or the path itself) against cwd after
+    // canonicalizing existing components so `../` escapes are caught.
+    let anchor = if absolute.exists() {
+        fs_canonicalize(&absolute)?
+    } else if let Some(parent) = absolute.parent() {
+        if parent.as_os_str().is_empty() {
+            cwd.clone()
+        } else if parent.exists() {
+            fs_canonicalize(parent)?.join(absolute.file_name().unwrap_or_default())
+        } else {
+            absolute.clone()
+        }
+    } else {
+        absolute.clone()
+    };
+    let cwd_canon = fs_canonicalize(&cwd)?;
+    if !anchor.starts_with(&cwd_canon) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to write `{path}` outside the current working directory without --force"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn fs_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path)
+}
+
+/// Load a report JSON file with a hard size cap, then validate its IR.
+fn load_report(path: &str) -> Result<Report, String> {
+    let file_len = std::fs::metadata(path)
+        .map(|meta| meta.len() as usize)
+        .map_err(|error| format!("could not read report {path}: {error}"))?;
+    if file_len > DEFAULT_MAX_REPORT_BYTES {
+        return Err(format!(
+            "{path} is {file_len} bytes, above the {DEFAULT_MAX_REPORT_BYTES}-byte report size cap"
+        ));
+    }
+    let bytes = read_capped(path, DEFAULT_MAX_REPORT_BYTES)
+        .map_err(|error| format!("could not read report {path}: {error}"))?;
+    let text =
+        String::from_utf8(bytes).map_err(|error| format!("{path} is not valid UTF-8: {error}"))?;
+    let report = Report::from_json(&text)
+        .map_err(|error| format!("{path} is not a valid report: {error}"))?;
+    report
+        .format
+        .validate()
+        .map_err(|error| format!("{path} contains an invalid format hypothesis:\n{error}"))?;
+    Ok(report)
 }
 
 /// Read a report and a sample, then print the annotated hex view (FR-35).
-fn run_inspect(report_path: &str, sample_path: &str, color: bool) -> ExitCode {
-    let report_text = match std::fs::read_to_string(report_path) {
-        Ok(text) => text,
-        Err(error) => {
-            eprintln!("sextant inspect: could not read report {report_path}: {error}");
-            return ExitCode::from(EXIT_INPUT_ERROR);
-        }
-    };
-    let report = match Report::from_json(&report_text) {
+fn run_inspect(
+    report_path: &str,
+    sample_path: &str,
+    color: bool,
+    max_bytes_per_sample: usize,
+) -> ExitCode {
+    let report = match load_report(report_path) {
         Ok(report) => report,
         Err(error) => {
-            eprintln!("sextant inspect: {report_path} is not a valid report: {error}");
+            eprintln!("sextant inspect: {error}");
             return ExitCode::from(EXIT_INPUT_ERROR);
         }
     };
-    let sample = match std::fs::read(sample_path) {
+    let sample = match read_capped(sample_path, max_bytes_per_sample) {
         Ok(bytes) => bytes,
         Err(error) => {
             eprintln!("sextant inspect: could not read sample {sample_path}: {error}");
             return ExitCode::from(EXIT_INPUT_ERROR);
         }
     };
+    if let Ok(meta) = std::fs::metadata(sample_path) {
+        if meta.len() as usize > sample.len() {
+            eprintln!(
+                "sextant inspect: sample truncated to {max_bytes_per_sample} bytes \
+                 (file is {} bytes); raise --max-bytes-per-sample to read more.",
+                meta.len()
+            );
+        }
+    }
 
     let options = InspectOptions {
         color,
@@ -495,6 +649,7 @@ fn run_export(
     format_name: &str,
     out: Option<&str>,
     cross_validate: Option<&str>,
+    force: bool,
 ) -> ExitCode {
     let Some(target) = ExportFormat::parse(format_name) else {
         eprintln!(
@@ -503,17 +658,10 @@ fn run_export(
         return ExitCode::from(EXIT_EXPORT_ERROR);
     };
 
-    let report_text = match std::fs::read_to_string(report_path) {
-        Ok(text) => text,
-        Err(error) => {
-            eprintln!("sextant export: could not read report {report_path}: {error}");
-            return ExitCode::from(EXIT_INPUT_ERROR);
-        }
-    };
-    let report = match Report::from_json(&report_text) {
+    let report = match load_report(report_path) {
         Ok(report) => report,
         Err(error) => {
-            eprintln!("sextant export: {report_path} is not a valid report: {error}");
+            eprintln!("sextant export: {error}");
             return ExitCode::from(EXIT_INPUT_ERROR);
         }
     };
@@ -528,7 +676,7 @@ fn run_export(
 
     match out {
         Some(path) => {
-            if let Err(error) = std::fs::write(path, &parser) {
+            if let Err(error) = write_output_file(path, parser.as_bytes(), force) {
                 eprintln!("sextant export: could not write {path}: {error}");
                 return ExitCode::from(EXIT_EXPORT_ERROR);
             }
@@ -579,14 +727,27 @@ fn run_cross_validate(report: &Report, target: ExportFormat, dir: &str) -> Optio
     }
 }
 
-/// Read every regular file in a directory into memory, sorted by name.
+/// Read every regular file in a directory into memory, sorted by name, with the
+/// same per-sample and total byte caps as ingestion (FR-5, FR-24).
 fn read_sample_dir(dir: &str) -> std::io::Result<Vec<Vec<u8>>> {
-    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)?
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| path.is_file())
         .collect();
     paths.sort();
-    paths.into_iter().map(std::fs::read).collect()
+    let mut samples = Vec::new();
+    let mut total = 0usize;
+    for path in paths {
+        let remaining = DEFAULT_MAX_TOTAL_BYTES.saturating_sub(total);
+        if remaining == 0 {
+            break;
+        }
+        let cap = DEFAULT_MAX_BYTES_PER_SAMPLE.min(remaining);
+        let bytes = read_capped(&path.to_string_lossy(), cap)?;
+        total += bytes.len();
+        samples.push(bytes);
+    }
+    Ok(samples)
 }
 
 /// Print the scored field map and the fit-score breakdown of a report.
@@ -670,8 +831,9 @@ fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::*;
     use clap::CommandFactory;
+    use std::time::Duration;
 
     #[test]
     fn cli_definition_is_valid() {
@@ -694,5 +856,25 @@ mod tests {
         let command = Cli::command();
         let version = command.get_version();
         assert!(version.is_some_and(|value| !value.is_empty()));
+    }
+
+    #[test]
+    fn omitted_timeout_keeps_the_default_five_second_cap() {
+        let limits = limits_with_optional_timeout(None);
+        assert_eq!(limits.timeout, Some(Duration::from_secs(5)));
+        let raised = limits_with_optional_timeout(Some(30));
+        assert_eq!(raised.timeout, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn output_path_refuses_overwrite_without_force() {
+        let dir = std::env::temp_dir().join(format!("sextant-out-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("exists.txt");
+        std::fs::write(&path, b"old").expect("seed");
+        let err = check_output_path(&path.to_string_lossy(), false).expect_err("overwrite");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        check_output_path(&path.to_string_lossy(), true).expect("force allows overwrite");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
