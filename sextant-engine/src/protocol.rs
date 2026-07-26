@@ -29,7 +29,7 @@ use sextant_ir::{
 
 use crate::candidate::infer_candidates;
 use crate::limits::Limits;
-use crate::pcap::{Direction, ExtractedMessage, Transport};
+use crate::pcap::{Direction, ExtractedMessage, Flow, Transport};
 use crate::refine::refine;
 use crate::report::{Report, RunMetadata};
 use crate::scorer::{Score, ScoreWeights, score_with};
@@ -282,25 +282,43 @@ fn distinct_count(values: &[u8]) -> usize {
 /// A request travels toward the selected port and a response away from it; the
 /// flow is the unordered endpoint pair, so a request and its reply share it.
 /// Each response is matched to at most one request, preserving capture order.
+///
+/// Runs in linear time in the number of messages: responses are queued per flow,
+/// then each request pops the earliest unused later response on its flow. The
+/// previous nested scan was quadratic and could dominate on large captures even
+/// when [`DEFAULT_MAX_MESSAGES`](crate::pcap::DEFAULT_MAX_MESSAGES) caps `n`.
 #[must_use]
 pub fn associate(messages: &[ExtractedMessage]) -> Vec<Association> {
+    use std::collections::{BTreeMap, VecDeque};
+
+    let mut response_queues: BTreeMap<Flow, VecDeque<usize>> = BTreeMap::new();
+    for (index, message) in messages.iter().enumerate() {
+        if message.direction == Direction::FromServer {
+            response_queues
+                .entry(message.flow)
+                .or_default()
+                .push_back(index);
+        }
+    }
+
     let mut associations = Vec::new();
-    let mut used = vec![false; messages.len()];
     for (request_index, request) in messages.iter().enumerate() {
         if request.direction != Direction::ToServer {
             continue;
         }
-        for (response_index, response) in messages.iter().enumerate().skip(request_index + 1) {
-            if used[response_index]
-                || response.direction != Direction::FromServer
-                || response.flow != request.flow
-            {
+        let Some(queue) = response_queues.get_mut(&request.flow) else {
+            continue;
+        };
+        while let Some(&front) = queue.front() {
+            if front <= request_index {
+                // A response that arrived before this request cannot answer it.
+                queue.pop_front();
                 continue;
             }
-            used[response_index] = true;
+            queue.pop_front();
             associations.push(Association {
                 request: request_index,
-                response: response_index,
+                response: front,
             });
             break;
         }

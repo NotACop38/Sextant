@@ -78,6 +78,7 @@ fn bench_writes_machine_readable_results() {
         .arg("bench")
         .arg("--out")
         .arg(&out)
+        .arg("--force")
         .output()
         .expect("run sextant bench --out");
     assert!(output.status.success(), "bench --out should exit zero");
@@ -124,6 +125,7 @@ fn infer_writes_a_report_that_inspect_can_render() {
         .arg(&samples)
         .arg("--out")
         .arg(&report_path)
+        .arg("--force")
         .output()
         .expect("run sextant infer with --out");
     assert!(
@@ -164,6 +166,7 @@ fn export_emits_a_parser_for_every_format() {
         .arg(&samples)
         .arg("--out")
         .arg(&report_path)
+        .arg("--force")
         .output()
         .expect("run sextant infer with --out");
     assert!(infer.status.success(), "infer --out should succeed");
@@ -206,6 +209,7 @@ fn export_with_an_unknown_format_is_an_export_error() {
         .arg(&samples)
         .arg("--out")
         .arg(&report_path)
+        .arg("--force")
         .output()
         .expect("run sextant infer with --out");
     assert!(infer.status.success(), "infer --out should succeed");
@@ -243,6 +247,7 @@ fn infer_on_a_capture_produces_a_field_map_and_a_wireshark_dissector() {
         .arg("502")
         .arg("--out")
         .arg(&report_path)
+        .arg("--force")
         .output()
         .expect("run sextant infer on a capture");
     assert!(

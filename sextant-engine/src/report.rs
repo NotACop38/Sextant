@@ -25,6 +25,10 @@ use crate::scorer::Score;
 /// way that is not backward compatible.
 pub const REPORT_SCHEMA_VERSION: &str = "1.0";
 
+/// Cap on report JSON size when loading from disk for `inspect` / `export`.
+/// Bounds memory before serde parses the document (FR-24).
+pub const DEFAULT_MAX_REPORT_BYTES: usize = 16 << 20;
+
 /// Metadata about an inference run, recorded in the report for reproducibility
 /// (FR-34, PRD Section 13: tool version, inputs, configuration, model usage).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

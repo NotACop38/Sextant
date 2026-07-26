@@ -36,19 +36,30 @@ relies on. The detailed privacy notes live in
 - Ingestion caps per-sample and total bytes and never reads a file whole.
   Traversal of a literal directory input does not follow symlinks, so it cannot
   loop on a cycle or read outside the selected tree. A recursive glob pattern
-  (for example `root/**/*`) is expanded by the `glob` crate, which does resolve
-  symlinked directories while matching; point a recursive glob only at a tree you
-  trust not to contain symlink cycles or links that lead outside it, or pass the
-  directory as a literal input to get the no-follow guarantee.
+  (for example `root/**/*`) is expanded by the `glob` crate, which may traverse
+  symlinked directories while matching; after expansion Sextant refuses symlink
+  matches themselves and drops any path whose canonical form escapes the glob's
+  literal prefix. Prefer a literal directory input when the tree may contain
+  symlink cycles. The `inspect` and `export --cross-validate` paths apply the
+  same per-sample and total byte caps, and report JSON is size-capped before
+  parse.
+- Optional Kaitai cross-validation (`export --cross-validate`) shells out to
+  tools found on `PATH` (`kaitai-struct-compiler` / `ksc`, and `python3` with
+  `kaitaistruct`). Pin a reviewed binary with `SEXTANT_KAITAI_COMPILER` when you
+  do not want PATH lookup. Treat that toolchain as outside the trusted computing
+  base: it is never required by the core pipeline.
+- `--out` refuses to overwrite an existing file or write outside the current
+  working directory unless `--force` is set.
 - The model is never trusted. Its response is parsed into a strict, typed
   proposal shape (no free-form text), and every proposal is re-validated and
   re-scored by the native executor before it can be accepted.
 - Generated output is sanitized. Identifiers are restricted to a safe character
   set and string literals are escaped, so a crafted sample or model response
   cannot inject executable content into a generated parser.
-- Secrets come only from the environment or a config file, never from a flag,
-  are never logged, and the on-disk cache that can hold sample-derived bytes is
-  written owner-only on Unix.
+- Secrets come only from the environment or a config file (`SEXTANT_CONFIG` or
+  `~/.config/sextant/config` as `KEY=VALUE` lines), never from a flag, are never
+  logged, and the on-disk cache that can hold sample-derived bytes is written
+  owner-only on Unix. Process environment values override file contents.
 - `--no-llm` produces zero network egress, and the executor and scorer have no
   network, JVM, or external-runtime dependency.
 

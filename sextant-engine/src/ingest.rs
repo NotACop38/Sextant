@@ -329,16 +329,16 @@ fn resolve_input(
     seen: &mut BTreeSet<PathBuf>,
 ) -> Result<(), IngestError> {
     if is_glob(input) {
-        // A glob is expanded by the `glob` crate. Note that a recursive `**`
-        // pattern resolves symlinked directories while matching, so the
-        // no-follow guarantee that `collect_dir` gives literal directory inputs
-        // does not extend to glob expansion. This is documented in
-        // `docs/threat-model.md`; pass a directory as a literal input when the
-        // tree may contain symlink cycles or links that lead outside it.
+        // A glob is expanded by the `glob` crate, which may traverse symlinked
+        // directories while matching. After expansion we refuse symlink matches
+        // themselves and drop any path whose canonical form escapes the glob's
+        // literal prefix, so a crafted tree cannot pull in files outside the
+        // intended root (see `docs/threat-model.md`).
         let matches = glob(input).map_err(|error| IngestError::BadPattern {
             pattern: input.to_string(),
             message: error.to_string(),
         })?;
+        let root = glob_literal_root(input);
         // Collect and sort so the expansion order is deterministic (NFR-6).
         let mut paths: Vec<PathBuf> = Vec::new();
         for entry in matches {
@@ -346,6 +346,16 @@ fn resolve_input(
                 path: error.path().to_path_buf(),
                 source: error.into_error(),
             })?;
+            if let Ok(meta) = fs::symlink_metadata(&path) {
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+            }
+            if let Some(root) = root.as_ref() {
+                if !path_stays_under_root(&path, root) {
+                    continue;
+                }
+            }
             paths.push(path);
         }
         paths.sort();
@@ -553,6 +563,38 @@ fn is_glob(input: &str) -> bool {
     input.contains(['*', '?', '['])
 }
 
+/// The longest literal directory prefix of a glob pattern, used as the root that
+/// matched paths must stay under after canonicalization.
+fn glob_literal_root(pattern: &str) -> Option<PathBuf> {
+    let path = Path::new(pattern);
+    let mut root = PathBuf::new();
+    for component in path.components() {
+        let piece = component.as_os_str().to_string_lossy();
+        if piece.contains(['*', '?', '[']) {
+            break;
+        }
+        root.push(component);
+    }
+    if root.as_os_str().is_empty() {
+        None
+    } else {
+        Some(root)
+    }
+}
+
+/// Whether `path` canonicalizes to a location under `root` (also canonicalized).
+fn path_stays_under_root(path: &Path, root: &Path) -> bool {
+    let Ok(canon_path) = fs::canonicalize(path) else {
+        return false;
+    };
+    let Ok(canon_root) = fs::canonicalize(root) else {
+        // If the literal prefix does not exist yet (for example a pattern whose
+        // first component is a meta), do not enforce a root check.
+        return true;
+    };
+    canon_path.starts_with(canon_root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,6 +606,15 @@ mod tests {
         assert!(is_glob("file_[0-9].bin"));
         assert!(!is_glob("corpus/png/samples"));
         assert!(!is_glob("plain_file.bin"));
+    }
+
+    #[test]
+    fn glob_literal_root_stops_at_the_first_meta() {
+        assert_eq!(
+            glob_literal_root("corpus/tlv/**/*.tlv"),
+            Some(PathBuf::from("corpus/tlv"))
+        );
+        assert_eq!(glob_literal_root("*.png"), None);
     }
 
     #[test]

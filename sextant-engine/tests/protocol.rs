@@ -34,7 +34,7 @@ fn extract(
     port: u16,
 ) -> Vec<sextant_engine::ExtractedMessage> {
     let bytes = read_capture(format, name);
-    extract_messages(&bytes, &ExtractOptions { transport, port }).expect("parse capture")
+    extract_messages(&bytes, &ExtractOptions::new(transport, port)).expect("parse capture")
 }
 
 #[test]
@@ -137,13 +137,7 @@ fn toy_capture_clusters_message_types() {
 fn udp_selector_finds_nothing_in_a_tcp_capture() {
     // The captures are TCP; asking for UDP yields no messages, not an error.
     let bytes = read_capture("toy", "session_01.pcap");
-    let messages = extract_messages(
-        &bytes,
-        &ExtractOptions {
-            transport: Transport::Udp,
-            port: 9000,
-        },
-    )
-    .expect("parse capture");
+    let messages = extract_messages(&bytes, &ExtractOptions::new(Transport::Udp, 9000))
+        .expect("parse capture");
     assert!(messages.is_empty());
 }

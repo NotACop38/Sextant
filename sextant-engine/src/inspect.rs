@@ -8,9 +8,12 @@
 //!
 //! Rendering is pure and bounded. The executor enforces the resource limits
 //! (FR-24), and the decoded values shown are previews capped in length, so a
-//! hostile sample cannot make the view allocate without bound. With color off the
-//! output is plain text, which is what the snapshot tests pin.
+//! hostile sample cannot make the view allocate without bound. Color assignment
+//! uses a compact list of byte ranges rather than a dense per-byte map, so a
+//! multi-megabyte sample cannot force an `O(sample_len)` color allocation.
+//! With color off the output is plain text, which is what the snapshot tests pin.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use sextant_ir::{Field, Kind};
@@ -65,6 +68,65 @@ struct Row {
     color: Option<usize>,
 }
 
+/// A sparse record of which leaf field owns each painted byte range.
+///
+/// Later paints overwrite earlier ones on overlap. Memory is proportional to
+/// the number of leaf ranges, not the sample length.
+#[derive(Debug, Default)]
+struct ByteColors {
+    /// `(start, end, palette_index)` ranges in paint order.
+    ranges: Vec<(usize, usize, usize)>,
+}
+
+impl ByteColors {
+    fn paint(&mut self, start: usize, end: usize, index: usize) {
+        if start < end {
+            self.ranges.push((start, end, index));
+        }
+    }
+
+    /// Flatten painted ranges into non-overlapping segments for linear rendering.
+    fn segments(&self, len: usize) -> Vec<(usize, usize, Option<usize>)> {
+        if len == 0 {
+            return Vec::new();
+        }
+        if self.ranges.is_empty() {
+            return vec![(0, len, None)];
+        }
+        let mut points = BTreeSet::new();
+        points.insert(0);
+        points.insert(len);
+        for &(start, end, _) in &self.ranges {
+            points.insert(start.min(len));
+            points.insert(end.min(len));
+        }
+        let points: Vec<usize> = points.into_iter().collect();
+        let mut segments = Vec::new();
+        for window in points.windows(2) {
+            let (a, b) = (window[0], window[1]);
+            if a >= b {
+                continue;
+            }
+            let color = self
+                .ranges
+                .iter()
+                .rev()
+                .find(|(start, end, _)| a >= *start && a < *end)
+                .map(|(_, _, index)| *index);
+            segments.push((a, b, color));
+        }
+        segments
+    }
+
+    fn color_at(&self, offset: usize) -> Option<usize> {
+        self.ranges
+            .iter()
+            .rev()
+            .find(|(start, end, _)| offset >= *start && offset < *end)
+            .map(|(_, _, index)| *index)
+    }
+}
+
 /// Render `sample` through `report` as an annotated hex view (FR-35).
 ///
 /// The output has three parts: a one-line header naming the format and its fit
@@ -75,10 +137,11 @@ struct Row {
 pub fn render(report: &Report, sample: &[u8], options: &InspectOptions) -> String {
     let execution = execute(&report.format, sample, &options.limits);
 
-    // Build the annotation rows and a per-byte color map by walking the IR and
-    // the parsed instances together.
+    // Build the annotation rows and a sparse per-range color map by walking the
+    // IR and the parsed instances together. Color ranges are only recorded when
+    // color output is requested, so a huge sample with color off stays cheap.
     let mut rows = Vec::new();
-    let mut byte_color = vec![None; sample.len()];
+    let mut byte_color = ByteColors::default();
     let mut leaf_counter = 0usize;
     walk(
         &report.format.root.fields,
@@ -86,7 +149,7 @@ pub fn render(report: &Report, sample: &[u8], options: &InspectOptions) -> Strin
         sample,
         0,
         &mut rows,
-        &mut byte_color,
+        options.color.then_some(&mut byte_color),
         &mut leaf_counter,
     );
 
@@ -169,12 +232,20 @@ fn render_table(out: &mut String, rows: &[Row], color: bool) {
 }
 
 /// Render the hex dump, optionally coloring each byte by the field that owns it.
-fn render_hex(out: &mut String, sample: &[u8], byte_color: &[Option<usize>], color: bool) {
+fn render_hex(out: &mut String, sample: &[u8], byte_color: &ByteColors, color: bool) {
     let _ = writeln!(out, "Hex:");
     if sample.is_empty() {
         let _ = writeln!(out, "  (empty sample)");
         return;
     }
+    // Precompute segments so a large sample with color walks ranges linearly
+    // instead of scanning the paint list once per byte.
+    let segments = if color {
+        byte_color.segments(sample.len())
+    } else {
+        Vec::new()
+    };
+    let mut segment_index = 0usize;
     let mut offset = 0;
     while offset < sample.len() {
         let end = (offset + HEX_COLUMNS).min(sample.len());
@@ -184,9 +255,21 @@ fn render_hex(out: &mut String, sample: &[u8], byte_color: &[Option<usize>], col
             if column == HEX_COLUMNS / 2 {
                 hex.push(' ');
             }
+            let byte_offset = offset + column;
             let pair = format!("{byte:02x} ");
             if color {
-                hex.push_str(&colorize(&pair, byte_color[offset + column]));
+                while segment_index + 1 < segments.len() && byte_offset >= segments[segment_index].1
+                {
+                    segment_index += 1;
+                }
+                let paint = segments
+                    .get(segment_index)
+                    .and_then(|(start, end, color)| {
+                        (*start <= byte_offset && byte_offset < *end).then_some(*color)
+                    })
+                    .flatten()
+                    .or_else(|| byte_color.color_at(byte_offset));
+                hex.push_str(&colorize(&pair, paint));
             } else {
                 hex.push_str(&pair);
             }
@@ -196,7 +279,14 @@ fn render_hex(out: &mut String, sample: &[u8], byte_color: &[Option<usize>], col
                 '.'
             };
             if color {
-                ascii.push_str(&colorize(&glyph.to_string(), byte_color[offset + column]));
+                let paint = segments
+                    .get(segment_index)
+                    .and_then(|(start, end, color)| {
+                        (*start <= byte_offset && byte_offset < *end).then_some(*color)
+                    })
+                    .flatten()
+                    .or_else(|| byte_color.color_at(byte_offset));
+                ascii.push_str(&colorize(&glyph.to_string(), paint));
             } else {
                 ascii.push(glyph);
             }
@@ -220,16 +310,18 @@ fn colorize(text: &str, color: Option<usize>) -> String {
 }
 
 /// Walk the IR fields and their parsed instances in lockstep, emitting a [`Row`]
-/// for each and recording leaf byte ranges in `byte_color`.
+/// for each and recording leaf byte ranges in `byte_color` when present.
 fn walk(
     fields: &[Field],
     instances: &[FieldInstance],
     sample: &[u8],
     depth: usize,
     rows: &mut Vec<Row>,
-    byte_color: &mut [Option<usize>],
+    byte_color: Option<&mut ByteColors>,
     leaf_counter: &mut usize,
 ) {
+    // Re-borrow through a single mutable option for the recursive walk.
+    let mut color = byte_color;
     for (field, instance) in fields.iter().zip(instances.iter()) {
         emit_row(
             field,
@@ -237,7 +329,7 @@ fn walk(
             sample,
             depth,
             rows,
-            byte_color,
+            color.as_deref_mut(),
             leaf_counter,
         );
     }
@@ -250,7 +342,7 @@ fn emit_row(
     sample: &[u8],
     depth: usize,
     rows: &mut Vec<Row>,
-    byte_color: &mut [Option<usize>],
+    mut byte_color: Option<&mut ByteColors>,
     leaf_counter: &mut usize,
 ) {
     let size = instance.end.saturating_sub(instance.start);
@@ -258,7 +350,9 @@ fn emit_row(
     let color = if is_leaf {
         let index = *leaf_counter;
         *leaf_counter += 1;
-        paint(byte_color, instance.start, instance.end, index);
+        if let Some(map) = byte_color.as_mut() {
+            map.paint(instance.start, instance.end, index);
+        }
         Some(index)
     } else {
         None
@@ -300,21 +394,12 @@ fn emit_row(
                     sample,
                     depth + 1,
                     rows,
-                    byte_color,
+                    byte_color.as_deref_mut(),
                     leaf_counter,
                 );
             }
         }
         _ => {}
-    }
-}
-
-/// Mark the bytes in `[start, end)` as owned by the field with `index`.
-fn paint(byte_color: &mut [Option<usize>], start: usize, end: usize, index: usize) {
-    let lo = start.min(byte_color.len());
-    let hi = end.min(byte_color.len());
-    for slot in &mut byte_color[lo..hi] {
-        *slot = Some(index);
     }
 }
 
@@ -428,5 +513,15 @@ mod tests {
         let (report, _) = tlv_report_and_sample();
         let view = render(&report, &[], &InspectOptions::default());
         assert!(view.contains("(empty sample)"));
+    }
+
+    #[test]
+    fn sparse_color_map_does_not_allocate_per_sample_byte() {
+        // A hostile sample must not force a dense color vector of sample.len().
+        let mut colors = ByteColors::default();
+        colors.paint(0, 1 << 20, 0);
+        assert_eq!(colors.ranges.len(), 1);
+        let segments = colors.segments(1 << 20);
+        assert!(segments.len() <= 3);
     }
 }

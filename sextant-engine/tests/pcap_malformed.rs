@@ -7,10 +7,7 @@
 
 use sextant_engine::{ExtractOptions, PcapError, Transport, extract_messages};
 
-const OPTIONS: ExtractOptions = ExtractOptions {
-    transport: Transport::Tcp,
-    port: 502,
-};
+const OPTIONS: ExtractOptions = ExtractOptions::new(Transport::Tcp, 502);
 
 /// A classic little-endian pcap global header (24 bytes) with the Ethernet
 /// link type.
