@@ -429,6 +429,28 @@ fn insane_array_count_is_rejected() {
 }
 
 #[test]
+fn nesting_deeper_than_the_cap_is_rejected() {
+    // Build a chain of nested structs one deeper than MAX_NESTING_DEPTH.
+    let mut field = integer("leaf", 1);
+    for depth in (0..=sextant_ir::MAX_NESTING_DEPTH).rev() {
+        field = Field::new(
+            Kind::Struct {
+                structure: Structure::new(vec![field]),
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name(format!("s{depth}"));
+    }
+    let kinds = error_kinds(&format_of(vec![field]));
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, ValidationErrorKind::NestingTooDeep { .. })),
+        "got {kinds:?}"
+    );
+}
+
+#[test]
 fn inconsistent_sample_support_is_rejected() {
     let field = Field {
         evidence: sextant_ir::Evidence {

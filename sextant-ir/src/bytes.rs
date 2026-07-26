@@ -9,10 +9,19 @@ use std::fmt;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::validate::MAX_FIXED_FIELD_BYTES;
+
+/// The largest hex-decoded [`Bytes`] value accepted during deserialization.
+///
+/// Matches [`MAX_FIXED_FIELD_BYTES`] so a hostile IR JSON cannot force an
+/// unbounded allocation through a magic, terminator, or constant field (FR-24).
+pub const MAX_BYTES_HEX_DECODE: usize = MAX_FIXED_FIELD_BYTES as usize;
+
 /// A sequence of raw bytes that serializes to and from a lowercase hex string.
 ///
 /// An empty value serializes to an empty string. Decoding rejects an odd-length
-/// string or any non-hexadecimal character.
+/// string, any non-hexadecimal character, or a payload larger than
+/// [`MAX_BYTES_HEX_DECODE`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, Hash)]
 pub struct Bytes(pub Vec<u8>);
 
@@ -85,6 +94,11 @@ pub enum HexError {
         /// The bad character.
         ch: char,
     },
+    /// The decoded payload would exceed [`MAX_BYTES_HEX_DECODE`].
+    TooLarge {
+        /// The number of bytes that would have been produced.
+        bytes: usize,
+    },
 }
 
 impl fmt::Display for HexError {
@@ -96,6 +110,10 @@ impl fmt::Display for HexError {
             HexError::InvalidChar { index, ch } => {
                 write!(f, "invalid hex character {ch:?} at index {index}")
             }
+            HexError::TooLarge { bytes } => write!(
+                f,
+                "hex payload of {bytes} bytes exceeds the limit of {MAX_BYTES_HEX_DECODE}"
+            ),
         }
     }
 }
@@ -113,13 +131,38 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(text: &str) -> Result<Vec<u8>, HexError> {
+    // Fast path for ASCII hex (the common IR case): reject by byte length
+    // before allocating a char vector or the decoded buffer.
+    if text.is_ascii() {
+        if text.len() % 2 != 0 {
+            return Err(HexError::OddLength { length: text.len() });
+        }
+        let byte_len = text.len() / 2;
+        if byte_len > MAX_BYTES_HEX_DECODE {
+            return Err(HexError::TooLarge { bytes: byte_len });
+        }
+        let bytes = text.as_bytes();
+        let mut out = Vec::with_capacity(byte_len);
+        for (pair_index, pair) in bytes.chunks_exact(2).enumerate() {
+            let index = pair_index * 2;
+            let hi = hex_value(pair[0] as char, index)?;
+            let lo = hex_value(pair[1] as char, index + 1)?;
+            out.push((hi << 4) | lo);
+        }
+        return Ok(out);
+    }
+
     let chars: Vec<char> = text.chars().collect();
     if chars.len() % 2 != 0 {
         return Err(HexError::OddLength {
             length: chars.len(),
         });
     }
-    let mut out = Vec::with_capacity(chars.len() / 2);
+    let byte_len = chars.len() / 2;
+    if byte_len > MAX_BYTES_HEX_DECODE {
+        return Err(HexError::TooLarge { bytes: byte_len });
+    }
+    let mut out = Vec::with_capacity(byte_len);
     for (pair_index, pair) in chars.chunks_exact(2).enumerate() {
         let index = pair_index * 2;
         let hi = hex_value(pair[0], index)?;
@@ -227,5 +270,14 @@ mod tests {
             Bytes::from_hex("DEADBEEF").expect("decode"),
             Bytes::new(vec![0xde, 0xad, 0xbe, 0xef])
         );
+    }
+
+    #[test]
+    fn oversized_hex_payload_is_rejected() {
+        let too_many = MAX_BYTES_HEX_DECODE + 1;
+        let err = HexError::TooLarge { bytes: too_many };
+        let text = err.to_string();
+        assert!(text.contains(&MAX_BYTES_HEX_DECODE.to_string()));
+        assert!(text.contains(&(too_many).to_string()));
     }
 }
