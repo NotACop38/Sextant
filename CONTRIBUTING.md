@@ -26,16 +26,9 @@ is built one checklist step at a time. Contributions are welcome.
 
 ## Before you open a pull request
 
-Run the full local check suite and make sure it is clean:
-
-```
-cargo fmt --all
-cargo build --all-targets
-cargo test
-cargo clippy --all-targets --all-features
-cargo fmt --all --check
-cargo deny check
-```
+Run the canonical [full local gate in `AGENTS.md`](AGENTS.md#commands) and make
+sure it is clean. That list includes the release build and the current CI
+checks; use it instead of maintaining a separate command list here.
 
 A pull request is ready when its checklist step's acceptance criteria and the
 Global Definition of Done in [`AGENTS.md`](AGENTS.md) are satisfied, and CI is

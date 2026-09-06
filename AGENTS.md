@@ -51,11 +51,7 @@ Put new code in the crate that owns its responsibility. Do not create cross-crat
 
 ## Global Definition of Done (every step)
 
-- [ ] `cargo build` and `cargo build --release` succeed.
-- [ ] `cargo test` passes.
-- [ ] `cargo clippy --all-targets --all-features` is clean (warnings are errors in CI).
-- [ ] `cargo fmt --all --check` passes.
-- [ ] `cargo deny check` passes (licenses and advisories).
+- [ ] The full local gate in [Commands](#commands) passes, including debug and release builds, all-feature tests, Clippy with warnings as errors, formatting, supply-chain checks, and the benchmark regression guard.
 - [ ] No new `unsafe` without a justification comment and a test.
 - [ ] Public items have doc comments; behavior changes update the relevant docs.
 - [ ] Input-facing code paths have at least one negative or malformed-input test.
@@ -64,18 +60,23 @@ Put new code in the crate that owns its responsibility. Do not create cross-crat
 
 ## Commands
 
-Run before declaring any step done:
+Use focused crate and test checks, and `cargo fmt --all`, during development. Run this full local gate from the repository root before declaring any step done:
 
-```
-cargo fmt --all
-cargo build --all-targets
-cargo test
-cargo clippy --all-targets --all-features
+```bash
 cargo fmt --all --check
+cargo build --all-targets --all-features --verbose
+cargo build --release
+cargo test --workspace --all-features --verbose
+cargo clippy --all-targets --all-features -- -D warnings
 cargo deny check
+cargo audit
+cargo audit --file fuzz/Cargo.lock
+cargo run -p sextant-bench -- --check
 ```
 
-Where a step involves them, also run the benchmark (`sextant bench`) and the relevant `cargo fuzz run <target>` for its configured budget.
+Keep these commands aligned with [the CI workflow](.github/workflows/ci.yml). They cover its checks on the current host and include the release build required by the Global Definition of Done. CI additionally verifies build, test, Clippy, and benchmark results on Linux, macOS, and Windows.
+
+Where a step involves fuzzing, also run the relevant `cargo fuzz run <target>` for its configured budget.
 
 ## Testing expectations
 
