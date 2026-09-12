@@ -68,10 +68,7 @@ pub fn cross_validate(format: &Format, samples: &[Vec<u8>]) -> CrossValidation {
         Ok(ksy) => ksy,
         Err(error) => return failed(error.to_string()),
     };
-    let workdir = match tempfile::Builder::new()
-        .prefix("sextant-crossval-")
-        .tempdir()
-    {
+    let workdir = match private_workdir() {
         Ok(dir) => dir,
         Err(error) => {
             return failed(format!(
@@ -99,6 +96,19 @@ pub fn cross_validate(format: &Format, samples: &[Vec<u8>]) -> CrossValidation {
         },
         Err(error) => failed(error),
     }
+}
+
+fn private_workdir() -> std::io::Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("sextant-crossval-");
+    // Tempfile directories otherwise inherit 0o777 masked by the process umask.
+    // Set permissions during creation, before any sample or generated code exists.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    builder.tempdir()
 }
 
 fn failed(detail: impl Into<String>) -> CrossValidation {
@@ -324,6 +334,21 @@ mod tests {
             "python3 is required"
         );
         present
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sample_workdir_excludes_other_users_at_creation() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = private_workdir().unwrap();
+        let mode = dir.path().metadata().unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "cross-validation directory must be owner-only"
+        );
+        assert_eq!(mode & 0o700, 0o700);
+        std::fs::write(dir.path().join("sample.bin"), b"private sample").unwrap();
     }
 
     #[test]
