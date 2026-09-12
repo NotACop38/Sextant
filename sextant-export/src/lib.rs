@@ -157,6 +157,11 @@ impl std::error::Error for ExportError {}
 /// Kaitai rejects offsets and multi-byte delimiters. Non-Lua targets reject
 /// repeated elements whose minimum size cannot be proved positive. Constraint
 /// checking differs by target: checksum and range constraints are not enforced.
+/// All targets reject dependencies shadowed by an unparsed declaration,
+/// including array element descriptors used in generated wrapper types.
+/// Non-Lua targets reject enum and type identifier collisions. Numeric enum
+/// dependencies in Kaitai and non-Kaitai dependencies without a stable sanitized
+/// identifier are also rejected.
 pub fn export(format: &Format, target: ExportFormat) -> Result<String, ExportError> {
     format
         .validate()
