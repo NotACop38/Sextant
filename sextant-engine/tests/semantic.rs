@@ -92,6 +92,39 @@ fn client_with_proposal(value: serde_json::Value) -> LlmClient<MockProvider> {
 }
 
 #[test]
+fn a_higher_aggregate_score_cannot_sacrifice_a_previously_parsed_sample() {
+    let mut format = baseline_format();
+    format.root = Structure::new(vec![field(
+        "data",
+        Kind::Bytes,
+        Some(SizeRule::Fixed { bytes: 1 }),
+    )]);
+    let mut samples = vec![vec![0; 100]; 100];
+    samples.push(vec![0]);
+    let slices = slices(&samples);
+    let baseline = score(&format, &slices);
+    let mut regressed = format.clone();
+    regressed.root.fields[0].size = Some(SizeRule::Fixed { bytes: 100 });
+    let proposed = score(&regressed, &slices);
+    assert!(proposed.overall > baseline.overall);
+    assert!(proposed.generality < baseline.generality);
+
+    let client = client_with_proposal(serde_json::json!({
+        "fields": [{"index": 0, "size": {"rule": "fixed", "bytes": 100}}]
+    }));
+    let outcome = semantic_pass(
+        &format,
+        &slices,
+        &client,
+        &Limits::default(),
+        &SemanticOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(outcome.format, format);
+    assert_eq!(outcome.score.generality, 1.0);
+}
+
+#[test]
 fn a_good_proposal_improves_roles_and_types_without_regressing() {
     let samples = samples();
     let slices = slices(&samples);

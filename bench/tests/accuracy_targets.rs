@@ -45,7 +45,7 @@ fn statistics_only_pipeline_meets_the_prd_accuracy_targets() {
             .collect::<Vec<_>>()
     );
 
-    // Parser validity is 100 percent by construction of the verification loop:
+    // Native validity must remain 100 percent on this development corpus:
     // the chosen IR parses every sample to a clean end (PRD Section 15).
     for format in &metrics.formats {
         assert!(

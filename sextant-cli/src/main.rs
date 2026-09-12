@@ -343,8 +343,10 @@ fn run_infer(
         }
     }
 
-    if report.field_map.is_empty() {
-        eprintln!("sextant infer: no usable hypothesis was produced");
+    if !report.score.fully_verified() {
+        eprintln!(
+            "sextant infer: the hypothesis did not fully verify every retained sample; inspect the report for failures or resource limits"
+        );
         ExitCode::from(EXIT_NO_HYPOTHESIS)
     } else {
         ExitCode::SUCCESS
@@ -468,8 +470,10 @@ fn run_infer_protocol(
         }
     }
 
-    if inference.report.field_map.is_empty() {
-        eprintln!("sextant infer: no usable hypothesis was produced");
+    if !inference.report.score.fully_verified() {
+        eprintln!(
+            "sextant infer: the hypothesis did not fully verify every retained message; inspect the report for failures or resource limits"
+        );
         ExitCode::from(EXIT_NO_HYPOTHESIS)
     } else {
         ExitCode::SUCCESS
@@ -526,15 +530,26 @@ fn write_report(report: &Report, path: &str, force: bool) -> std::io::Result<()>
 
 /// Write `bytes` to `path`, refusing overwrites and cwd escapes without `--force`.
 fn write_output_file(path: &str, bytes: &[u8], force: bool) -> std::io::Result<()> {
+    use std::io::Write;
+
     check_output_path(path, force)?;
-    std::fs::write(path, bytes)
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    if force {
+        options.create(true).truncate(true);
+    } else {
+        // Atomically refuse existing files, including dangling symlinks and
+        // files created after the path check.
+        options.create_new(true);
+    }
+    options.open(path)?.write_all(bytes)
 }
 
 /// Refuse to overwrite an existing file or write outside the current working
 /// directory unless `force` is set.
 fn check_output_path(path: &str, force: bool) -> std::io::Result<()> {
     let target = Path::new(path);
-    if !force && target.exists() {
+    if !force && std::fs::symlink_metadata(target).is_ok() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             format!("refusing to overwrite existing file `{path}` without --force"),
@@ -779,7 +794,7 @@ fn print_report(report: &Report) {
         );
     }
     println!(
-        "  (confidence: 0.00 weak evidence to 1.00 verified against every sample; \
+        "  (confidence describes evidence from these samples, not certainty about field meaning; \
          per-field evidence is in the report JSON)"
     );
 

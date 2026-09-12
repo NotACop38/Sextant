@@ -34,12 +34,6 @@ use crate::refine::{RefineOutcome, RefineStep, Seg, field_paths, navigate};
 use crate::report::{kind_label, role_label, size_label};
 use crate::scorer::{Score, ScoreWeights, score_with};
 
-/// The largest score regression tolerated when accepting a proposal. It is
-/// floating-point noise only: a real drop is rejected, while a pure annotation
-/// (a name or a role, which do not change the parse) scores identically and is
-/// accepted (FR-26).
-const REGRESSION_EPSILON: f64 = 1e-9;
-
 /// The default per-sample byte cap placed in a prompt (NFR-4).
 pub const DEFAULT_MAX_PROMPT_BYTES_PER_SAMPLE: usize = 256;
 
@@ -263,7 +257,7 @@ pub fn semantic_pass<P: LlmProvider>(
         };
 
         let score = score_with(&candidate, samples, limits, weights);
-        if score.overall + REGRESSION_EPSILON >= best_score.overall {
+        if score.preserves_verified_fit(&best_score) {
             // The verified score did not regress, so the model proposal is
             // accepted (FR-26).
             history.push(RefineStep {

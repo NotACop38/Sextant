@@ -13,7 +13,7 @@
 //! internal IR (`sextant-ir`). Keeping the corpus description stable as the
 //! engine evolves means accuracy numbers stay comparable over time.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -154,14 +154,12 @@ pub fn load_ground_truth(format: &str) -> std::io::Result<GroundTruth> {
 /// Returns an error if the `ground_truth.json` file cannot be read or does not
 /// parse as a valid ground-truth description.
 pub fn load_ground_truth_in(corpus_dir: &Path, format: &str) -> std::io::Result<GroundTruth> {
-    let path = corpus_dir.join(format).join("ground_truth.json");
-    let text = std::fs::read_to_string(&path)?;
-    parse_ground_truth(&text).map_err(|error| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("{}: {error}", path.display()),
-        )
-    })
+    let root = format_directory(corpus_dir, format)?;
+    let path = confined_file(&root, "ground_truth.json")?;
+    let bytes = read_bounded(&path, MANIFEST_READ_CAP)?;
+    let gt: GroundTruth = serde_json::from_slice(&bytes).map_err(invalid_corpus)?;
+    validate_ground_truth(&gt)?;
+    Ok(gt)
 }
 
 /// Reads the raw bytes of a sample listed in a ground-truth description, under
@@ -174,40 +172,205 @@ pub fn read_sample(format: &str, sample: &SampleEntry) -> std::io::Result<Vec<u8
     read_sample_in(&corpus_dir(), format, sample)
 }
 
-/// The per-sample byte cap the benchmark reads under. A corpus passed with
-/// `--corpus` is untrusted: its ground truth could name an arbitrarily large
-/// sample, so each read is bounded to keep `sextant bench` within the repository
-/// resource-limit invariant (FR-24, NFR-2) rather than allocating a whole file
-/// up front. It matches the engine's per-sample ingestion cap so the bytes the
-/// benchmark evaluates are the same the pipeline would ingest. The corpus
-/// samples are tiny, so this never clips a real sample.
+/// Maximum bytes in one benchmark sample. Oversized samples are rejected.
 pub const SAMPLE_READ_CAP: usize = sextant_engine::DEFAULT_MAX_BYTES_PER_SAMPLE;
+/// Maximum ground-truth manifest size in bytes.
+pub const MANIFEST_READ_CAP: usize = 1024 * 1024;
+/// Maximum retained sample bytes for one format evaluation.
+pub const CORPUS_READ_CAP: u64 = 256 * 1024 * 1024;
+/// Maximum samples in one format manifest.
+pub const MAX_SAMPLES: usize = 256;
+/// Maximum expanded ground-truth fields across one format's samples.
+pub const MAX_TRUTH_FIELDS: u64 = 100_000;
 
-/// Reads the raw bytes of a sample listed in a ground-truth description, under
-/// an arbitrary corpus directory, bounded by [`SAMPLE_READ_CAP`] so a hostile
-/// corpus cannot drive an unbounded allocation.
+fn invalid_corpus(message: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message.to_string())
+}
+
+fn relative_path(path: &str) -> std::io::Result<&Path> {
+    let path = Path::new(path);
+    if path.as_os_str().is_empty()
+        || path
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(invalid_corpus(
+            "corpus paths must be relative without parent components",
+        ));
+    }
+    Ok(path)
+}
+
+fn format_directory(corpus: &Path, format: &str) -> std::io::Result<PathBuf> {
+    let corpus = corpus.canonicalize()?;
+    let root = corpus.join(relative_path(format)?).canonicalize()?;
+    if !root.starts_with(&corpus) || !root.is_dir() {
+        return Err(invalid_corpus("format directory escapes the corpus"));
+    }
+    Ok(root)
+}
+
+fn confined_file(root: &Path, path: &str) -> std::io::Result<PathBuf> {
+    let path = root.join(relative_path(path)?).canonicalize()?;
+    if !path.starts_with(root) || !path.is_file() {
+        return Err(invalid_corpus(
+            "corpus entry must be a regular file inside its format directory",
+        ));
+    }
+    Ok(path)
+}
+
+fn read_bounded(path: &Path, cap: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path)?;
+    if !file.metadata()?.is_file() || file.metadata()?.len() > cap as u64 {
+        return Err(invalid_corpus(
+            "corpus file exceeds its byte limit or is not regular",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(cap as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > cap {
+        return Err(invalid_corpus("corpus file exceeds its byte limit"));
+    }
+    Ok(bytes)
+}
+
+fn validate_ground_truth(gt: &GroundTruth) -> std::io::Result<()> {
+    if gt.samples.is_empty() || gt.samples.len() > MAX_SAMPLES {
+        return Err(invalid_corpus("invalid corpus sample count"));
+    }
+    let fields = gt.structure.header.iter().chain(&gt.structure.record);
+    for field in fields {
+        if [&field.name, &field.ty, &field.role]
+            .iter()
+            .any(|value| value.len() > 256)
+            || matches!(&field.size, SizeRule::Derived(name) if name.len() > 256)
+        {
+            return Err(invalid_corpus("ground-truth field labels exceed 256 bytes"));
+        }
+    }
+    let mut bytes = 0u64;
+    let mut expanded = 0u64;
+    for sample in &gt.samples {
+        relative_path(&sample.path)?;
+        if sample.size > SAMPLE_READ_CAP as u64 {
+            return Err(invalid_corpus("sample exceeds its byte limit"));
+        }
+        bytes = bytes
+            .checked_add(sample.size)
+            .ok_or_else(|| invalid_corpus("sample size overflow"))?;
+        let count = expanded_field_count(gt, sample.record_count)?;
+        expanded = expanded
+            .checked_add(count)
+            .ok_or_else(|| invalid_corpus("field count overflow"))?;
+        if bytes > CORPUS_READ_CAP || expanded > MAX_TRUTH_FIELDS {
+            return Err(invalid_corpus(
+                "corpus exceeds its aggregate byte or field limit",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn expanded_field_count(gt: &GroundTruth, records: u64) -> std::io::Result<u64> {
+    if records > MAX_TRUTH_FIELDS || (records > 0 && gt.structure.record.is_empty()) {
+        return Err(invalid_corpus("invalid ground-truth record count"));
+    }
+    let count = records
+        .checked_mul(gt.structure.record.len() as u64)
+        .and_then(|count| count.checked_add(gt.structure.header.len() as u64))
+        .filter(|&count| count <= MAX_TRUTH_FIELDS)
+        .ok_or_else(|| invalid_corpus("ground truth exceeds its expanded field limit"))?;
+    Ok(count)
+}
+
+/// Read one sample within its format directory, rejecting oversized files and
+/// mismatches with the manifest's declared size instead of silently truncating.
 ///
 /// # Errors
 ///
-/// Returns an error if the sample file cannot be read.
+/// Returns an error for invalid paths, non-regular files, size mismatches, or I/O failures.
 pub fn read_sample_in(
     corpus_dir: &Path,
     format: &str,
     sample: &SampleEntry,
 ) -> std::io::Result<Vec<u8>> {
-    use std::io::Read as _;
-    let path = corpus_dir.join(format).join(&sample.path);
-    let file = std::fs::File::open(path)?;
-    let mut data = Vec::new();
-    // `take` bounds both the bytes read and the allocation: an attacker-sized
-    // sample costs at most the cap, not the file's full length.
-    file.take(SAMPLE_READ_CAP as u64).read_to_end(&mut data)?;
+    let root = format_directory(corpus_dir, format)?;
+    let path = confined_file(&root, &sample.path)?;
+    if sample.size > SAMPLE_READ_CAP as u64 {
+        return Err(invalid_corpus("sample exceeds its byte limit"));
+    }
+    let data = read_bounded(&path, SAMPLE_READ_CAP)?;
+    if data.len() as u64 != sample.size {
+        return Err(invalid_corpus("sample size differs from its manifest"));
+    }
     Ok(data)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loading_hostile_manifests_fails_before_sample_reads() {
+        let root = std::env::temp_dir().join(format!("sextant-manifest-{}", std::process::id()));
+        let dir = root.join("hostile");
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = dir.join("ground_truth.json");
+        let mut gt = load_ground_truth("tlv").unwrap();
+        gt.samples[0].record_count = u64::MAX;
+        std::fs::write(&manifest, serde_json::to_vec(&gt).unwrap()).unwrap();
+        assert!(
+            load_ground_truth_in(&root, "hostile")
+                .unwrap_err()
+                .to_string()
+                .contains("record count")
+        );
+        std::fs::File::create(&manifest)
+            .unwrap()
+            .set_len(MANIFEST_READ_CAP as u64 + 1)
+            .unwrap();
+        assert!(
+            load_ground_truth_in(&root, "hostile")
+                .unwrap_err()
+                .to_string()
+                .contains("byte limit")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_unbounded_ground_truth_and_declared_sample_budgets() {
+        let original = load_ground_truth("tlv").expect("fixture");
+        let mut gt = original.clone();
+        gt.samples[0].record_count = u64::MAX;
+        assert!(validate_ground_truth(&gt).is_err());
+        gt = original.clone();
+        gt.samples = vec![gt.samples[0].clone(); MAX_SAMPLES + 1];
+        assert!(validate_ground_truth(&gt).is_err());
+        gt = original.clone();
+        gt.samples[0].size = SAMPLE_READ_CAP as u64 + 1;
+        assert!(validate_ground_truth(&gt).is_err());
+        gt = original;
+        gt.structure.header[0].role = "x".repeat(257);
+        assert!(validate_ground_truth(&gt).is_err());
+    }
+
+    #[test]
+    fn sample_reads_reject_path_escape_and_size_mismatch() {
+        let gt = load_ground_truth("tlv").expect("fixture");
+        let mut sample = gt.samples[0].clone();
+        sample.size += 1;
+        assert!(read_sample("tlv", &sample).is_err());
+        sample.path = "../png/ground_truth.json".into();
+        assert!(read_sample("tlv", &sample).is_err());
+        sample.path = corpus_dir()
+            .join("png/ground_truth.json")
+            .display()
+            .to_string();
+        assert!(read_sample("tlv", &sample).is_err());
+    }
 
     #[test]
     fn png_ground_truth_loads_and_matches_its_samples() {

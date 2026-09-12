@@ -6,9 +6,9 @@
 //! array members, and a derived size or count references the governing member by
 //! name. The root structure is placed at offset zero.
 //!
-//! Constructs ImHex cannot express (a checksum to verify, a multi-byte
-//! terminator) are emitted as comments so the structure still parses while the
-//! analyst keeps the context.
+//! Checksum and constant constraints are annotations. The public entry point
+//! rejects layouts this emitter cannot preserve, including offsets, delimiters,
+//! byte-bounded arrays, and ancestor dependencies.
 
 use std::fmt::Write as _;
 
@@ -17,7 +17,7 @@ use sextant_ir::{
     Structure,
 };
 
-use crate::naming::{Allocator, pascal, snake};
+use crate::naming::{Allocator, comment_text, pascal, snake};
 
 /// Render `format` as a complete ImHex `.hexpat` file.
 #[must_use]
@@ -314,8 +314,8 @@ fn checksum_comment(field: &Field) -> Option<String> {
             Constraint::Checksum { spec } => Some(format!(
                 "// checksum: {:?} over [{}, {})",
                 spec.algorithm,
-                spec.covered.from.field(),
-                spec.covered.to.field()
+                comment_text(spec.covered.from.field().as_str()),
+                comment_text(spec.covered.to.field().as_str())
             )),
             _ => None,
         })

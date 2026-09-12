@@ -4,9 +4,9 @@
 |---|---|
 | Project | Sextant |
 | Document | Engineering Checklist (build plan) |
-| Status | Draft v0.1 (proposed) |
-| Owner | `<you>` |
-| Last updated | 2026-06-04 |
+| Status | Implementation and qualification checklist |
+| Owner | Repository maintainers |
+| Last updated | 2026-09-12 |
 | Related documents | `docs/PRD.md`, `README.md` |
 
 ## How to use this checklist with a coding agent
@@ -164,7 +164,7 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 - [x] `sextant infer <dir> --no-llm` produces a scored field map for the corpus formats.
 - [x] No network egress occurs in `--no-llm` mode (assert in a test or document the verification method) (NFR-4).
-- [x] The statistics-only pipeline meets the accuracy targets in PRD Section 15 on the file-format corpus (field-boundary F1 at least 0.85, perfection at least 0.5).
+- [ ] The statistics-only pipeline meets the accuracy targets in PRD Section 15 on the full file-format corpus. The five-format development subset passes its regression thresholds; the remaining PRD formats are not evaluated.
 
 ---
 
@@ -239,12 +239,12 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 - [x] Implement the Kaitai `.ksy` exporter (primary).
 - [x] Implement the ImHex `.hexpat`, Wireshark `.lua`, and 010 `.bt` exporters.
 - [x] Implement optional Kaitai cross-validation: compile the generated spec with the Kaitai compiler and parse all samples, reported separately and never required by the core (FR-38, NFR-5).
-- [x] Add round-trip tests: for each corpus format, the exported parser parses every sample.
+- [ ] Add runtime round-trip tests for every target and corpus format. Source-generation assertions alone do not qualify parser behavior.
 
 ### Acceptance criteria
 
 - [x] The generated Kaitai spec for a corpus format compiles with the Kaitai compiler and parses all samples (when the optional cross-check is enabled).
-- [x] Each exporter produces output that correctly parses corpus samples for at least one format.
+- [ ] Each exporter produces output that correctly parses corpus samples in its target runtime for at least one format. ImHex and 010 Editor runtime qualification remains open.
 - [x] `sextant export <report.json> --format <fmt> --out <file>` works for all four formats.
 
 ---
@@ -278,12 +278,12 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 - [x] Implement `sextant bench`: run inference over the corpus and compute field-boundary precision, recall, and F1; perfection rate; role and type accuracy; and parser validity.
 - [x] Emit a results table (and machine-readable results) suitable for the README.
 - [x] Add a regression guard so CI fails if metrics drop below configured thresholds.
-- [x] Frame results against the academic baselines on comparable metrics.
+- [ ] Evaluate academic baselines on the same corpus and methodology before making comparative claims.
 
 ### Acceptance criteria
 
 - [x] `sextant bench` runs over the corpus and prints a metrics table.
-- [x] Metrics meet the targets in PRD Section 15.
+- [ ] Metrics meet the targets in PRD Section 15 on the full required corpus, including held-out semantic evaluation. Current results cover only the development subset.
 - [x] A metrics regression below threshold fails CI.
 - [x] README benchmark numbers are generated from this harness, not hand-written.
 
@@ -344,8 +344,8 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Acceptance criteria
 
-- [x] A tagged release produces working binaries for Linux, macOS, and Windows. (Built by `.github/workflows/release.yml`; the Linux build, archive, checksum, and binary smoke test were verified locally via a dry-run of the same steps.)
-- [x] `cargo install sextant-re` (after publish) installs a working binary named `sextant`. The crates.io name `sextant` is taken, so the CLI publishes as `sextant-re`; publishability was confirmed with `cargo publish --dry-run` and `cargo package`.
+- [ ] A tagged release produces working binaries for Linux, macOS, and Windows. The workflow and local dry run are preparatory evidence; no release was published as of 2026-09-12.
+- [ ] A clean registry installation of `sextant-re` installs a working `sextant` binary after publication. Packaging dry runs do not establish this acceptance criterion.
 - [x] The changelog is updated for the release and the version is consistent across crates.
 
 ---
@@ -357,16 +357,16 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 ### Tasks
 
 - [x] Final review of README, docs, license headers, and the security and responsible-use notes. (README status note, roadmap, contributing, and license sections updated for v0.1.0; SECURITY.md, the responsible-use disclaimer, and the data-handling notes confirmed current. License is declared in `Cargo.toml` plus both LICENSE files; the codebase uses no per-file SPDX headers, uniformly.)
-- [x] Configure public badges (CI status, crates.io version, license). The crates.io badge resolves after the maintainer publishes `sextant-re`.
-- [ ] Flip the repository to public. (Maintainer action; exact command in `docs/LAUNCH.md` Step 1.)
-- [x] Enable Discussions and set up issue labels and a triage process. (Labels defined in `.github/labels.yml` and applied by `scripts/setup-labels.sh`; triage flow in `docs/TRIAGE.md`; issue templates apply a `triage` label. Enabling Discussions is the one maintainer toggle, in `docs/LAUNCH.md` Step 2.)
+- [x] Configure badges for CI and licensing. Registry badges remain omitted until publication is verified.
+- [x] The repository is public. Confirmed with the GitHub API on 2026-09-12.
+- [ ] Enable Discussions. GitHub reports it disabled as of 2026-09-12. Label definitions, issue templates, and the triage process are implemented separately.
 - [ ] Cut and publish the first tagged release. (Pipeline, version, and dated changelog section are ready; the tag push and crates.io publish are maintainer actions with exact commands in `docs/LAUNCH.md` Steps 4 and 5 and `docs/RELEASING.md`.)
 - [x] Optional: prepare a short write-up of the IR and the verification loop for sharing. (`docs/ANNOUNCEMENT.md`.)
 
 ### Acceptance criteria
 
-- [x] The repository is public with accurate, non-placeholder badges and a green CI. (Badges are live and non-placeholder, and CI is green on this change; flipping visibility to public is the maintainer action in `docs/LAUNCH.md` Step 1.)
-- [x] A versioned release is published with downloadable binaries. (The tag-driven release workflow builds checksummed binaries for Linux, macOS, and Windows; version `0.1.0` and the changelog section are prepared. Pushing the `v0.1.0` tag is the maintainer action in `docs/LAUNCH.md` Step 4.)
+- [x] The repository is public with badges for CI and licensing. Merge remains conditional on successful CI for the reviewed revision.
+- [ ] A versioned release is published with downloadable binaries. Release automation is implemented, but no versioned release is published as of 2026-09-12.
 - [x] Issue labels and a contribution and triage flow are in place. (`.github/labels.yml`, `scripts/setup-labels.sh`, `docs/TRIAGE.md`, `CONTRIBUTING.md`, and the issue templates.)
 
 ---

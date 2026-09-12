@@ -54,7 +54,8 @@ of `Field`s. A field has:
 
 Relationships such as length, count, offset, and checksum point at the field they
 depend on by name. Validation resolves every reference and rejects dangling ones,
-so an IR that reaches the executor is always well-formed. The IR serializes to
+before ordinary report and export workflows use it. Direct library callers
+should validate their IR; the executor also enforces its own limits. The IR serializes to
 and from JSON, which is what the report stores.
 
 The key idea is that the IR is not prose or a diagram. It is executable. That is
@@ -70,8 +71,9 @@ The executor runs an IR against one sample and produces concrete field instances
 with byte ranges and decoded values, or a localized failure with the offset and
 the reason. It is native Rust with no JVM, no Kaitai compiler, and no network
 dependency, so it runs under `--no-llm` and fully offline. It enforces hard
-resource limits (recursion depth, maximum array length, and a wall-clock cap) so
-no input can cause a panic, a hang, or unbounded allocation.
+resource limits for recursion, array work, owned output bytes, and per-execution
+wall-clock time. Fuzzing and malformed-input regressions exercise these defenses;
+they do not prove that every possible input is safe.
 
 ### Score
 
@@ -85,8 +87,10 @@ dimensions:
   checksum (CRC32, CRC16, additive, or XOR over its covered range) verify?
 - **Generality**: whether one structure fits across all samples, not just one.
 
-A correct hypothesis scores near 1.0. A wrong one scores low, and the breakdown
-points at the dimension that failed, which is what makes the failure useful.
+A low score can identify structural contradictions. A high score only establishes
+fit: an opaque field consuming the whole sample can score 1.0 while explaining
+none of its internal structure. Confidence values are heuristic evidence summaries,
+not calibrated probabilities of semantic correctness.
 
 ### Refine
 
@@ -96,7 +100,8 @@ boundaries and swapping endianness and width hypotheses. The engine also has an
 optional model semantic path for callers that invoke it directly; the v0.1.0 CLI
 does not expose provider flags and runs statistics-only. Every candidate change
 is run through the same executor and scorer, and a change is kept only if the
-verified score does not regress on the full sample set. The loop always
+verified score does not regress on the full sample set and no previously
+successful or fully verified sample loses that status. The loop always
 terminates, by convergence, a target score, or a maximum iteration count.
 
 ### The non-negotiable invariant
@@ -110,12 +115,12 @@ can only improve on the statistics-only baseline, never fall below it.
 
 ## Why this matters
 
-A model that simply emits a guess can sound confident and be wrong, and you have
-no way to tell. Sextant makes every hypothesis falsifiable and tests it, so the
-parser it hands you is one that actually parsed your samples, and the confidence
-report tells you honestly which parts were verified and which were inferred. The
-real parsers (Kaitai, ImHex, Wireshark, 010) are exporters off that verified IR
-at the very end.
+Sextant makes structural guesses executable and exposes failures on the retained
+samples. Exporters then translate the resulting IR into another language. That
+translation requires independent validation: ordinary export does not prove the
+generated parser was run. Optional Kaitai cross-validation compiles and executes
+it against samples and requires full consumption. Lua runtime regressions cover
+selected behaviors; ImHex and 010 Editor runtime qualification remains open.
 
 See [Privacy and the `--no-llm` story](privacy.md) for how the optional model
 pass fits into this without weakening the guarantee, and

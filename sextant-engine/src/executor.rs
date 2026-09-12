@@ -8,7 +8,7 @@
 //! no network, so it runs offline and under `--no-llm` (FR-21).
 //!
 //! Every input-facing path is bounded by [`Limits`] (FR-24): recursion depth,
-//! array length, total field count, total work, and an optional wall-clock
+//! array length, total field count, owned output bytes, total work, and an optional wall-clock
 //! deadline. The executor never panics on any input; a malformed IR or hostile
 //! sample yields a localized failure, not a crash.
 //!
@@ -184,6 +184,11 @@ pub enum FailureReason {
         /// The configured limit.
         limit: usize,
     },
+    /// The owned output and parsing-metadata byte budget was reached.
+    OutputLimit {
+        /// The configured byte budget.
+        limit: usize,
+    },
     /// The total work limit was reached.
     StepLimit {
         /// The configured limit.
@@ -226,7 +231,11 @@ pub enum CheckKind {
 /// [`ParseFailure`] inside the result, not a crash.
 #[must_use]
 pub fn execute(format: &Format, sample: &[u8], limits: &Limits) -> Execution {
-    let deadline = limits.timeout.map(|timeout| Instant::now() + timeout);
+    // Durations beyond the clock's representable range cannot expire during
+    // this run. Work and output budgets still apply to those configurations.
+    let deadline = limits
+        .timeout
+        .and_then(|timeout| Instant::now().checked_add(timeout));
     let mut ctx = Ctx {
         sample,
         default_endianness: format.endianness,
@@ -236,13 +245,19 @@ pub fn execute(format: &Format, sample: &[u8], limits: &Limits) -> Execution {
         steps: 0,
         steps_since_clock: 0,
         total_fields: 0,
+        output_bytes: 0,
         leaf_ranges: Vec::new(),
         checks: Vec::new(),
         scopes: Vec::new(),
         failure: None,
     };
 
-    let (fields, consumed) = ctx.parse_structure(&format.root, 0, sample.len(), 0);
+    let (fields, consumed) = if ctx.check_deadline(0) {
+        ctx.parse_structure(&format.root, 0, sample.len(), 0)
+    } else {
+        (Vec::new(), 0)
+    };
+    ctx.check_deadline(consumed);
 
     Execution {
         fields,
@@ -256,9 +271,9 @@ pub fn execute(format: &Format, sample: &[u8], limits: &Limits) -> Execution {
 
 /// A name bound while parsing the current structure: its integer value when it
 /// has one, and its absolute byte range.
-#[derive(Debug, Clone)]
-struct Binding {
-    name: String,
+#[derive(Debug, Clone, Copy)]
+struct Binding<'a> {
+    name: &'a str,
     value: Option<i128>,
     start: usize,
     end: usize,
@@ -266,14 +281,14 @@ struct Binding {
 
 /// A checksum constraint deferred until its enclosing structure is fully parsed,
 /// so its covered range can reference any sibling, including one parsed later.
-struct PendingChecksum {
-    field: Option<String>,
+struct PendingChecksum<'a> {
+    field: Option<&'a str>,
     at: usize,
     width: u8,
     stored: i128,
     algorithm: ChecksumAlgorithm,
-    from: RangeAnchor,
-    to: RangeAnchor,
+    from: &'a RangeAnchor,
+    to: &'a RangeAnchor,
 }
 
 /// The successful parse of a single field.
@@ -293,13 +308,14 @@ struct Ctx<'a> {
     steps: u64,
     steps_since_clock: u64,
     total_fields: usize,
+    output_bytes: usize,
     leaf_ranges: Vec<(usize, usize)>,
     checks: Vec<ConstraintCheck>,
-    scopes: Vec<Vec<Binding>>,
+    scopes: Vec<Vec<Binding<'a>>>,
     failure: Option<ParseFailure>,
 }
 
-impl Ctx<'_> {
+impl<'a> Ctx<'a> {
     fn failed(&self) -> bool {
         self.failure.is_some()
     }
@@ -314,8 +330,11 @@ impl Ctx<'_> {
     /// Charge `units` of work and check the work and wall-clock limits.
     /// Returns `false` (after recording a failure) when a limit is hit.
     fn charge(&mut self, units: u64, at: usize) -> bool {
-        self.steps = self.steps.saturating_add(units);
-        if self.steps > self.limits.max_steps {
+        if self.failed() {
+            return false;
+        }
+        let total = self.steps.checked_add(units);
+        if total.is_none_or(|total| total > self.limits.max_steps) {
             self.fail(
                 at,
                 FailureReason::StepLimit {
@@ -324,6 +343,7 @@ impl Ctx<'_> {
             );
             return false;
         }
+        self.steps = total.unwrap_or(self.limits.max_steps);
         if let Some(deadline) = self.deadline {
             self.steps_since_clock = self.steps_since_clock.saturating_add(units);
             if self.steps_since_clock >= CLOCK_CHECK_INTERVAL {
@@ -337,11 +357,64 @@ impl Ctx<'_> {
         true
     }
 
+    fn check_deadline(&mut self, at: usize) -> bool {
+        if self.failed() {
+            return false;
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.fail(at, FailureReason::Timeout);
+            return false;
+        }
+        true
+    }
+
+    /// Account before allocating. Four slots per pushed vector entry cover
+    /// initial capacity and geometric growth; dropped allocations stay charged.
+    fn retain(&mut self, bytes: usize, at: usize) -> bool {
+        let Some(total) = self.output_bytes.checked_add(bytes) else {
+            self.fail(
+                at,
+                FailureReason::OutputLimit {
+                    limit: self.limits.max_output_bytes,
+                },
+            );
+            return false;
+        };
+        if total > self.limits.max_output_bytes {
+            self.fail(
+                at,
+                FailureReason::OutputLimit {
+                    limit: self.limits.max_output_bytes,
+                },
+            );
+            return false;
+        }
+        if !self.charge((bytes as u64).div_ceil(64), at) {
+            return false;
+        }
+        self.output_bytes = total;
+        true
+    }
+
+    fn copy_string(&mut self, text: &str, at: usize) -> Option<String> {
+        self.retain(text.len(), at).then(|| text.to_owned())
+    }
+
+    /// Reserve the fixed check, bounded diagnostic scratch space, and its name
+    /// before constructing any owned diagnostic text.
+    fn retain_check(&mut self, name: Option<&str>, at: usize) -> bool {
+        let bytes = (4 * std::mem::size_of::<ConstraintCheck>() + 512)
+            .saturating_add(name.map_or(0, str::len));
+        self.retain(bytes, at)
+    }
+
     /// Count one field instance against the total-field limit. Returns `false`
     /// (after recording a failure) when the limit is hit.
     fn account_field(&mut self, at: usize) -> bool {
-        self.total_fields += 1;
-        if self.total_fields > self.limits.max_total_fields {
+        if self.total_fields >= self.limits.max_total_fields {
             self.fail(
                 at,
                 FailureReason::FieldLimit {
@@ -350,41 +423,47 @@ impl Ctx<'_> {
             );
             return false;
         }
+        self.total_fields += 1;
         true
     }
 
     /// Resolve a referenced field's integer value in the current scope chain.
     fn resolve_value(&mut self, name: &str, at: usize) -> Option<i128> {
-        for frame in self.scopes.iter().rev() {
-            if let Some(binding) = frame.iter().rev().find(|b| b.name == name) {
+        for frame in (0..self.scopes.len()).rev() {
+            for index in (0..self.scopes[frame].len()).rev() {
+                let binding = self.scopes[frame][index];
+                if !self.charge(1 + binding.name.len().min(name.len()) as u64, at) {
+                    return None;
+                }
+                if binding.name != name {
+                    continue;
+                }
                 return match binding.value {
                     Some(value) => Some(value),
                     None => {
-                        self.fail(
-                            at,
-                            FailureReason::ReferenceNotInteger {
-                                field: name.to_owned(),
-                            },
-                        );
+                        let field = self.copy_string(name, at)?;
+                        self.fail(at, FailureReason::ReferenceNotInteger { field });
                         None
                     }
                 };
             }
         }
-        self.fail(
-            at,
-            FailureReason::ReferenceUnresolved {
-                field: name.to_owned(),
-            },
-        );
+        let field = self.copy_string(name, at)?;
+        self.fail(at, FailureReason::ReferenceUnresolved { field });
         None
     }
 
     /// Resolve a referenced field's byte range in the current scope chain.
-    fn resolve_range(&self, name: &str) -> Option<(usize, usize)> {
-        for frame in self.scopes.iter().rev() {
-            if let Some(binding) = frame.iter().rev().find(|b| b.name == name) {
-                return Some((binding.start, binding.end));
+    fn resolve_range(&mut self, name: &str, at: usize) -> Option<(usize, usize)> {
+        for frame in (0..self.scopes.len()).rev() {
+            for index in (0..self.scopes[frame].len()).rev() {
+                let binding = self.scopes[frame][index];
+                if !self.charge(1 + binding.name.len().min(name.len()) as u64, at) {
+                    return None;
+                }
+                if binding.name == name {
+                    return Some((binding.start, binding.end));
+                }
             }
         }
         None
@@ -411,15 +490,18 @@ impl Ctx<'_> {
     /// the last field.
     fn parse_structure(
         &mut self,
-        structure: &sextant_ir::Structure,
+        structure: &'a sextant_ir::Structure,
         base: usize,
         limit: usize,
         depth: usize,
     ) -> (Vec<FieldInstance>, usize) {
         let mut fields = Vec::new();
         let mut cursor = base;
+        if !self.retain(4 * std::mem::size_of::<Vec<Binding<'a>>>(), base) {
+            return (fields, cursor);
+        }
         self.scopes.push(Vec::new());
-        let mut pending: Vec<PendingChecksum> = Vec::new();
+        let mut pending: Vec<PendingChecksum<'a>> = Vec::new();
 
         for field in &structure.fields {
             if self.failed() {
@@ -434,10 +516,16 @@ impl Ctx<'_> {
                 break;
             };
             self.note_pending_checksum(field, &parsed, &mut pending);
+            if self.failed() {
+                break;
+            }
+            if field.name.is_some() && !self.retain(4 * std::mem::size_of::<Binding<'a>>(), start) {
+                break;
+            }
             if let Some(frame) = self.scopes.last_mut() {
                 if let Some(name) = &field.name {
                     frame.push(Binding {
-                        name: name.clone(),
+                        name,
                         value: parsed.int_value,
                         start: parsed.instance.start,
                         end: parsed.instance.end,
@@ -457,7 +545,7 @@ impl Ctx<'_> {
     /// offset, otherwise continuing sequentially from `cursor`.
     fn field_start(
         &mut self,
-        field: &Field,
+        field: &'a Field,
         base: usize,
         cursor: usize,
         limit: usize,
@@ -490,12 +578,18 @@ impl Ctx<'_> {
     /// Parse one field at `start`, bounded above by `limit`.
     fn parse_field(
         &mut self,
-        field: &Field,
+        field: &'a Field,
         start: usize,
         limit: usize,
         depth: usize,
     ) -> Option<Parsed> {
         if !self.charge(1, start) || !self.account_field(start) {
+            return None;
+        }
+        let storage = (4 * std::mem::size_of::<FieldInstance>()
+            + 4 * std::mem::size_of::<(usize, usize)>())
+        .saturating_add(field.name.as_ref().map_or(0, String::len));
+        if !self.retain(storage, start) {
             return None;
         }
         match &field.kind {
@@ -551,7 +645,7 @@ impl Ctx<'_> {
 
     fn parse_integer(
         &mut self,
-        field: &Field,
+        field: &'a Field,
         start: usize,
         limit: usize,
         width: u8,
@@ -565,6 +659,9 @@ impl Ctx<'_> {
         self.leaf_ranges.push((start, span));
         self.check_constant(field, bytes, start);
         self.check_int_range(field, value, start);
+        if self.failed() {
+            return None;
+        }
         Some(Parsed {
             instance: FieldInstance {
                 name: field.name.clone(),
@@ -580,7 +677,7 @@ impl Ctx<'_> {
 
     fn parse_enum(
         &mut self,
-        field: &Field,
+        field: &'a Field,
         start: usize,
         limit: usize,
         width: u8,
@@ -591,15 +688,33 @@ impl Ctx<'_> {
         let bytes = &self.sample[start..span];
         let order = endianness.unwrap_or(self.default_endianness);
         let value = decode_int(bytes, order, sextant_ir::Signedness::Unsigned);
-        let name = self
-            .format
-            .enums
-            .get(enum_ref)
-            .and_then(|def| def.variants.iter().find(|variant| variant.value == value))
-            .map(|variant| variant.name.clone());
+        // Charge key comparison work before the map lookup, then each variant
+        // examined. Enum definitions are not required to have been validated.
+        let map_work = enum_ref
+            .len()
+            .saturating_mul(self.format.enums.len().max(1));
+        if !self.charge(map_work as u64, start) {
+            return None;
+        }
+        let format = self.format;
+        let mut name = None;
+        if let Some(def) = format.enums.get(enum_ref) {
+            for variant in &def.variants {
+                if !self.charge(1, start) {
+                    return None;
+                }
+                if variant.value == value {
+                    name = Some(self.copy_string(&variant.name, start)?);
+                    break;
+                }
+            }
+        }
         self.leaf_ranges.push((start, span));
         self.check_constant(field, bytes, start);
         self.check_int_range(field, value, start);
+        if self.failed() {
+            return None;
+        }
         Some(Parsed {
             instance: FieldInstance {
                 name: field.name.clone(),
@@ -638,7 +753,7 @@ impl Ctx<'_> {
     /// rule.
     fn parse_sized(
         &mut self,
-        field: &Field,
+        field: &'a Field,
         start: usize,
         limit: usize,
         shape: ValueShape,
@@ -722,7 +837,7 @@ impl Ctx<'_> {
         let last = limit - term.len();
         let mut pos = start;
         while pos <= last {
-            if !self.charge(1, pos) {
+            if !self.charge(term.len() as u64, pos) {
                 return None;
             }
             if &self.sample[pos..pos + term.len()] == term {
@@ -738,7 +853,7 @@ impl Ctx<'_> {
     /// instance.
     fn finish_sized(
         &mut self,
-        field: &Field,
+        field: &'a Field,
         start: usize,
         value_end: usize,
         consumed_end: usize,
@@ -747,10 +862,21 @@ impl Ctx<'_> {
         self.leaf_ranges.push((start, consumed_end));
         let value_bytes = &self.sample[start..value_end];
         self.check_constant(field, value_bytes, start);
+        if self.failed() {
+            return None;
+        }
         let value = match shape {
             ValueShape::Bytes => Value::Bytes,
             ValueShape::Opaque => Value::Opaque,
-            ValueShape::Text(encoding) => Value::Text(decode_text(value_bytes, encoding)),
+            ValueShape::Text(encoding) => {
+                // Lossy UTF-8 expands one byte to at most three bytes. Allow
+                // another factor of two for String growth during decoding.
+                let storage = value_bytes.len().min(MAX_TEXT_PREVIEW_BYTES) * 6;
+                if !self.retain(storage, start) {
+                    return None;
+                }
+                Value::Text(decode_text(value_bytes, encoding))
+            }
         };
         Some(Parsed {
             instance: FieldInstance {
@@ -768,8 +894,8 @@ impl Ctx<'_> {
     /// Parse an array field according to its count rule.
     fn parse_array(
         &mut self,
-        field: &Field,
-        element: &Field,
+        field: &'a Field,
+        element: &'a Field,
         count: &CountRule,
         start: usize,
         limit: usize,
@@ -885,14 +1011,27 @@ impl Ctx<'_> {
     }
 
     /// Check a field's constant constraints against the bytes it parsed.
-    fn check_constant(&mut self, field: &Field, bytes: &[u8], at: usize) {
+    fn check_constant(&mut self, field: &'a Field, bytes: &[u8], at: usize) {
         for constraint in &field.constraints {
+            if !self.charge(1, at) {
+                return;
+            }
             if let Constraint::Constant { value } = constraint {
+                if !self.retain_check(field.name.as_deref(), at) {
+                    return;
+                }
+                if value.as_slice().len() == bytes.len() && !self.charge(bytes.len() as u64, at) {
+                    return;
+                }
                 let passed = value.as_slice() == bytes;
                 let detail = if passed {
                     "constant matched".to_owned()
                 } else {
-                    format!("expected {}, found {}", value.to_hex(), hex_of(bytes))
+                    format!(
+                        "expected {}, found {}",
+                        hex_of(value.as_slice()),
+                        hex_of(bytes)
+                    )
                 };
                 self.checks.push(ConstraintCheck {
                     field: field.name.clone(),
@@ -906,9 +1045,15 @@ impl Ctx<'_> {
     }
 
     /// Check a field's integer-range constraints against its decoded value.
-    fn check_int_range(&mut self, field: &Field, value: i128, at: usize) {
+    fn check_int_range(&mut self, field: &'a Field, value: i128, at: usize) {
         for constraint in &field.constraints {
+            if !self.charge(1, at) {
+                return;
+            }
             if let Constraint::IntRange { min, max } = constraint {
+                if !self.retain_check(field.name.as_deref(), at) {
+                    return;
+                }
                 let passed = value >= *min && value <= *max;
                 let detail = if passed {
                     format!("{value} within {min}..={max}")
@@ -930,13 +1075,19 @@ impl Ctx<'_> {
     /// structure has parsed every sibling its covered range might reference.
     fn note_pending_checksum(
         &mut self,
-        field: &Field,
+        field: &'a Field,
         parsed: &Parsed,
-        pending: &mut Vec<PendingChecksum>,
+        pending: &mut Vec<PendingChecksum<'a>>,
     ) {
         for constraint in &field.constraints {
+            if !self.charge(1, parsed.instance.start) {
+                return;
+            }
             if let Constraint::Checksum { spec } = constraint {
                 let start = parsed.instance.start;
+                if !self.retain(4 * std::mem::size_of::<PendingChecksum<'a>>(), start) {
+                    return;
+                }
                 let width = (parsed.instance.end - start).min(8) as u8;
                 let stored = match parsed.int_value {
                     Some(value) => value,
@@ -950,29 +1101,35 @@ impl Ctx<'_> {
                     ),
                 };
                 pending.push(PendingChecksum {
-                    field: field.name.clone(),
+                    field: field.name.as_deref(),
                     at: parsed.instance.start,
                     width,
                     stored,
                     algorithm: spec.algorithm,
-                    from: spec.covered.from.clone(),
-                    to: spec.covered.to.clone(),
+                    from: &spec.covered.from,
+                    to: &spec.covered.to,
                 });
             }
         }
     }
 
     /// Evaluate the deferred checksum constraints of one structure.
-    fn evaluate_pending_checksums(&mut self, pending: Vec<PendingChecksum>) {
+    fn evaluate_pending_checksums(&mut self, pending: Vec<PendingChecksum<'a>>) {
         for item in pending {
+            if !self.charge(1, item.at) || !self.retain_check(item.field, item.at) {
+                break;
+            }
             let check = self.evaluate_checksum(&item);
             self.checks.push(check);
+            if self.failed() {
+                break;
+            }
         }
     }
 
-    fn evaluate_checksum(&mut self, item: &PendingChecksum) -> ConstraintCheck {
-        let from = self.anchor_offset(&item.from);
-        let to = self.anchor_offset(&item.to);
+    fn evaluate_checksum(&mut self, item: &PendingChecksum<'a>) -> ConstraintCheck {
+        let from = self.anchor_offset(item.from, item.at);
+        let to = self.anchor_offset(item.to, item.at);
         let (passed, detail) = match (from, to) {
             (Some(from), Some(to)) if from <= to && to <= self.sample.len() => {
                 // Hashing the covered range is work proportional to its length,
@@ -1008,7 +1165,7 @@ impl Ctx<'_> {
             ),
         };
         ConstraintCheck {
-            field: item.field.clone(),
+            field: item.field.map(str::to_owned),
             at: item.at,
             kind: CheckKind::Checksum(item.algorithm),
             passed,
@@ -1017,8 +1174,8 @@ impl Ctx<'_> {
     }
 
     /// Resolve a checksum range anchor to an absolute byte offset.
-    fn anchor_offset(&self, anchor: &RangeAnchor) -> Option<usize> {
-        let (start, end) = self.resolve_range(anchor.field().as_str())?;
+    fn anchor_offset(&mut self, anchor: &RangeAnchor, at: usize) -> Option<usize> {
+        let (start, end) = self.resolve_range(anchor.field().as_str(), at)?;
         match anchor {
             RangeAnchor::FieldStart { .. } => Some(start),
             RangeAnchor::FieldEnd { .. } => Some(end),

@@ -130,6 +130,9 @@ pub fn refine(format: &Format, samples: &[&[u8]], limits: &Limits) -> Refinement
     let mut history = Vec::new();
 
     for _ in 0..MAX_PASSES {
+        if best_score.overall >= 1.0 {
+            break;
+        }
         let proposals = enumerate(&best);
         let mut chosen: Option<(Format, Score, String)> = None;
 
@@ -141,7 +144,8 @@ pub fn refine(format: &Format, samples: &[&[u8]], limits: &Limits) -> Refinement
                 continue;
             }
             let score = score_with(&candidate, samples, limits, weights);
-            if score.overall > best_score.overall + MIN_GAIN
+            if score.preserves_verified_fit(&best_score)
+                && score.overall > best_score.overall + MIN_GAIN
                 && chosen
                     .as_ref()
                     .is_none_or(|(_, current, _)| score.overall > current.overall)

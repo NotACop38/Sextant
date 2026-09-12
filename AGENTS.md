@@ -4,7 +4,7 @@ This file is the operating manual for AI coding agents working in this repositor
 
 ## The project
 
-Sextant is a command-line reverse-engineering tool that infers the structure of unknown binary file formats and network protocols from sample data, then generates parsers it has verified against those samples (Kaitai, ImHex, Wireshark, 010), with an honest per-field confidence report. The defining property is verification: every structural hypothesis is executed natively against the bytes and scored, and a language model may propose semantics and refinements, but its proposals are accepted only when the executor confirms they improve the fit. Protect that property above all.
+Sextant is a command-line reverse-engineering tool that infers the structure of unknown binary file formats and network protocols from sample data, then exports parser specifications (Kaitai, ImHex, Wireshark, 010), with an honest per-field confidence report. Native fit and target runtime verification are separate evidence; never claim the latter from the former. The defining property is verification: every structural hypothesis is executed natively against the bytes and scored, and a language model may propose semantics and refinements, but its proposals are accepted only when the executor confirms they improve the fit. Protect that property above all.
 
 ## Authoritative documents (read these first)
 

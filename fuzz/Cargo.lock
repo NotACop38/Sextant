@@ -269,6 +269,7 @@ name = "sextant-export"
 version = "0.1.0"
 dependencies = [
  "sextant-ir",
+ "tempfile",
 ]
 
 [[package]]

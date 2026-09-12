@@ -55,10 +55,21 @@ language-model pass, and only when you opt into it.
 - [Privacy and the `--no-llm` story](docs/privacy.md) explains what is and is
   not transmitted, and how to guarantee a fully offline run.
 - [Model data handling](docs/model-data-handling.md) is the detailed note on
-  exactly what the model pass sends, how it is bounded by the per-sample byte
-  cap and the call and budget limits, and how to turn it off. API keys are read
+  exactly what the model pass sends, the byte-preview and call limits and the limitations of spend accounting, and how to turn it off. API keys are read
   only from the environment or a config file, never from a command-line flag.
 
 The verification property is independent of mode: a hypothesis is accepted only
 because the native executor confirmed it parsed your samples, so enabling the
 model never lowers the verified parse score.
+
+## Verification boundaries
+
+Native fit is evidence about retained samples, not proof of semantic correctness,
+all unseen inputs, or generated code in another runtime. Model and report labels
+remain untrusted data. Ordinary exports are validated translations of a supported
+IR subset; run external parser checks before relying on them.
+
+Optional Kaitai cross-validation executes configured local tools. Private scratch
+storage, Python isolated mode, process deadlines, and output caps reduce exposure,
+but this is not a sandbox for a compromised compiler or Python installation.
+Use trusted tools and isolate analysis of potentially malicious samples.

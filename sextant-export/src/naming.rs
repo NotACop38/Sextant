@@ -7,6 +7,26 @@
 //! never collide.
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
+
+/// Keep arbitrary text on one physical source line inside a line comment.
+pub(crate) fn comment_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{2028}' | '\u{2029}' => {
+                let _ = write!(out, "\\u{:04x}", u32::from(ch));
+            }
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
 
 /// Turn an arbitrary name into a `snake_case` identifier valid in every target.
 ///

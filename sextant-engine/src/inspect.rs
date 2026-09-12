@@ -7,13 +7,14 @@
 //! each field's bytes can optionally be colored (FR-35).
 //!
 //! Rendering is pure and bounded. The executor enforces the resource limits
-//! (FR-24), and the decoded values shown are previews capped in length, so a
-//! hostile sample cannot make the view allocate without bound. Color assignment
+//! (FR-24), and annotation storage and rendered output each obey its output byte
+//! budget. A truncated view says so explicitly. Color assignment
 //! uses a compact list of byte ranges rather than a dense per-byte map, so a
 //! multi-megabyte sample cannot force an `O(sample_len)` color allocation.
 //! With color off the output is plain text, which is what the snapshot tests pin.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::fmt::Write as _;
 
 use sextant_ir::{Field, Kind};
@@ -68,6 +69,68 @@ struct Row {
     color: Option<usize>,
 }
 
+/// A bounded writer that rejects further formatting once its byte budget is
+/// exhausted. Allocation capacity also stays within that budget.
+struct Output {
+    text: String,
+    limit: usize,
+    truncated: bool,
+}
+
+impl fmt::Write for Output {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        if self.truncated {
+            return Err(fmt::Error);
+        }
+        let available = self.limit.saturating_sub(self.text.len());
+        let mut take = text.len().min(available);
+        while !text.is_char_boundary(take) {
+            take -= 1;
+        }
+        let needed = self.text.len() + take;
+        if needed > self.text.capacity() {
+            let capacity = self
+                .text
+                .capacity()
+                .saturating_mul(2)
+                .max(64)
+                .max(needed)
+                .min(self.limit);
+            if self
+                .text
+                .try_reserve_exact(capacity - self.text.len())
+                .is_err()
+            {
+                self.truncated = true;
+                return Err(fmt::Error);
+            }
+        }
+        self.text.push_str(&text[..take]);
+        if take < text.len() {
+            self.truncated = true;
+            return Err(fmt::Error);
+        }
+        Ok(())
+    }
+}
+
+impl Output {
+    fn finish(mut self) -> String {
+        if self.truncated {
+            const MARKER: &str = "\n[inspect output truncated: byte limit reached]\n";
+            let marker = &MARKER[..MARKER.len().min(self.limit)];
+            let mut keep = self.text.len().min(self.limit - marker.len());
+            while !self.text.is_char_boundary(keep) {
+                keep -= 1;
+            }
+            self.text.truncate(keep);
+            self.truncated = false;
+            let _ = self.write_str(marker);
+        }
+        self.text
+    }
+}
+
 /// A sparse record of which leaf field owns each painted byte range.
 ///
 /// Later paints overwrite earlier ones on overlap. Memory is proportional to
@@ -90,40 +153,43 @@ impl ByteColors {
         if len == 0 {
             return Vec::new();
         }
-        if self.ranges.is_empty() {
-            return vec![(0, len, None)];
-        }
-        let mut points = BTreeSet::new();
-        points.insert(0);
-        points.insert(len);
-        for &(start, end, _) in &self.ranges {
-            points.insert(start.min(len));
-            points.insert(end.min(len));
-        }
-        let points: Vec<usize> = points.into_iter().collect();
-        let mut segments = Vec::new();
-        for window in points.windows(2) {
-            let (a, b) = (window[0], window[1]);
-            if a >= b {
-                continue;
+        // Sweep endpoints while an ordered set tracks active paint indices.
+        // The highest index wins, preserving last-paint-wins in O(n log n).
+        let mut events = Vec::new();
+        for (paint, &(start, end, _)) in self.ranges.iter().enumerate() {
+            let (start, end) = (start.min(len), end.min(len));
+            if start < end {
+                events.push((start, true, paint));
+                events.push((end, false, paint));
             }
-            let color = self
-                .ranges
-                .iter()
-                .rev()
-                .find(|(start, end, _)| a >= *start && a < *end)
-                .map(|(_, _, index)| *index);
-            segments.push((a, b, color));
+        }
+        events.sort_unstable();
+        let mut active = BTreeSet::new();
+        let mut segments = Vec::new();
+        let mut previous = 0;
+        let mut event = 0;
+        while event < events.len() {
+            let point = events[event].0;
+            if previous < point {
+                let color = active.last().map(|&paint: &usize| self.ranges[paint].2);
+                segments.push((previous, point, color));
+            }
+            while event < events.len() && events[event].0 == point {
+                let (_, starts, paint) = events[event];
+                if starts {
+                    active.insert(paint);
+                } else {
+                    active.remove(&paint);
+                }
+                event += 1;
+            }
+            previous = point;
+        }
+        if previous < len {
+            let color = active.last().map(|&paint| self.ranges[paint].2);
+            segments.push((previous, len, color));
         }
         segments
-    }
-
-    fn color_at(&self, offset: usize) -> Option<usize> {
-        self.ranges
-            .iter()
-            .rev()
-            .find(|(start, end, _)| offset >= *start && offset < *end)
-            .map(|(_, _, index)| *index)
     }
 }
 
@@ -140,29 +206,36 @@ pub fn render(report: &Report, sample: &[u8], options: &InspectOptions) -> Strin
     // Build the annotation rows and a sparse per-range color map by walking the
     // IR and the parsed instances together. Color ranges are only recorded when
     // color output is requested, so a huge sample with color off stays cheap.
-    let mut rows = Vec::new();
-    let mut byte_color = ByteColors::default();
-    let mut leaf_counter = 0usize;
-    walk(
-        &report.format.root.fields,
-        &execution.fields,
-        sample,
-        0,
-        &mut rows,
-        options.color.then_some(&mut byte_color),
-        &mut leaf_counter,
-    );
+    let mut annotations = Annotations {
+        rows: Vec::new(),
+        byte_color: ByteColors::default(),
+        leaf_counter: 0,
+        remaining: options.limits.max_output_bytes,
+        truncated: false,
+        color: options.color,
+    };
+    annotations.walk(&report.format.root.fields, &execution.fields, sample, 0);
 
-    let mut out = String::new();
+    let mut out = Output {
+        text: String::new(),
+        limit: options.limits.max_output_bytes,
+        truncated: false,
+    };
     render_header(&mut out, report, sample, &execution.failure);
-    render_table(&mut out, &rows, options.color);
-    render_hex(&mut out, sample, &byte_color, options.color);
-    out
+    render_table(&mut out, &annotations.rows, options.color);
+    if annotations.truncated {
+        let _ = writeln!(
+            out,
+            "Note: annotation rows truncated by the output byte budget."
+        );
+    }
+    render_hex(&mut out, sample, &annotations.byte_color, options.color);
+    out.finish()
 }
 
 /// Render the one-line header with the format name, fit score, and sample size.
 fn render_header(
-    out: &mut String,
+    out: &mut Output,
     report: &Report,
     sample: &[u8],
     failure: &Option<crate::executor::ParseFailure>,
@@ -170,7 +243,8 @@ fn render_header(
     let _ = writeln!(
         out,
         "Format: {} (fit score {:.3})",
-        report.format.name, report.score.overall
+        label_preview(&report.format.name, 128),
+        report.score.overall
     );
     let _ = writeln!(out, "Sample: {} bytes", sample.len());
     if let Some(failure) = failure {
@@ -184,7 +258,7 @@ fn render_header(
 }
 
 /// Render the annotated field table.
-fn render_table(out: &mut String, rows: &[Row], color: bool) {
+fn render_table(out: &mut Output, rows: &[Row], color: bool) {
     let _ = writeln!(
         out,
         "{:>8}  {:>6}  {:<24}  {:<10}  {:<16}  {:<22}  {:>10}",
@@ -202,11 +276,15 @@ fn render_table(out: &mut String, rows: &[Row], color: bool) {
         "-".repeat(10),
     );
     for row in rows {
-        let indented = format!("{}{}", "  ".repeat(row.depth), row.name);
+        if out.truncated {
+            break;
+        }
+        let depth = row.depth.min(64);
+        let indented = format!("{}{}", "  ".repeat(depth), row.name);
         // The color escapes do not occupy display columns, so compute the name's
         // visible width from the uncolored text and pad to it manually; padding
         // through `{:<24}` would miscount the escape bytes and break alignment.
-        let display_len = row.depth * 2 + row.name.chars().count();
+        let display_len = depth * 2 + row.name.chars().count();
         let rendered = if color {
             colorize(&indented, row.color)
         } else {
@@ -232,7 +310,10 @@ fn render_table(out: &mut String, rows: &[Row], color: bool) {
 }
 
 /// Render the hex dump, optionally coloring each byte by the field that owns it.
-fn render_hex(out: &mut String, sample: &[u8], byte_color: &ByteColors, color: bool) {
+fn render_hex(out: &mut Output, sample: &[u8], byte_color: &ByteColors, color: bool) {
+    if out.truncated {
+        return;
+    }
     let _ = writeln!(out, "Hex:");
     if sample.is_empty() {
         let _ = writeln!(out, "  (empty sample)");
@@ -247,7 +328,7 @@ fn render_hex(out: &mut String, sample: &[u8], byte_color: &ByteColors, color: b
     };
     let mut segment_index = 0usize;
     let mut offset = 0;
-    while offset < sample.len() {
+    while offset < sample.len() && !out.truncated {
         let end = (offset + HEX_COLUMNS).min(sample.len());
         let mut hex = String::new();
         let mut ascii = String::new();
@@ -267,8 +348,7 @@ fn render_hex(out: &mut String, sample: &[u8], byte_color: &ByteColors, color: b
                     .and_then(|(start, end, color)| {
                         (*start <= byte_offset && byte_offset < *end).then_some(*color)
                     })
-                    .flatten()
-                    .or_else(|| byte_color.color_at(byte_offset));
+                    .flatten();
                 hex.push_str(&colorize(&pair, paint));
             } else {
                 hex.push_str(&pair);
@@ -284,8 +364,7 @@ fn render_hex(out: &mut String, sample: &[u8], byte_color: &ByteColors, color: b
                     .and_then(|(start, end, color)| {
                         (*start <= byte_offset && byte_offset < *end).then_some(*color)
                     })
-                    .flatten()
-                    .or_else(|| byte_color.color_at(byte_offset));
+                    .flatten();
                 ascii.push_str(&colorize(&glyph.to_string(), paint));
             } else {
                 ascii.push(glyph);
@@ -309,97 +388,82 @@ fn colorize(text: &str, color: Option<usize>) -> String {
     }
 }
 
-/// Walk the IR fields and their parsed instances in lockstep, emitting a [`Row`]
-/// for each and recording leaf byte ranges in `byte_color` when present.
-fn walk(
-    fields: &[Field],
-    instances: &[FieldInstance],
-    sample: &[u8],
-    depth: usize,
-    rows: &mut Vec<Row>,
-    byte_color: Option<&mut ByteColors>,
-    leaf_counter: &mut usize,
-) {
-    // Re-borrow through a single mutable option for the recursive walk.
-    let mut color = byte_color;
-    for (field, instance) in fields.iter().zip(instances.iter()) {
-        emit_row(
-            field,
-            instance,
-            sample,
-            depth,
-            rows,
-            color.as_deref_mut(),
-            leaf_counter,
-        );
-    }
+/// Annotation storage is budgeted before constructing rows. The allowance
+/// covers vector growth, short strings, paint ranges, endpoint events, active
+/// sweep nodes and segments. No source label is copied in full.
+struct Annotations {
+    rows: Vec<Row>,
+    byte_color: ByteColors,
+    leaf_counter: usize,
+    remaining: usize,
+    truncated: bool,
+    color: bool,
 }
 
-/// Emit the row for one field instance and recurse into its children.
-fn emit_row(
-    field: &Field,
-    instance: &FieldInstance,
-    sample: &[u8],
-    depth: usize,
-    rows: &mut Vec<Row>,
-    mut byte_color: Option<&mut ByteColors>,
-    leaf_counter: &mut usize,
-) {
-    let size = instance.end.saturating_sub(instance.start);
-    let is_leaf = !matches!(instance.value, Value::Struct(_) | Value::Array(_));
-    let color = if is_leaf {
-        let index = *leaf_counter;
-        *leaf_counter += 1;
-        if let Some(map) = byte_color.as_mut() {
-            map.paint(instance.start, instance.end, index);
-        }
-        Some(index)
-    } else {
-        None
-    };
-
-    rows.push(Row {
-        depth,
-        offset: instance.start,
-        size,
-        name: instance
-            .name
-            .clone()
-            .or_else(|| field.name.clone())
-            .unwrap_or_else(|| "(unnamed)".to_owned()),
-        role: role_label(instance.role.or(field.role)),
-        type_label: kind_label(&field.kind),
-        value: value_preview(&instance.value, sample, instance.start, instance.end),
-        confidence: field.confidence.get(),
-        color,
-    });
-
-    match (&field.kind, &instance.value) {
-        (Kind::Struct { structure }, Value::Struct(children)) => {
-            walk(
-                &structure.fields,
-                children,
-                sample,
-                depth + 1,
-                rows,
-                byte_color,
-                leaf_counter,
-            );
-        }
-        (Kind::Array { element, .. }, Value::Array(elements)) => {
-            for element_instance in elements {
-                emit_row(
-                    element,
-                    element_instance,
-                    sample,
-                    depth + 1,
-                    rows,
-                    byte_color.as_deref_mut(),
-                    leaf_counter,
-                );
+impl Annotations {
+    fn walk(&mut self, fields: &[Field], instances: &[FieldInstance], sample: &[u8], depth: usize) {
+        for (field, instance) in fields.iter().zip(instances) {
+            if !self.emit_row(field, instance, sample, depth) {
+                break;
             }
         }
-        _ => {}
+    }
+
+    fn emit_row(
+        &mut self,
+        field: &Field,
+        instance: &FieldInstance,
+        sample: &[u8],
+        depth: usize,
+    ) -> bool {
+        const ROW_STORAGE_BYTES: usize = 4096;
+        if self.remaining < ROW_STORAGE_BYTES {
+            self.truncated = true;
+            return false;
+        }
+        self.remaining -= ROW_STORAGE_BYTES;
+        let size = instance.end.saturating_sub(instance.start);
+        let is_leaf = !matches!(instance.value, Value::Struct(_) | Value::Array(_));
+        let color = if is_leaf {
+            let index = self.leaf_counter;
+            self.leaf_counter += 1;
+            if self.color {
+                self.byte_color.paint(instance.start, instance.end, index);
+            }
+            Some(index)
+        } else {
+            None
+        };
+        let name = instance
+            .name
+            .as_deref()
+            .or(field.name.as_deref())
+            .unwrap_or("(unnamed)");
+        self.rows.push(Row {
+            depth,
+            offset: instance.start,
+            size,
+            name: label_preview(name, 64),
+            role: role_label(instance.role.or(field.role)),
+            type_label: kind_label(&field.kind),
+            value: value_preview(&instance.value, sample, instance.start, instance.end),
+            confidence: field.confidence.get(),
+            color,
+        });
+        match (&field.kind, &instance.value) {
+            (Kind::Struct { structure }, Value::Struct(children)) => {
+                self.walk(&structure.fields, children, sample, depth + 1);
+            }
+            (Kind::Array { element, .. }, Value::Array(elements)) => {
+                for child in elements {
+                    if !self.emit_row(element, child, sample, depth + 1) {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+        !self.truncated
     }
 }
 
@@ -414,7 +478,7 @@ fn value_preview(value: &Value, sample: &[u8], start: usize, end: usize) -> Stri
             }
         }
         Value::Enum { value, name } => match name {
-            Some(name) => format!("{name} ({value})"),
+            Some(name) => format!("{} ({value})", label_preview(name, VALUE_PREVIEW_BYTES * 2)),
             None => value.to_string(),
         },
         Value::Text(text) => format!("{:?}", truncate(text, VALUE_PREVIEW_BYTES * 2)),
@@ -447,14 +511,39 @@ fn hex_preview(sample: &[u8], start: usize, end: usize) -> String {
     out
 }
 
+/// Display untrusted names without terminal controls or embedded line breaks.
+/// Only a bounded prefix is visited, and escapes count against the preview cap.
+fn label_preview(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut count = 0;
+    for ch in text.chars() {
+        if ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}') {
+            for escaped in ch.escape_default() {
+                out.push(escaped);
+                count += 1;
+                if count > max {
+                    return truncate(&out, max);
+                }
+            }
+        } else {
+            out.push(ch);
+            count += 1;
+            if count > max {
+                return truncate(&out, max);
+            }
+        }
+    }
+    out
+}
+
 /// Truncate `text` to `max` characters, appending an ellipsis marker when cut.
 fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
+    if text.chars().take(max.saturating_add(1)).count() <= max {
         return text.to_owned();
     }
     let keep = max.saturating_sub(3);
     let mut out: String = text.chars().take(keep).collect();
-    out.push_str("...");
+    out.push_str(&"..."[..max.min(3)]);
     out
 }
 
@@ -523,5 +612,156 @@ mod tests {
         assert_eq!(colors.ranges.len(), 1);
         let segments = colors.segments(1 << 20);
         assert!(segments.len() <= 3);
+    }
+
+    #[test]
+    fn color_sweep_preserves_overlaps_gaps_and_last_paint_precedence() {
+        let mut colors = ByteColors::default();
+        for (start, end, paint) in [(2, 9, 0), (4, 7, 1), (6, 10, 2), (10, 11, 3), (20, 30, 4)] {
+            colors.paint(start, end, paint);
+        }
+        let segments = colors.segments(12);
+        for offset in 0..12 {
+            let expected = colors
+                .ranges
+                .iter()
+                .rev()
+                .find(|&&(start, end, _)| start <= offset && offset < end)
+                .map(|&(_, _, index)| index);
+            let actual = segments
+                .iter()
+                .find(|&&(start, end, _)| start <= offset && offset < end)
+                .expect("every byte, including gaps, has a segment")
+                .2;
+            assert_eq!(actual, expected, "offset {offset}");
+        }
+        assert!(colors.segments(0).is_empty());
+        assert_eq!(ByteColors::default().segments(12), vec![(0, 12, None)]);
+    }
+
+    #[test]
+    fn color_sweep_handles_many_disjoint_ranges() {
+        let mut colors = ByteColors::default();
+        for index in 0..100_000 {
+            colors.paint(index * 2, index * 2 + 1, index % PALETTE.len());
+        }
+        let segments = colors.segments(200_000);
+        assert_eq!(segments.len(), 200_000);
+        for (index, pair) in segments.chunks_exact(2).enumerate() {
+            assert_eq!(
+                pair[0],
+                (index * 2, index * 2 + 1, Some(index % PALETTE.len()))
+            );
+            assert_eq!(pair[1], (index * 2 + 1, index * 2 + 2, None));
+        }
+    }
+
+    #[test]
+    fn inspect_caps_hex_output_and_large_unicode_headers() {
+        let (mut report, _) = tlv_report_and_sample();
+        report.format.name = "é".repeat(65536);
+        report.format.root.fields = vec![
+            Field::new(Kind::Opaque, sextant_ir::Confidence::CERTAIN)
+                .with_size(sextant_ir::SizeRule::ToEnd),
+        ];
+        let options = InspectOptions {
+            color: true,
+            limits: Limits {
+                max_output_bytes: 4096,
+                ..Limits::default()
+            },
+        };
+        let view = render(&report, &vec![0; 1 << 20], &options);
+        assert!(view.len() <= 4096);
+        assert!(view.contains("inspect output truncated"));
+        assert!(view.contains("Format:"));
+    }
+
+    #[test]
+    fn inspect_caps_annotation_storage_and_enum_previews() {
+        let (mut report, _) = tlv_report_and_sample();
+        report.format.root.fields = vec![Field::new(
+            Kind::Array {
+                element: Box::new(Field::new(
+                    Kind::Integer {
+                        width: 1,
+                        signed: sextant_ir::Signedness::Unsigned,
+                        endianness: None,
+                    },
+                    sextant_ir::Confidence::CERTAIN,
+                )),
+                count: sextant_ir::CountRule::Fixed { count: 64 },
+            },
+            sextant_ir::Confidence::CERTAIN,
+        )];
+        let options = InspectOptions {
+            limits: Limits {
+                max_output_bytes: 65536,
+                ..Limits::default()
+            },
+            ..InspectOptions::default()
+        };
+        assert!(execute(&report.format, &[0; 64], &options.limits).succeeded());
+        let view = render(&report, &[0; 64], &options);
+        assert!(view.len() <= 65536);
+        assert!(view.contains("annotation rows truncated"));
+        let preview = value_preview(
+            &Value::Enum {
+                value: 1,
+                name: Some("v".repeat(65536)),
+            },
+            &[],
+            0,
+            0,
+        );
+        assert!(preview.len() < 64);
+    }
+
+    #[test]
+    fn output_budget_respects_small_limits_and_utf8_boundaries() {
+        for limit in 0..80 {
+            let mut out = Output {
+                text: String::new(),
+                limit,
+                truncated: false,
+            };
+            let _ = write!(out, "{}", "é".repeat(100));
+            let view = out.finish();
+            assert!(view.len() <= limit);
+        }
+    }
+
+    #[test]
+    fn inspect_escapes_controls_in_names_and_preserves_ordinary_unicode() {
+        let (mut report, _) = tlv_report_and_sample();
+        report.format.name = "Café\x1b]52;c;payload\x07\nformat".to_owned();
+        report.format.root.fields = vec![
+            Field::new(Kind::Opaque, sextant_ir::Confidence::CERTAIN)
+                .with_size(sextant_ir::SizeRule::ToEnd)
+                .with_name("field\n\x1b[31m"),
+        ];
+        let view = render(&report, &[0], &InspectOptions::default());
+        assert!(!view.contains('\x1b'));
+        assert!(!view.contains('\x07'));
+        assert!(view.contains("Café\\u{1b}]52;c;payload\\u{7}\\nformat"));
+        assert!(view.contains("field\\n\\u{1b}[31m"));
+        let preview = value_preview(
+            &Value::Enum {
+                value: 1,
+                name: Some("名\n\x1b".to_owned()),
+            },
+            &[],
+            0,
+            0,
+        );
+        assert_eq!(preview, "名\\n\\u{1b} (1)");
+        assert_eq!(
+            value_preview(&Value::Text("line\nnext".to_owned()), &[], 0, 0),
+            "\"line\\nnext\""
+        );
+        for max in 0..64 {
+            let preview = label_preview(&"\x1b".repeat(100), max);
+            assert!(preview.chars().count() <= max);
+        }
     }
 }
