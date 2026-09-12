@@ -70,6 +70,38 @@ pub struct Score {
     pub samples: Vec<SampleScore>,
 }
 
+impl Score {
+    /// Whether every supplied sample was fully covered without a parse failure,
+    /// gap, overlap, or failed constraint. This checks sample fit, not whether
+    /// inferred field boundaries or semantic labels are correct on unseen data.
+    #[must_use]
+    pub fn fully_verified(&self) -> bool {
+        !self.samples.is_empty() && self.samples.iter().all(SampleScore::fully_verified)
+    }
+
+    /// The common refinement gate: retain the full sample set, never lower the
+    /// aggregate fit, and never sacrifice a previously successful sample to
+    /// improve the average. Full verification already established for a sample
+    /// must also survive the proposal (FR-26, FR-31).
+    #[must_use]
+    pub fn preserves_verified_fit(&self, baseline: &Self) -> bool {
+        self.overall.is_finite()
+            && baseline.overall.is_finite()
+            && self.overall >= baseline.overall
+            && self.samples.len() == baseline.samples.len()
+            && self
+                .samples
+                .iter()
+                .zip(&baseline.samples)
+                .all(|(after, before)| {
+                    after.index == before.index
+                        && after.sample_len == before.sample_len
+                        && (!before.parsed || after.parsed)
+                        && (!before.fully_verified() || after.fully_verified())
+                })
+    }
+}
+
 /// The fit of an IR against one sample.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SampleScore {
@@ -97,6 +129,22 @@ pub struct SampleScore {
     pub constraints_passed: usize,
     /// The localized failure, when the parse did not reach a clean end.
     pub failure: Option<ParseFailure>,
+}
+
+impl SampleScore {
+    /// Whether this sample was completely consumed and every declared
+    /// constraint passed. Opaque bytes can satisfy this without revealing any
+    /// structure, so this is not a semantic confidence measure.
+    #[must_use]
+    pub fn fully_verified(&self) -> bool {
+        self.parsed
+            && self.failure.is_none()
+            && self.explained_bytes == self.sample_len
+            && self.overlap_bytes == 0
+            && self.gap_bytes == 0
+            && self.trailing_bytes == 0
+            && self.constraints_passed == self.constraints_total
+    }
 }
 
 /// Score `format` against `samples` with the default weights and limits.
@@ -318,5 +366,26 @@ mod tests {
         let empty: &[&[u8]] = &[];
         let score = score(&format, empty);
         assert_eq!(score.overall, 0.0);
+    }
+
+    #[test]
+    fn full_verification_requires_complete_coverage_and_passing_constraints() {
+        use sextant_ir::{Bytes, Confidence, Constraint, Field, Kind, SizeRule, Structure};
+        let mut format = sextant_ir::fixtures::tlv_ground_truth();
+        format.root = Structure::new(vec![
+            Field::new(Kind::Bytes, Confidence::CERTAIN).with_size(SizeRule::Fixed { bytes: 1 }),
+        ]);
+        let full = score(&format, &[&[1u8][..]]);
+        assert!(full.fully_verified());
+        let prefix = score(&format, &[&[1u8, 2][..]]);
+        assert!(prefix.samples[0].parsed);
+        assert!(!prefix.fully_verified());
+        format.root.fields[0]
+            .constraints
+            .push(Constraint::Constant {
+                value: Bytes::new(vec![2]),
+            });
+        assert!(!score(&format, &[&[1u8][..]]).fully_verified());
+        assert!(!score(&format, &[] as &[&[u8]]).fully_verified());
     }
 }

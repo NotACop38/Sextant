@@ -10,6 +10,73 @@ fn sextant() -> Command {
     Command::new(env!("CARGO_BIN_EXE_sextant"))
 }
 
+#[test]
+fn zero_timeout_writes_diagnostics_but_does_not_report_inference_success() {
+    let dir = std::env::temp_dir().join(format!("sextant-zero-timeout-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let output = sextant()
+        .current_dir(&dir)
+        .arg("infer")
+        .arg(corpus_dir("tlv/samples"))
+        .args(["--timeout", "0", "--out", "report.json"])
+        .output()
+        .unwrap();
+    let report_exists = dir.join("report.json").is_file();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        report_exists,
+        "failed verification must retain a diagnostic report"
+    );
+}
+
+#[test]
+fn output_creation_refuses_an_existing_file_and_preserves_its_bytes() {
+    let dir = std::env::temp_dir().join(format!("sextant-output-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("report.json");
+    std::fs::write(&out, b"keep this content").unwrap();
+    let result = sextant()
+        .current_dir(&dir)
+        .args(["infer"])
+        .arg(corpus_dir("tlv/samples"))
+        .args(["--out", "report.json"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert_eq!(std::fs::read(&out).unwrap(), b"keep this content");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn output_creation_refuses_a_dangling_symlink_outside_the_working_directory() {
+    let dir = std::env::temp_dir().join(format!("sextant-output-link-{}", std::process::id()));
+    let cwd = dir.join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let outside = dir.join("outside.json");
+    std::os::unix::fs::symlink(&outside, cwd.join("report.json")).unwrap();
+    let result = sextant()
+        .current_dir(&cwd)
+        .arg("infer")
+        .arg(corpus_dir("tlv/samples"))
+        .args(["--out", "report.json"])
+        .output()
+        .unwrap();
+    let escaped = outside.exists();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(
+        !escaped,
+        "an output symlink must not create an outside file"
+    );
+}
+
 /// Absolute path to a corpus directory, resolved from the workspace root so the
 /// test does not depend on the working directory.
 fn corpus_dir(relative: &str) -> PathBuf {

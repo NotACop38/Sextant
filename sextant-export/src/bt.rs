@@ -17,7 +17,7 @@ use sextant_ir::{
     Structure,
 };
 
-use crate::naming::{Allocator, pascal, snake};
+use crate::naming::{Allocator, comment_text, pascal, snake};
 
 /// Render `format` as a complete 010 Editor `.bt` template.
 #[must_use]
@@ -306,8 +306,8 @@ fn checksum_comment(field: &Field) -> Option<String> {
             Constraint::Checksum { spec } => Some(format!(
                 "// checksum: {:?} over [{}, {})",
                 spec.algorithm,
-                spec.covered.from.field(),
-                spec.covered.to.field()
+                comment_text(spec.covered.from.field().as_str()),
+                comment_text(spec.covered.to.field().as_str())
             )),
             _ => None,
         })

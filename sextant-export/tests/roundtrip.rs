@@ -146,6 +146,10 @@ fn kaitai_cross_validation_passes_or_skips() {
                 assert_eq!(parsed, samples.len(), "every sample was cross-validated");
             }
             CrossValidation::Skipped { reason } => {
+                assert!(
+                    std::env::var_os("SEXTANT_REQUIRE_KAITAI").is_none(),
+                    "required Kaitai runtime unavailable: {reason}"
+                );
                 eprintln!(
                     "kaitai cross-validation skipped for {}: {reason}",
                     format.name

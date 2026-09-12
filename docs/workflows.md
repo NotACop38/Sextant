@@ -54,8 +54,8 @@ dimensions:
 - **generality**: whether the same structure fits across all samples, not just
   one.
 
-Each field carries a confidence value. High confidence means a verified
-relationship; lower confidence means an inferred or softer guess. The field map
+Each field carries a heuristic confidence value and evidence. High confidence
+does not prove semantic meaning or correctness on unseen data. The field map
 is honest about what was checked and what was assumed. See
 [How it works](how-it-works.md).
 
@@ -86,14 +86,17 @@ dump. It is how you read raw bytes through the inferred structure.
 sextant inspect report.json --sample ./samples/sample_01.bin --color
 ```
 
-## `export`: generate a verified parser
+## `export`: generate a parser specification
 
 ```
 sextant export <report.json> --format <fmt> [--out <file>] [--cross-validate <dir>]
 ```
 
-`export` turns the verified structure in a report into an editable parser. The
-output goes to standard output unless you pass `--out`.
+`export` validates the report IR and translates its supported structure into
+editable parser source. Imported scores and labels are untrusted metadata. Ordinary
+export does not rerun the original samples or execute the generated parser.
+Unsupported target layouts return an error. Output goes to standard output
+unless you pass `--out`.
 
 | Option | Meaning |
 |---|---|
@@ -136,8 +139,9 @@ sextant bench [--corpus <dir>] [--out <results.json>]
 ```
 
 `bench` runs statistics-only inference over the ground-truth corpus and reports
-field-boundary precision, recall, and F1, the perfection rate, role and type
-accuracy, and parser validity. It is fully offline. With `--out` it writes
+field-boundary precision, recall, and F1, exact-boundary recovery, role and type
+accuracy, and native IR validity. The same samples are used for inference and
+evaluation; no external parser or held-out generalization is measured. It is fully offline. With `--out` it writes
 machine-readable results. It exits non-zero if any configured accuracy target is
 missed, which is how CI guards against regressions.
 
@@ -158,3 +162,17 @@ written by hand.
 Sextant uses the exit codes defined in PRD Section 14: `0` success, `1` usage
 error, `2` input error, `3` inference produced no usable hypothesis, `4` export
 error, `5` internal error. These make Sextant easy to drive from scripts and CI.
+
+## Limits and success status
+
+Inference exits successfully only when the native IR fully covers every retained
+sample, all constraints pass, and there are no gaps, overlaps, or trailing bytes.
+A diagnostic report is still written when verification fails (exit code 3).
+`--timeout` limits each execution, not the entire inference pipeline. TCP capture
+analysis currently uses segment payloads without stream reassembly.
+
+Without `--force`, output creation refuses existing files and symlinks. The
+benchmark rejects manifests above 1 MiB, more than 256 samples, samples above
+64 MiB, more than 256 MiB retained bytes per format, or more than 100,000 expanded
+ground-truth fields. Sample paths must remain within their format directory and
+actual sizes must match the manifest. Oversized samples are rejected, not clipped.

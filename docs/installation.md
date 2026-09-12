@@ -1,8 +1,8 @@
 # Installation
 
-Sextant can be installed from a release artifact, from crates.io after the
-maintainer publishes the crate, or from source. Building from source is always
-the most direct path for contributors.
+Build Sextant from source today. As of 2026-09-12 no GitHub release is published,
+and registry installation is not verified. Release workflows and packaging
+templates are preparatory tooling.
 
 ## Prerequisites
 
@@ -17,14 +17,15 @@ or to run the core. Those are optional and are described below.
 
 ## Prebuilt binaries
 
-Tagged releases publish archives for Linux, macOS, and Windows. Download the
+Once a tagged release is published and tested, download the
 archive for your platform from the GitHub Releases page, verify it against the
 published `SHA256SUMS`, and place the `sextant` binary on your `PATH`.
 
 ## From crates.io
 
 The crates.io name `sextant` belongs to an unrelated project, so the CLI package
-is published as `sextant-re`. It still installs a binary named `sextant`.
+is configured for publication as `sextant-re`. After publication it should install
+a binary named `sextant`; validate that path before relying on it.
 
 ```bash
 cargo install sextant-re
@@ -58,7 +59,8 @@ optional and add external dependencies only when you choose to use them:
 - **Kaitai cross-validation.** The `export --format kaitai --cross-validate`
   option can compile the generated spec and parse your samples through it as an
   independent check. That option shells out to the Kaitai Struct compiler
-  (`kaitai-struct-compiler`), which requires a JVM. The core never depends on
+  (`kaitai-struct-compiler`), which requires a JVM, plus Python with the
+  `kaitaistruct` package. The core never depends on
   it: if the compiler is absent the cross-check is reported as skipped, not
   failed, and every other command works without it.
 - **The engine language-model path.** The optional semantic path reads API keys

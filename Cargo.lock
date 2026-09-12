@@ -1023,6 +1023,7 @@ version = "0.1.0"
 dependencies = [
  "sextant-engine",
  "sextant-ir",
+ "tempfile",
 ]
 
 [[package]]

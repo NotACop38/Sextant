@@ -13,6 +13,12 @@
 
 ---
 
+## Implementation and qualification status, 2026-09-12
+
+This PRD states the product requirements, not a declaration that every requirement is implemented. Native execution verifies fit on retained samples; it does not establish semantic truth, unseen-input correctness, or equivalent behavior in exported code. A catch-all opaque field can achieve full byte coverage without recovering structure. Refinements must preserve both aggregate score and each previously successful or fully verified sample.
+
+The current CLI is statistics-only. The benchmark covers 21 development samples across four synthetic formats and PNG, not the full Section 15 corpus or a held-out evaluation. Exporters support a checked subset of the IR; Kaitai/Python and Lua runtime tests are separate from native verification, and ImHex/010 runtime qualification remains open. TCP input is segment payload analysis without stream reassembly. The current timeout is per native execution, not a deadline for an entire inference run. These limitations remain acceptance gaps until measured and implemented; see [the checklist](ENGINEERING_CHECKLIST.md) and [review record](REVIEW_2026-09-12.md).
+
 ## 1. Summary
 
 Sextant is a command-line reverse-engineering tool that infers the structure of unknown binary file formats and network protocols from sample data, then generates parsers that it has verified against those samples. The output is a field map plus an editable parser (Kaitai Struct, ImHex pattern, Wireshark dissector, or 010 Editor template), each accompanied by an honest, per-field confidence report.
@@ -323,7 +329,7 @@ Protocols (v1.x):
 **Targets (adopted; starting bars, tracked by `sextant bench` and tuned upward over time).**
 
 - Statistics-only MVP: field-boundary F1 at least 0.85 and perfection at least 0.5 on the file-format corpus.
-- Parser validity: 100% on the corpus. The chosen IR parses every sample by construction of the verification loop, and the exported Kaitai must parse every sample in the optional cross-check.
+- Parser validity: 100% on the corpus. Acceptance requires the chosen IR to fully parse every sample and the exported Kaitai to parse every sample in the optional cross-check.
 - With the model pass: field role accuracy at least 0.8 on a held-out subset and a measurable improvement over statistics-only, with no regression in the verified parse score.
 
 The benchmark is run by `sextant bench` and its numbers are published in the README. The framing positions Sextant against the academic baselines (Netzob, BinaryInferno, and similar) on comparable metrics.

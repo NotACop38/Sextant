@@ -8,10 +8,9 @@
 //! written by hand (no YAML dependency) so the exact key order and formatting
 //! stay under our control and the result is deterministic.
 //!
-//! Constructs Kaitai cannot express are rendered as `doc` notes rather than
-//! dropped silently: a checksum constraint becomes a note (Kaitai does not
-//! verify checksums), and a derived field offset becomes a note. The structural
-//! shape, the part that lets the spec parse a sample, is always emitted.
+//! Checksums are rendered as `doc` notes. The public entry point rejects layouts
+//! this emitter cannot preserve, including explicit offsets and multi-byte
+//! delimiters. Byte-bounded arrays use a nested substream.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -117,9 +116,9 @@ impl Ctx {
     /// Resolve a referenced field name to the id it was emitted with, searching
     /// the enclosing scopes outward and falling back to a plain sanitization.
     fn resolve_ref(&self, name: &str) -> String {
-        for scope in self.scopes.iter().rev() {
+        for (parents, scope) in self.scopes.iter().rev().enumerate() {
             if let Some(id) = scope.get(name) {
-                return id.clone();
+                return format!("{}{id}", "_parent.".repeat(parents));
             }
         }
         snake(name, "ref")
@@ -252,6 +251,25 @@ impl Ctx {
         count: &CountRule,
         attrs: &mut Vec<(String, String)>,
     ) {
+        if let CountRule::BoundedBy { length_field } = count {
+            // `size` on a repeated Kaitai attribute applies to each element.
+            // Put the whole repetition in one sized substream instead. The
+            // anonymous field keeps synthetic names out of reference scopes.
+            let name = self.alloc.allocate("bounded_array");
+            self.types.insert(name.clone(), String::new());
+            let wrapper = Structure::new(vec![Field::new(
+                Kind::Array {
+                    element: Box::new(element.clone()),
+                    count: CountRule::ToEnd,
+                },
+                element.confidence,
+            )]);
+            let body = self.render_seq(&wrapper, 3);
+            self.types.insert(name.clone(), body);
+            attrs.push(("type".to_owned(), name));
+            attrs.push(("size".to_owned(), self.resolve_ref(length_field.as_str())));
+            return;
+        }
         // The element type goes on the array attribute itself.
         match &element.kind {
             Kind::Struct { structure } => {
@@ -303,7 +321,7 @@ impl Ctx {
                 ));
             }
             CountRule::BoundedBy { length_field } => {
-                // Read the elements inside a substream sized by the length field.
+                // Handled by the enclosing substream wrapper above.
                 attrs.push(("size".to_owned(), self.resolve_ref(length_field.as_str())));
                 attrs.push(("repeat".to_owned(), "eos".to_owned()));
             }

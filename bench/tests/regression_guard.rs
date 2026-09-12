@@ -44,7 +44,7 @@ fn statistics_only_pipeline_meets_prd_targets() {
         "perfection rate {:.4} is below the PRD target {PERFECTION_TARGET}",
         summary.perfection_rate
     );
-    // Parser validity is 100 percent by construction of the verification loop:
+    // Native validity must remain 100 percent on this development corpus:
     // the chosen IR parses every sample to a clean end (PRD Section 15).
     assert!(
         (summary.parser_validity - 1.0).abs() < 1e-9,

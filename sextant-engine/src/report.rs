@@ -179,14 +179,20 @@ pub(crate) fn role_label(role: Option<Role>) -> String {
 pub(crate) fn kind_label(kind: &Kind) -> String {
     match kind {
         Kind::Integer {
-            width, endianness, ..
+            width,
+            endianness,
+            signed,
         } => {
             let order = match endianness {
                 Some(sextant_ir::Endianness::Big) => " big-endian",
                 Some(sextant_ir::Endianness::Little) => " little-endian",
                 None => "",
             };
-            format!("u{}{}", u16::from(*width) * 8, order)
+            let prefix = match signed {
+                sextant_ir::Signedness::Unsigned => "u",
+                sextant_ir::Signedness::Signed => "i",
+            };
+            format!("{prefix}{}{order}", u16::from(*width) * 8)
         }
         Kind::Bytes => "bytes".to_owned(),
         Kind::String { .. } => "string".to_owned(),

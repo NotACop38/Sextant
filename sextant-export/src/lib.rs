@@ -31,6 +31,7 @@
 #![forbid(unsafe_code)]
 
 mod bt;
+mod capabilities;
 pub mod crossval;
 mod imhex;
 mod kaitai;
@@ -110,11 +111,15 @@ impl fmt::Display for ExportFormat {
 
 /// An error produced while exporting an IR.
 ///
-/// Exporters are best-effort and degrade gracefully (an unrepresentable
-/// construct is emitted as a comment rather than failing), so this is reserved
-/// for the rare case where the IR cannot be rendered at all.
+/// Invalid IR and layouts that a target cannot preserve are rejected before
+/// rendering. Checksum constraints remain annotations, not runtime checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportError {
+    /// The supplied format failed semantic validation.
+    InvalidFormat {
+        /// The validation diagnostics.
+        detail: String,
+    },
     /// The IR uses a construct the target format cannot represent.
     Unsupported {
         /// The target format.
@@ -127,6 +132,7 @@ pub enum ExportError {
 impl fmt::Display for ExportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ExportError::InvalidFormat { detail } => write!(f, "invalid format: {detail}"),
             ExportError::Unsupported { format, detail } => {
                 write!(f, "cannot export to {format}: {detail}")
             }
@@ -143,15 +149,40 @@ impl std::error::Error for ExportError {}
 ///
 /// # Errors
 ///
-/// Returns [`ExportError`] only when the IR uses a construct the target cannot
-/// represent at all; ordinary fields always export.
+/// Rejects invalid, excessively large, or unsupported layouts. In particular,
+/// ImHex and 010 exports reject offsets, delimiters, byte-bounded arrays, and
+/// ancestor dependencies. Lua also rejects ancestor dependencies and uses a
+/// shared 1,048,576-unit budget for arrays and delimiter scanning. UTF-16 is
+/// currently supported only by Kaitai.
+/// Kaitai rejects offsets and multi-byte delimiters. Non-Lua targets reject
+/// repeated elements whose minimum size cannot be proved positive. Constraint
+/// checking differs by target: checksum and range constraints are not enforced.
+/// All targets reject dependencies shadowed by an unparsed declaration,
+/// including array element descriptors used in generated wrapper types.
+/// Non-Lua targets reject enum and type identifier collisions. Numeric enum
+/// dependencies in Kaitai and non-Kaitai dependencies without a stable sanitized
+/// identifier are also rejected.
 pub fn export(format: &Format, target: ExportFormat) -> Result<String, ExportError> {
-    match target {
-        ExportFormat::Kaitai => Ok(kaitai::export(format)),
-        ExportFormat::ImHex => Ok(imhex::export(format)),
-        ExportFormat::Wireshark => Ok(wireshark::export(format)),
-        ExportFormat::Bt => Ok(bt::export(format)),
-    }
+    format
+        .validate()
+        .map_err(|error| ExportError::InvalidFormat {
+            detail: error.to_string(),
+        })?;
+    capabilities::check(format, target)?;
+    let source = match target {
+        ExportFormat::Kaitai => kaitai::export(format),
+        ExportFormat::ImHex => imhex::export(format),
+        ExportFormat::Wireshark => wireshark::export(format),
+        ExportFormat::Bt => bt::export(format),
+    };
+    let comment = match target {
+        ExportFormat::Kaitai => "#",
+        ExportFormat::Wireshark => "--",
+        ExportFormat::ImHex | ExportFormat::Bt => "//",
+    };
+    Ok(format!(
+        "{comment} Structural parser. Checksum and range constraints are not runtime-verified.\n{source}"
+    ))
 }
 
 /// Decode a constant byte sequence as an unsigned integer of `width` bytes in

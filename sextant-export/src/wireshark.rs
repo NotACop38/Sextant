@@ -33,6 +33,7 @@ pub(crate) fn export(format: &Format) -> String {
         registered: BTreeSet::new(),
         code: String::new(),
         temp: 0,
+        limits: vec!["blen".to_owned()],
     };
 
     // Emit the dissection body first so the field registry is fully populated.
@@ -65,6 +66,8 @@ pub(crate) fn export(format: &Format) -> String {
         "    local subtree = tree:add(proto_{proto}, buffer(), \"{proto}\")"
     );
     out.push_str("    local offset = 0\n");
+    out.push_str("    local sextant = {}\n");
+    out.push_str("    local sextant_work = 0\n");
     out.push_str(&body);
     out.push_str("end\n\n");
 
@@ -114,9 +117,20 @@ struct Gen {
     registered: BTreeSet<String>,
     code: String,
     temp: usize,
+    limits: Vec<String>,
 }
 
 impl Gen {
+    fn limit(&self) -> &str {
+        self.limits.last().map_or("blen", String::as_str)
+    }
+
+    fn checked_size(&mut self, expression: &str, indent: usize) -> String {
+        let size = self.temp("size");
+        self.line(indent, &format!("local {size} = {expression}"));
+        self.line(indent, &format!("if {size} < 0 or offset < 0 or {size} > {} - offset then error(\"Sextant: field exceeds enclosing boundary\") end", self.limit()));
+        size
+    }
     /// Build the value-string table literal for an enum, mapping each variant's
     /// value to its name so Wireshark shows the symbolic meaning, not just the
     /// number. Returns `None` when the enum is unknown or has no variants.
@@ -149,7 +163,7 @@ impl Gen {
     /// A fresh, unique Lua local name with the given prefix.
     fn temp(&mut self, prefix: &str) -> String {
         self.temp += 1;
-        format!("{prefix}_{}", self.temp)
+        format!("sextant.{prefix}_{}", self.temp)
     }
 
     /// Append a line of generated Lua at `indent` levels of four spaces.
@@ -157,7 +171,13 @@ impl Gen {
         for _ in 0..indent {
             self.code.push_str("    ");
         }
-        self.code.push_str(text);
+        // Keep captured values in one per-invocation table. Lua has a small
+        // limit on local variables per function, including nested IR structs.
+        self.code.push_str(if text.starts_with("local sextant.") {
+            &text[6..]
+        } else {
+            text
+        });
         self.code.push('\n');
     }
 
@@ -201,6 +221,7 @@ impl Gen {
             }
             None => {}
         }
+        self.line(indent, &format!("if offset < {base} or offset > {} then error(\"Sextant: invalid field offset\") end", self.limit()));
 
         match &field.kind {
             Kind::Struct { structure } => {
@@ -284,7 +305,8 @@ impl Gen {
                     lua_escape(label)
                 );
                 self.register(key, &ctor);
-                let size = self.size_expr(field.size.as_ref(), prefix);
+                let expression = self.size_expr(field.size.as_ref(), prefix);
+                let size = self.checked_size(&expression, indent);
                 self.line(
                     indent,
                     &format!("{parent}:add(f[\"{key}\"], buffer(offset, {size}))"),
@@ -314,7 +336,8 @@ impl Gen {
                     lua_escape(label)
                 );
                 self.register(key, &ctor);
-                let size = self.size_expr(field.size.as_ref(), prefix);
+                let expression = self.size_expr(field.size.as_ref(), prefix);
+                let size = self.checked_size(&expression, indent);
                 let adder = if matches!(encoding, StringEncoding::Utf16Le) {
                     "add_le"
                 } else {
@@ -363,9 +386,11 @@ impl Gen {
 
         let reader = int_reader(width, little, signed);
         let var = value_var(key);
+        let _ = self.checked_size(&width.to_string(), indent);
+        let numeric = if width == 8 { ":tonumber()" } else { "" };
         self.line(
             indent,
-            &format!("local {var} = buffer(offset, {width}){reader}"),
+            &format!("local {var} = buffer(offset, {width}){reader}{numeric}"),
         );
         let adder = if little { "add_le" } else { "add" };
         self.line(
@@ -409,7 +434,15 @@ impl Gen {
         self.line(indent, &format!("local {found} = false"));
         self.line(
             indent,
-            &format!("while offset + {dlen} + {term_len} <= blen do"),
+            &format!("while offset + {dlen} + {term_len} <= {} do", self.limit()),
+        );
+        self.line(
+            indent + 1,
+            &format!("sextant_work = sextant_work + {term_len}"),
+        );
+        self.line(
+            indent + 1,
+            "if sextant_work > 1048576 then error(\"Sextant: delimiter work limit\") end",
         );
         self.line(
             indent + 1,
@@ -420,6 +453,10 @@ impl Gen {
         self.line(indent + 1, "end");
         self.line(indent + 1, &format!("{dlen} = {dlen} + 1"));
         self.line(indent, "end");
+        self.line(
+            indent,
+            &format!("if not {found} then error(\"Sextant: missing delimiter\") end"),
+        );
 
         let vlen = self.temp("vlen");
         let clen = self.temp("clen");
@@ -452,6 +489,7 @@ impl Gen {
         let astart = self.temp("astart");
         let label = lua_escape(label);
         self.line(indent, &format!("local {astart} = offset"));
+        let enclosing_limit = self.limit().to_owned();
         self.line(
             indent,
             &format!("local {arr} = {parent}:add(buffer(offset), \"{label}\")"),
@@ -463,29 +501,53 @@ impl Gen {
             CountRule::Fixed { count } => {
                 let i = self.temp("i");
                 self.line(indent, &format!("local {i} = 0"));
-                (format!("{i} < {count} and offset < blen"), Some(i))
+                (format!("{i} < {count}"), Some(i))
             }
             CountRule::FromField { count_field } => {
                 let n = value_var(&join_sibling(key, count_field.as_str()));
+                self.line(
+                    indent,
+                    &format!(
+                        "if {n} < 0 or {n} > 1048576 then error(\"Sextant: array count limit\") end"
+                    ),
+                );
                 let i = self.temp("i");
                 self.line(indent, &format!("local {i} = 0"));
-                (format!("{i} < {n} and offset < blen"), Some(i))
+                (format!("{i} < {n}"), Some(i))
             }
             CountRule::BoundedBy { length_field } => {
                 let len = value_var(&join_sibling(key, length_field.as_str()));
                 let aend = self.temp("aend");
+                self.line(indent, &format!("if {len} < 0 or {len} > {enclosing_limit} - offset then error(\"Sextant: array exceeds enclosing boundary\") end"));
                 self.line(indent, &format!("local {aend} = offset + {len}"));
-                (format!("offset < {aend} and offset < blen"), None)
+                self.limits.push(aend.clone());
+                (format!("offset < {aend}"), None)
             }
-            CountRule::ToEnd => ("offset < blen".to_owned(), None),
+            CountRule::ToEnd => (format!("offset < {enclosing_limit}"), None),
         };
 
         self.line(indent, &format!("while {cond} do"));
+        self.line(indent + 1, "sextant_work = sextant_work + 1");
+        self.line(
+            indent + 1,
+            "if sextant_work > 1048576 then error(\"Sextant: array work limit\") end",
+        );
+        let before = self.temp("before");
+        self.line(indent + 1, &format!("local {before} = offset"));
         self.emit_element(element, key, &arr, indent + 1);
+        self.line(
+            indent + 1,
+            &format!(
+                "if offset <= {before} then error(\"Sextant: array element made no progress\") end"
+            ),
+        );
         if let Some(counter) = &counter {
             self.line(indent + 1, &format!("{counter} = {counter} + 1"));
         }
         self.line(indent, "end");
+        if matches!(count, CountRule::BoundedBy { .. }) {
+            self.limits.pop();
+        }
         self.line(indent, &format!("{arr}:set_len(offset - {astart})"));
     }
 
@@ -525,8 +587,9 @@ impl Gen {
             Some(SizeRule::Derived { length_field }) => {
                 value_var(&join(prefix, &snake(length_field.as_str(), "len")))
             }
-            Some(SizeRule::ToEnd) | None => "blen - offset".to_owned(),
-            Some(SizeRule::Delimited { .. }) => "blen - offset".to_owned(),
+            Some(SizeRule::ToEnd) | None | Some(SizeRule::Delimited { .. }) => {
+                format!("{} - offset", self.limit())
+            }
         }
     }
 }
@@ -587,7 +650,7 @@ fn int_reader(width: u8, little: bool, signed: Signedness) -> &'static str {
 
 /// The Lua local that holds a field's captured integer value.
 fn value_var(key: &str) -> String {
-    format!("v_{}", key.replace('.', "_"))
+    format!("sextant.v_{}", key.replace('.', "_"))
 }
 
 /// Join a dotted-path prefix and a field name.

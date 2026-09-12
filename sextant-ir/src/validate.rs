@@ -6,10 +6,14 @@
 //! dangling length, count, offset, and checksum references, overlapping fixed
 //! fields, and sizes that are not sane, each with a clear, located error.
 //!
-//! Validation collects every problem it finds rather than stopping at the
-//! first, so a malformed IR yields a complete report.
+//! Validation first checks the tree's shape without recursion, before any
+//! recursive layout or semantic helper runs. Diagnostics are bounded and report
+//! when validation stopped early; long diagnostic labels are shortened without
+//! changing the input IR.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::rc::Rc;
 
 use crate::model::{
     Constraint, CountRule, Field, FieldOffset, Format, Kind, RangeAnchor, SizeRule, Structure,
@@ -34,6 +38,14 @@ pub const MAX_NESTING_DEPTH: usize = 64;
 /// The most field nodes a format may contain (counting every nested field and
 /// array element descriptor). Bounds IR size independently of sample bytes.
 pub const MAX_FIELD_COUNT: usize = 1 << 20;
+
+/// The most diagnostics retained for one malformed IR. Validation stops when
+/// this limit is reached and reports that additional problems may remain.
+pub const MAX_VALIDATION_ERRORS: usize = 128;
+
+/// The maximum UTF-8 byte length of one diagnostic path or input-derived label.
+/// Longer text is visibly shortened; this does not restrict valid IR names.
+pub const MAX_DIAGNOSTIC_TEXT_BYTES: usize = 256;
 
 /// The integer widths, in bytes, the IR supports (FR-16).
 pub const VALID_INT_WIDTHS: [u8; 4] = [1, 2, 4, 8];
@@ -148,7 +160,7 @@ pub enum ValidationErrorKind {
     },
     /// The IR declares more field nodes than [`MAX_FIELD_COUNT`].
     TooManyFields {
-        /// How many field nodes were found.
+        /// At least this many field nodes were found before stopping.
         count: usize,
     },
     /// Sample support claims more agreeing samples than total samples.
@@ -282,18 +294,22 @@ impl fmt::Display for ValidationErrorKind {
     }
 }
 
-/// The full result of validating a [`Format`]: every problem found.
+/// Bounded diagnostics from validating a [`Format`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidationReport {
-    /// All errors, in traversal order.
+    /// At most [`MAX_VALIDATION_ERRORS`] diagnostics, in deterministic order.
+    /// Input-derived labels and paths are shortened when necessary.
     pub errors: Vec<ValidationError>,
+    /// Whether validation stopped early, either at a shape limit or the
+    /// diagnostic cap. Additional problems may exist in unexamined input.
+    pub truncated: bool,
 }
 
 impl ValidationReport {
     /// Whether the format passed with no errors.
     #[must_use]
     pub fn is_ok(&self) -> bool {
-        self.errors.is_empty()
+        self.errors.is_empty() && !self.truncated
     }
 }
 
@@ -307,17 +323,47 @@ impl fmt::Display for ValidationReport {
         for error in &self.errors {
             writeln!(f, "  - {error}")?;
         }
+        if self.truncated {
+            writeln!(
+                f,
+                "  Validation stopped early; additional problems may exist."
+            )?;
+        }
         Ok(())
     }
 }
 
 impl std::error::Error for ValidationReport {}
 
-/// A frame in the lexical scope chain: the fields of an enclosing structure and
-/// how many of them are visible (parsed) at the point we descended.
-#[derive(Debug, Clone, Copy)]
-struct Frame<'a> {
+/// A borrowed name index, constructed once for each lexical scope. Preserve the
+/// first declaration when an invalid scope contains duplicate names.
+#[derive(Debug)]
+struct Scope<'a> {
     fields: &'a [Field],
+    indices: BTreeMap<&'a str, usize>,
+}
+
+impl<'a> Scope<'a> {
+    fn new(fields: &'a [Field]) -> Self {
+        let mut indices = BTreeMap::new();
+        for (index, field) in fields.iter().enumerate() {
+            if let Some(name) = field.name.as_deref() {
+                indices.entry(name).or_insert(index);
+            }
+        }
+        Self { fields, indices }
+    }
+
+    fn resolve(&self, name: &str, bound: usize) -> Option<&'a Field> {
+        let index = *self.indices.get(name)?;
+        (index < bound).then(|| &self.fields[index])
+    }
+}
+
+/// An ancestor index is shared, not copied, when descending into a child.
+#[derive(Debug, Clone)]
+struct Frame<'a> {
+    scope: Rc<Scope<'a>>,
     visible: usize,
 }
 
@@ -325,24 +371,15 @@ struct Frame<'a> {
 /// then each ancestor up to the point we descended from it.
 fn resolve_field<'a>(
     ancestors: &[Frame<'a>],
-    current: &'a [Field],
+    current: &Scope<'a>,
     bound: usize,
     name: &str,
 ) -> Option<&'a Field> {
-    if let Some(found) = current
-        .iter()
-        .take(bound)
-        .find(|field| field.name.as_deref() == Some(name))
-    {
+    if let Some(found) = current.resolve(name, bound) {
         return Some(found);
     }
     for frame in ancestors.iter().rev() {
-        if let Some(found) = frame
-            .fields
-            .iter()
-            .take(frame.visible)
-            .find(|field| field.name.as_deref() == Some(name))
-        {
+        if let Some(found) = frame.scope.resolve(name, frame.visible) {
             return Some(found);
         }
     }
@@ -394,50 +431,156 @@ fn struct_fixed_len(structure: &Structure) -> Option<u64> {
 
 fn field_label(field: &Field, index: usize) -> String {
     match &field.name {
-        Some(name) => format!("{name:?} (index {index})"),
+        Some(name) => diagnostic_text(&format!("{:?} (index {index})", diagnostic_text(name))),
         None => format!("the field at index {index}"),
     }
 }
 
+/// Bound diagnostic amplification while preserving arbitrary source labels.
+fn diagnostic_text(text: &str) -> String {
+    const SUFFIX: &str = "... [truncated]";
+    if text.len() <= MAX_DIAGNOSTIC_TEXT_BYTES {
+        return text.to_owned();
+    }
+    let mut end = MAX_DIAGNOSTIC_TEXT_BYTES - SUFFIX.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{SUFFIX}", &text[..end])
+}
+
+/// Check depth and descriptor count before any recursive helper sees the tree.
+/// The iterator stack grows only to the depth limit; wide child slices are
+/// counted before traversal, without allocating one stack entry per field.
+fn check_shape(root: &Structure) -> Option<ValidationError> {
+    struct Pending<'a> {
+        fields: &'a [Field],
+        next: usize,
+        depth: usize,
+        path: String,
+        element: bool,
+    }
+    let mut count = root.fields.len();
+    if count > MAX_FIELD_COUNT {
+        return Some(ValidationError {
+            path: "root".to_owned(),
+            kind: ValidationErrorKind::TooManyFields { count },
+        });
+    }
+    let mut pending = vec![Pending {
+        fields: &root.fields,
+        next: 0,
+        depth: 0,
+        path: "root".to_owned(),
+        element: false,
+    }];
+    while let Some(frame) = pending.last_mut() {
+        let Some(field) = frame.fields.get(frame.next) else {
+            pending.pop();
+            continue;
+        };
+        let index = frame.next;
+        frame.next += 1;
+        if !matches!(field.kind, Kind::Struct { .. } | Kind::Array { .. }) {
+            continue;
+        }
+        let field_path = if frame.element {
+            frame.path.clone()
+        } else {
+            format!("{}.fields[{index}]", frame.path)
+        };
+        let (fields, path, element) = match &field.kind {
+            Kind::Struct { structure } => (
+                structure.fields.as_slice(),
+                format!("{field_path}.kind.structure"),
+                false,
+            ),
+            Kind::Array { element, .. } => (
+                std::slice::from_ref(element.as_ref()),
+                format!("{field_path}.kind.element"),
+                true,
+            ),
+            _ => continue,
+        };
+        let depth = frame.depth + 1;
+        let kind = if depth > MAX_NESTING_DEPTH {
+            Some(ValidationErrorKind::NestingTooDeep { depth })
+        } else {
+            count = count.saturating_add(fields.len());
+            (count > MAX_FIELD_COUNT).then_some(ValidationErrorKind::TooManyFields { count })
+        };
+        if let Some(kind) = kind {
+            return Some(ValidationError {
+                path: diagnostic_text(&path),
+                kind,
+            });
+        }
+        pending.push(Pending {
+            fields,
+            next: 0,
+            depth,
+            path,
+            element,
+        });
+    }
+    None
+}
+
 /// Validate a [`Format`] against the Step 2 semantic rules.
 pub(crate) fn validate(format: &Format) -> ValidationReport {
+    if let Some(error) = check_shape(&format.root) {
+        return ValidationReport {
+            errors: vec![error],
+            truncated: true,
+        };
+    }
     let mut validator = Validator {
         format,
         errors: Vec::new(),
-        field_count: 0,
+        truncated: false,
     };
     validator.validate_structure(&format.root, "root", &[], 0);
     validator.validate_enums();
-    if validator.field_count > MAX_FIELD_COUNT {
-        validator.push(
-            "root",
-            ValidationErrorKind::TooManyFields {
-                count: validator.field_count,
-            },
-        );
-    }
     ValidationReport {
         errors: validator.errors,
+        truncated: validator.truncated,
     }
 }
 
 struct Validator<'a> {
     format: &'a Format,
     errors: Vec<ValidationError>,
-    field_count: usize,
+    truncated: bool,
 }
 
 impl<'a> Validator<'a> {
     fn push(&mut self, path: impl Into<String>, kind: ValidationErrorKind) {
+        if self.stopped() {
+            return;
+        }
         self.errors.push(ValidationError {
-            path: path.into(),
+            path: diagnostic_text(&path.into()),
             kind,
         });
     }
 
+    /// Called only when work remains, so a full report is not labeled complete
+    /// merely because subsequent checks were skipped.
+    fn stopped(&mut self) -> bool {
+        if self.errors.len() >= MAX_VALIDATION_ERRORS {
+            self.truncated = true;
+            true
+        } else {
+            false
+        }
+    }
+
     fn validate_enums(&mut self) {
         for (name, def) in &self.format.enums {
-            let path = format!("enums.{name}");
+            if self.stopped() {
+                return;
+            }
+            let path = format!("enums.{}", diagnostic_text(name));
             if let Some(width) = def.width {
                 if !VALID_INT_WIDTHS.contains(&width) {
                     self.push(
@@ -446,18 +589,19 @@ impl<'a> Validator<'a> {
                     );
                 }
             }
-            let mut seen: Vec<i128> = Vec::new();
+            let mut seen = BTreeSet::new();
             for variant in &def.variants {
-                if seen.contains(&variant.value) {
+                if self.stopped() {
+                    return;
+                }
+                if !seen.insert(variant.value) {
                     self.push(
                         path.clone(),
                         ValidationErrorKind::DuplicateEnumValue {
-                            enum_name: name.clone(),
+                            enum_name: diagnostic_text(name),
                             value: variant.value,
                         },
                     );
-                } else {
-                    seen.push(variant.value);
                 }
             }
         }
@@ -470,47 +614,43 @@ impl<'a> Validator<'a> {
         ancestors: &[Frame<'a>],
         depth: usize,
     ) {
-        if depth > MAX_NESTING_DEPTH {
-            self.push(
-                path.to_owned(),
-                ValidationErrorKind::NestingTooDeep { depth },
-            );
+        if self.stopped() {
             return;
         }
-        self.check_duplicate_names(structure, path);
+        let scope = Rc::new(Scope::new(&structure.fields));
+        self.check_duplicate_names(&scope, path);
         self.check_layout(structure, path);
         for (index, field) in structure.fields.iter().enumerate() {
+            if self.stopped() {
+                return;
+            }
             let field_path = format!("{path}.fields[{index}]");
-            self.validate_field(
-                field,
-                &field_path,
-                ancestors,
-                &structure.fields,
-                index,
-                depth,
-            );
+            self.validate_field(field, &field_path, ancestors, &scope, index, depth);
         }
     }
 
-    fn check_duplicate_names(&mut self, structure: &Structure, path: &str) {
-        let mut seen: Vec<&str> = Vec::new();
-        for (index, field) in structure.fields.iter().enumerate() {
+    fn check_duplicate_names(&mut self, scope: &Scope<'_>, path: &str) {
+        for (index, field) in scope.fields.iter().enumerate() {
+            if self.stopped() {
+                return;
+            }
             if let Some(name) = field.name.as_deref() {
-                if seen.contains(&name) {
+                if scope.indices.get(name) != Some(&index) {
                     self.push(
                         format!("{path}.fields[{index}]"),
                         ValidationErrorKind::DuplicateFieldName {
-                            name: name.to_owned(),
+                            name: diagnostic_text(name),
                         },
                     );
-                } else {
-                    seen.push(name);
                 }
             }
         }
     }
 
     fn check_layout(&mut self, structure: &Structure, path: &str) {
+        if self.stopped() {
+            return;
+        }
         let mut cursor: Option<u64> = Some(0);
         let mut placed: Vec<(usize, u64, u64)> = Vec::new();
         for (index, field) in structure.fields.iter().enumerate() {
@@ -525,24 +665,44 @@ impl<'a> Validator<'a> {
                 _ => None,
             };
             if let (Some(start), Some(end)) = (start, end) {
-                for (other_index, other_start, other_end) in &placed {
-                    if start < *other_end && *other_start < end {
-                        let at = start.max(*other_start);
-                        self.push(
-                            format!("{path}.fields[{index}]"),
-                            ValidationErrorKind::OverlappingFields {
-                                first: field_label(&structure.fields[*other_index], *other_index),
-                                second: field_label(field, index),
-                                at,
-                            },
-                        );
-                    }
+                // Empty structs and zero-count arrays occupy no bytes.
+                if start < end {
+                    placed.push((index, start, end));
                 }
-                placed.push((index, start, end));
                 cursor = Some(end);
             } else {
                 cursor = None;
             }
+        }
+        // Sweep by start position. Removing expired intervals costs O(log n),
+        // and each active interval is a real overlap. Enumeration stops at the
+        // diagnostic cap, giving O(n log n + MAX_VALIDATION_ERRORS) work rather
+        // than a pairwise comparison for every valid wide structure.
+        placed.sort_unstable_by_key(|&(index, start, end)| (start, end, index));
+        let mut active = BTreeSet::new();
+        for (index, start, end) in placed {
+            while let Some(&(other_end, _)) = active.first() {
+                if other_end > start {
+                    break;
+                }
+                active.pop_first();
+            }
+            for &(_, other_index) in &active {
+                if self.stopped() {
+                    return;
+                }
+                let first = index.min(other_index);
+                let second = index.max(other_index);
+                self.push(
+                    format!("{path}.fields[{second}]"),
+                    ValidationErrorKind::OverlappingFields {
+                        first: field_label(&structure.fields[first], first),
+                        second: field_label(&structure.fields[second], second),
+                        at: start,
+                    },
+                );
+            }
+            active.insert((end, index));
         }
     }
 
@@ -551,11 +711,13 @@ impl<'a> Validator<'a> {
         field: &'a Field,
         path: &str,
         ancestors: &[Frame<'a>],
-        current: &'a [Field],
+        current: &Rc<Scope<'a>>,
         index: usize,
         depth: usize,
     ) {
-        self.field_count = self.field_count.saturating_add(1);
+        if self.stopped() {
+            return;
+        }
         if !field.confidence.is_valid() {
             self.push(
                 format!("{path}.confidence"),
@@ -601,11 +763,12 @@ impl<'a> Validator<'a> {
                 self.validate_count(count, ancestors, current, index, path);
                 let child = push_frame(ancestors, current, index);
                 let element_slice = std::slice::from_ref(element.as_ref());
+                let element_scope = Rc::new(Scope::new(element_slice));
                 self.validate_field(
                     element,
                     &format!("{path}.kind.element"),
                     &child,
-                    element_slice,
+                    &element_scope,
                     0,
                     depth + 1,
                 );
@@ -616,7 +779,7 @@ impl<'a> Validator<'a> {
                 None => self.push(
                     format!("{path}.kind"),
                     ValidationErrorKind::DanglingEnumRef {
-                        name: enum_ref.clone(),
+                        name: diagnostic_text(enum_ref),
                     },
                 ),
                 Some(def) => {
@@ -625,7 +788,7 @@ impl<'a> Validator<'a> {
                             self.push(
                                 format!("{path}.kind"),
                                 ValidationErrorKind::EnumWidthMismatch {
-                                    enum_name: enum_ref.clone(),
+                                    enum_name: diagnostic_text(enum_ref),
                                     field_width: *width,
                                     enum_width,
                                 },
@@ -709,7 +872,7 @@ impl<'a> Validator<'a> {
         &mut self,
         count: &CountRule,
         ancestors: &[Frame<'a>],
-        current: &'a [Field],
+        current: &Scope<'a>,
         index: usize,
         path: &str,
     ) {
@@ -749,9 +912,12 @@ impl<'a> Validator<'a> {
         field: &Field,
         path: &str,
         ancestors: &[Frame<'a>],
-        current: &'a [Field],
+        current: &Scope<'a>,
     ) {
         for (index, constraint) in field.constraints.iter().enumerate() {
+            if self.stopped() {
+                return;
+            }
             let cpath = format!("{path}.constraints[{index}]");
             match constraint {
                 Constraint::Constant { value } => {
@@ -800,8 +966,8 @@ impl<'a> Validator<'a> {
                             self.push(
                                 cpath,
                                 ValidationErrorKind::InvertedChecksumRange {
-                                    from: spec.covered.from.field().0.clone(),
-                                    to: spec.covered.to.field().0.clone(),
+                                    from: diagnostic_text(spec.covered.from.field().as_str()),
+                                    to: diagnostic_text(spec.covered.to.field().as_str()),
                                 },
                             );
                         }
@@ -852,7 +1018,7 @@ impl<'a> Validator<'a> {
     fn resolve_number(
         &mut self,
         ancestors: &[Frame<'a>],
-        current: &'a [Field],
+        current: &Scope<'a>,
         bound: usize,
         name: &str,
         path: &str,
@@ -863,28 +1029,28 @@ impl<'a> Validator<'a> {
                     self.push(
                         path.to_owned(),
                         ValidationErrorKind::ReferenceNotInteger {
-                            name: name.to_owned(),
+                            name: diagnostic_text(name),
                         },
                     );
                 }
             }
             None => {
                 let defined_later = current
-                    .iter()
-                    .skip(bound)
-                    .any(|field| field.name.as_deref() == Some(name));
+                    .indices
+                    .get(name)
+                    .is_some_and(|index| *index >= bound);
                 if defined_later {
                     self.push(
                         path.to_owned(),
                         ValidationErrorKind::ForwardReference {
-                            name: name.to_owned(),
+                            name: diagnostic_text(name),
                         },
                     );
                 } else {
                     self.push(
                         path.to_owned(),
                         ValidationErrorKind::DanglingFieldRef {
-                            name: name.to_owned(),
+                            name: diagnostic_text(name),
                         },
                     );
                 }
@@ -902,22 +1068,20 @@ impl<'a> Validator<'a> {
         &mut self,
         anchor: &RangeAnchor,
         ancestors: &[Frame<'a>],
-        current: &'a [Field],
+        current: &Scope<'a>,
         path: &str,
     ) -> Option<usize> {
         let name = anchor.field().as_str();
-        if resolve_field(ancestors, current, current.len(), name).is_none() {
+        if resolve_field(ancestors, current, current.fields.len(), name).is_none() {
             self.push(
                 path.to_owned(),
                 ValidationErrorKind::DanglingFieldRef {
-                    name: name.to_owned(),
+                    name: diagnostic_text(name),
                 },
             );
             return None;
         }
-        current
-            .iter()
-            .position(|field| field.name.as_deref() == Some(name))
+        current.indices.get(name).copied()
     }
 }
 
@@ -930,10 +1094,14 @@ fn anchor_key(anchor: &RangeAnchor, index: usize) -> (usize, u8) {
     }
 }
 
-fn push_frame<'a>(ancestors: &[Frame<'a>], current: &'a [Field], visible: usize) -> Vec<Frame<'a>> {
+fn push_frame<'a>(
+    ancestors: &[Frame<'a>],
+    current: &Rc<Scope<'a>>,
+    visible: usize,
+) -> Vec<Frame<'a>> {
     let mut child = ancestors.to_vec();
     child.push(Frame {
-        fields: current,
+        scope: Rc::clone(current),
         visible,
     });
     child

@@ -124,6 +124,7 @@ fn the_default_and_fuzzing_limits_bound_every_dimension() {
         assert!(limits.max_depth > 0);
         assert!(limits.max_array_elements > 0);
         assert!(limits.max_total_fields > 0);
+        assert!(limits.max_output_bytes > 0);
         assert!(limits.max_steps > 0);
     }
     assert!(Limits::default().timeout.is_some());
@@ -137,6 +138,7 @@ fn the_default_and_fuzzing_limits_bound_every_dimension() {
     assert!(fuzz.max_depth <= def.max_depth);
     assert!(fuzz.max_array_elements <= def.max_array_elements);
     assert!(fuzz.max_total_fields <= def.max_total_fields);
+    assert!(fuzz.max_output_bytes <= def.max_output_bytes);
     assert!(fuzz.max_steps <= def.max_steps);
 }
 

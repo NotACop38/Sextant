@@ -13,6 +13,7 @@ categories.workspace = true
 
 [dependencies]
 sextant-ir.workspace = true
+tempfile = "3.27.0"
 
 [dev-dependencies]
 sextant-engine.workspace = true

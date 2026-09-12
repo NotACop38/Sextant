@@ -284,14 +284,19 @@ fn decode_int(field: &Field, sample: &[u8], offset: usize) -> Option<u64> {
 /// so far. A derived size is clamped to the bytes remaining, so a length field
 /// that names the whole file (as the STOT total-length field does) resolves to
 /// "the rest of the buffer" rather than overrunning.
-fn field_size(field: &Field, values: &HashMap<String, u64>, cursor: usize, len: usize) -> usize {
+fn field_size(
+    field: &Field,
+    values: &HashMap<String, u64>,
+    cursor: usize,
+    len: usize,
+) -> std::io::Result<usize> {
     match &field.size {
-        SizeRule::Fixed(bytes) => *bytes as usize,
+        SizeRule::Fixed(bytes) => usize::try_from(*bytes).map_err(crate::invalid_corpus),
         SizeRule::Derived(name) => {
-            let remaining = len.saturating_sub(cursor);
-            values
+            let value = values
                 .get(name)
-                .map_or(0, |&value| (value as usize).min(remaining))
+                .ok_or_else(|| crate::invalid_corpus("unresolved ground-truth length"))?;
+            Ok((*value).min(len.saturating_sub(cursor) as u64) as usize)
         }
     }
 }
@@ -317,8 +322,9 @@ fn walk_ground_truth(
     gt: &GroundTruth,
     sample: &[u8],
     record_count: u64,
-) -> (Vec<TruthField>, usize) {
-    let mut fields = Vec::new();
+) -> std::io::Result<(Vec<TruthField>, usize)> {
+    let count = crate::expanded_field_count(gt, record_count)?;
+    let mut fields = Vec::with_capacity(count as usize);
     let mut values: HashMap<String, u64> = HashMap::new();
     let len = sample.len();
     let mut cursor = 0usize;
@@ -326,46 +332,58 @@ fn walk_ground_truth(
     let place = |field: &Field,
                  cursor: &mut usize,
                  values: &mut HashMap<String, u64>,
-                 fields: &mut Vec<TruthField>| {
+                 fields: &mut Vec<TruthField>|
+     -> std::io::Result<()> {
         if let Some(offset) = field.offset {
-            *cursor = offset as usize;
+            *cursor = usize::try_from(offset).map_err(crate::invalid_corpus)?;
         }
-        let start = (*cursor).min(len);
-        if let Some(value) = decode_int(field, sample, *cursor) {
+        let start = *cursor;
+        if let Some(value) = decode_int(field, sample, start) {
             values.insert(field.name.clone(), value);
         }
-        let size = field_size(field, values, *cursor, len);
-        let end = (*cursor + size).min(len);
+        let size = field_size(field, values, start, len)?;
+        let end = start
+            .checked_add(size)
+            .filter(|&end| end <= len)
+            .ok_or_else(|| crate::invalid_corpus("ground-truth field overruns its sample"))?;
         fields.push(TruthField {
             start,
             end,
             role: canonical_truth_role(&field.role),
             ty: truth_type_token(&field.ty),
         });
-        *cursor += size;
+        *cursor = end;
+        Ok(())
     };
 
     for field in &gt.structure.header {
-        place(field, &mut cursor, &mut values, &mut fields);
+        place(field, &mut cursor, &mut values, &mut fields)?;
     }
     for _ in 0..record_count {
+        let start = cursor;
         for field in &gt.structure.record {
-            place(field, &mut cursor, &mut values, &mut fields);
+            place(field, &mut cursor, &mut values, &mut fields)?;
+        }
+        if cursor <= start {
+            return Err(crate::invalid_corpus(
+                "ground-truth record makes no progress",
+            ));
         }
     }
-    (fields, cursor.min(len))
+    if cursor != len {
+        return Err(crate::invalid_corpus(
+            "ground truth leaves trailing sample bytes",
+        ));
+    }
+    Ok((fields, cursor))
 }
 
-/// Expand the ground truth into the set of field-boundary offsets for one
-/// sample: the start offset of every field plus the final end offset.
-fn ground_truth_boundaries(gt: &GroundTruth, sample: &[u8], record_count: u64) -> BTreeSet<usize> {
-    let (fields, end) = walk_ground_truth(gt, sample, record_count);
-    let mut boundaries = BTreeSet::new();
-    boundaries.insert(0);
+/// Build boundaries from the already bounded and validated field expansion.
+fn ground_truth_boundaries(fields: &[TruthField], end: usize) -> BTreeSet<usize> {
+    let mut boundaries = BTreeSet::from([0, end]);
     for field in fields {
         boundaries.insert(field.start);
     }
-    boundaries.insert(end);
     boundaries
 }
 
@@ -497,8 +515,8 @@ pub fn evaluate_format_in(corpus_dir: &Path, format: &str) -> std::io::Result<Fo
     let mut type_hits = 0usize;
     let mut field_total = 0usize;
     for (bytes, record_count) in &samples {
-        let (truth_fields, _) = walk_ground_truth(&gt, bytes, *record_count);
-        let truth_boundaries = ground_truth_boundaries(&gt, bytes, *record_count);
+        let (truth_fields, end) = walk_ground_truth(&gt, bytes, *record_count)?;
+        let truth_boundaries = ground_truth_boundaries(&truth_fields, end);
         let execution = execute(&refined.format, bytes, &limits);
         let inferred = inferred_boundaries(&execution.fields, execution.consumed);
         let leaves = inferred_leaves_by_start(&execution.fields, bytes);
@@ -528,7 +546,9 @@ pub fn evaluate_format_in(corpus_dir: &Path, format: &str) -> std::io::Result<Fo
             recall,
             f1,
             exact: truth_boundaries == inferred,
-            valid: execution.succeeded() && execution.consumed == bytes.len(),
+            valid: execution.succeeded()
+                && execution.consumed == bytes.len()
+                && execution.checks.iter().all(|check| check.passed),
         });
     }
 
@@ -624,6 +644,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ground_truth_walk_rejects_hostile_counts_and_overflowing_offsets() {
+        let mut gt = crate::load_ground_truth("tlv").expect("fixture");
+        assert!(walk_ground_truth(&gt, &[0], u64::MAX).is_err());
+        gt.structure.header[0].offset = Some(u64::MAX);
+        assert!(walk_ground_truth(&gt, &[0], 0).is_err());
+        gt.structure.header[0].offset = Some(0);
+        gt.structure.header[0].size = SizeRule::Fixed(u64::MAX);
+        assert!(walk_ground_truth(&gt, &[0], 0).is_err());
+    }
+
+    #[test]
     fn ground_truth_boundaries_cover_the_whole_sample() {
         // Every format's ground-truth boundaries must start at zero and end at
         // the sample length, with no offset beyond the sample.
@@ -631,7 +662,9 @@ mod tests {
             let gt = crate::load_ground_truth(format).expect("load ground truth");
             for entry in &gt.samples {
                 let bytes = crate::read_sample(format, entry).expect("read sample");
-                let boundaries = ground_truth_boundaries(&gt, &bytes, entry.record_count);
+                let (fields, end) =
+                    walk_ground_truth(&gt, &bytes, entry.record_count).expect("valid ground truth");
+                let boundaries = ground_truth_boundaries(&fields, end);
                 assert!(boundaries.contains(&0), "{format}: missing start boundary");
                 assert!(
                     boundaries.contains(&bytes.len()),
@@ -652,7 +685,8 @@ mod tests {
         let gt = crate::load_ground_truth("tlv").expect("load tlv ground truth");
         let entry = &gt.samples[0];
         let bytes = crate::read_sample("tlv", entry).expect("read sample");
-        let (fields, _) = walk_ground_truth(&gt, &bytes, entry.record_count);
+        let (fields, _) =
+            walk_ground_truth(&gt, &bytes, entry.record_count).expect("valid ground truth");
         assert!(fields.iter().any(|f| f.role == "magic"));
         assert!(fields.iter().any(|f| f.role == "length"));
         assert!(fields.iter().any(|f| f.ty == TypeToken::Bytes));

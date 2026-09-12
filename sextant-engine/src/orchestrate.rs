@@ -50,7 +50,7 @@ impl Default for InferenceOptions {
 pub fn infer(samples: &SampleSet, options: &InferenceOptions) -> Report {
     let slices: Vec<&[u8]> = samples.samples.iter().map(Sample::bytes).collect();
     let refinement = statistics_refinement(&slices, &options.limits);
-    let metadata = run_metadata(samples, options.no_llm);
+    let metadata = run_metadata(samples, true);
     Report::build(
         refinement.format,
         refinement.score,
@@ -96,7 +96,7 @@ pub fn infer_with_llm<P: LlmProvider>(
         match semantic_pass(&baseline.format, &slices, client, &options.limits, semantic) {
             // The pass guarantees non-regression, but guard the invariant here
             // too: never accept a result below the statistics-only baseline.
-            Ok(outcome) if outcome.score.overall + 1e-9 >= baseline.score.overall => {
+            Ok(outcome) if outcome.score.preserves_verified_fit(&baseline.score) => {
                 (outcome.format, outcome.score, outcome.history)
             }
             _ => (baseline.format.clone(), baseline.score.clone(), Vec::new()),
@@ -200,5 +200,17 @@ mod tests {
         // With no samples the score is zero, but a valid report is still built.
         assert_eq!(report.metadata.sample_count, 0);
         assert!(!report.field_map.is_empty());
+    }
+
+    #[test]
+    fn statistics_only_api_reports_actual_mode_even_when_option_requests_a_model() {
+        let report = infer(
+            &SampleSet::default(),
+            &InferenceOptions {
+                no_llm: false,
+                ..InferenceOptions::default()
+            },
+        );
+        assert!(report.metadata.no_llm);
     }
 }

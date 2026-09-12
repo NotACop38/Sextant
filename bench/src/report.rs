@@ -188,40 +188,33 @@ impl BenchReport {
 }
 
 /// The academic baselines Sextant is framed against (PRD Section 15, Section 22).
-/// The notes are deliberately qualitative: the protocol-reverse-engineering
-/// literature reports field-accuracy F-measures that vary widely by corpus and
-/// rarely emit a runnable parser, so an honest framing compares properties and
-/// approximate bands rather than a single headline number lifted out of context.
+/// These projects are context for future comparisons. No competing tool was
+/// evaluated by this harness, so it makes no claims about relative accuracy.
 fn baselines() -> Vec<Baseline> {
     vec![
         Baseline {
             name: "Netzob".to_owned(),
             metric: "field-boundary F-measure".to_owned(),
-            note: "Sequence-alignment PRE; reported boundary F-measures cluster \
-                   well below 0.85 on real protocols and it emits field boundaries, \
-                   not a verified parser."
+            note: "Prior art; not evaluated on this corpus. No comparative accuracy result."
                 .to_owned(),
         },
         Baseline {
             name: "NEMESYS".to_owned(),
             metric: "field-boundary F-measure".to_owned(),
-            note: "Byte-delta segmentation; competitive boundary recall on some \
-                   protocols but no semantic typing or runnable parser."
+            note: "Prior art; not evaluated on this corpus. No comparative accuracy result."
                 .to_owned(),
         },
         Baseline {
             name: "BinaryInferno".to_owned(),
             metric: "field-boundary F-measure".to_owned(),
-            note: "Information-theoretic boundary detection; strong on length \
-                   fields, output is boundaries rather than an executable spec."
+            note: "Prior art; not evaluated on this corpus. No comparative accuracy result."
                 .to_owned(),
         },
         Baseline {
             name: "Sextant".to_owned(),
             metric: "field-boundary F1, perfection, parser validity".to_owned(),
-            note: "Every reported number is verified: the chosen IR parses every \
-                   sample by construction, and the same IR exports a runnable \
-                   Kaitai, Wireshark, ImHex, or 010 parser."
+            note: "Measures native IR fit and field recovery on the same samples used \
+                   for inference. Exported parser runtimes and unseen samples are not measured."
                 .to_owned(),
         },
     ]
@@ -312,7 +305,7 @@ pub fn render_table(report: &BenchReport) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "Sextant benchmark (statistics-only, file-format corpus)"
+        "Sextant benchmark (statistics-only, development corpus)"
     );
     let _ = writeln!(out, "tool version {}", report.tool_version);
     let _ = writeln!(out);
@@ -353,7 +346,11 @@ pub fn render_table(report: &BenchReport) -> String {
         summary.parser_validity,
     );
     let _ = writeln!(out);
-    let _ = writeln!(out, "Targets (PRD Section 15):");
+    let _ = writeln!(out, "Development corpus regression targets:");
+    let _ = writeln!(
+        out,
+        "Validity measures native IR execution on inference samples, not external parsers or held-out data."
+    );
     for target in &report.targets.checks {
         let _ = writeln!(
             out,
@@ -383,7 +380,7 @@ pub fn render_readme_section(report: &BenchReport) -> String {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "| Format | Samples | Boundary F1 | Perfect | Role acc. | Type acc. | Parser validity |"
+        "| Format | Samples | Boundary F1 | Exact boundaries | Role acc. | Type acc. | Native validity |"
     );
     let _ = writeln!(out, "|---|--:|--:|:-:|--:|--:|--:|");
     for format in &report.formats {
@@ -412,9 +409,9 @@ pub fn render_readme_section(report: &BenchReport) -> String {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "Targets (PRD Section 15): field-boundary F1 at least {:.2}, perfection rate at least \
-         {:.2}, parser validity 100%. The corpus run meets them: F1 {:.3}, perfection {:.0}%, \
-         validity {:.0}%.",
+        "Regression targets for this development corpus: field-boundary F1 at least {:.2}, \
+         exact-boundary rate at least {:.2}, native validity 100%. Measured: F1 {:.3}, \
+         exact boundaries {:.0}%, native validity {:.0}%.",
         F1_TARGET,
         PERFECTION_TARGET,
         summary.boundary_f1,
@@ -424,10 +421,11 @@ pub fn render_readme_section(report: &BenchReport) -> String {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "How to read this against academic baselines: compare numbers only within the same \
-         corpus and methodology. The important property here is not just the score, but that \
-         every number above is verified: the chosen IR parses every sample by construction, \
-         and the same IR exports a Kaitai, Wireshark, ImHex, or 010 parser."
+        "These are development-set results: inference and evaluation use the same samples, \
+         including four synthetic formats and three PNG files. Exact boundaries do not imply \
+         correct field types or semantics. Native validity measures complete native parsing \
+         with passing constraints; it does not execute exported parsers. The broader PRD \
+         corpus and held-out accuracy targets remain unqualified. No competing tool was run."
     );
     out
 }
@@ -480,7 +478,7 @@ mod tests {
         let table = render_table(&report);
         assert!(table.contains("field-boundary F1"));
         let readme = render_readme_section(&report);
-        assert!(readme.contains("Parser validity"));
+        assert!(readme.contains("Native validity"));
     }
 
     #[test]

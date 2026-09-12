@@ -30,6 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Refinement preserves every previously parsed or fully verified sample, even
+  when a proposed change improves the aggregate score.
+- CLI success requires full native verification; output creation atomically
+  refuses existing files and symlinks without `--force`.
+- IR diagnostics, native output allocation, inspection coloring, and benchmark
+  ground-truth expansion now have bounded work or memory behavior.
+- Exporters validate their supported IR subset, escape checksum comments, and
+  guard Lua progress. Kaitai byte-bounded arrays use a nested substream.
+- Optional cross-validation uses private scratch storage, isolated Python,
+  bounded child execution, and full sample consumption checks.
+- Documentation distinguishes native fit, semantic suggestions, export runtime
+  evidence, development benchmark results, and unpublished release tooling.
+
 - A pcapng input too short to hold a single block header is reported as
   truncated instead of reading as an empty capture.
 - The bench harness generates the same benchmark prose the README commits, so

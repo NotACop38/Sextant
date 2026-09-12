@@ -2,14 +2,13 @@
 
 # Sextant
 
-**Reverse engineering for unknown binary formats and protocols, with parsers you can trust.**
+**Infer binary structure, test it against samples, and export editable parsers.**
 
 *A sextant fixes an unknown position from known references. Sextant fixes unknown structure from observed bytes.*
 
-Sextant infers the structure of unknown binary file formats and network protocols from sample data, then generates a parser it has **verified against your samples**: a tested artifact, not an unchecked guess.
+Sextant proposes a structure for binary samples, executes it locally, and reports how well it fits. Export that structure to Kaitai, ImHex, Wireshark, or 010 Editor for further analysis. Native verification and external parser validation are reported separately.
 
 [![CI](https://github.com/NotACop38/Sextant/actions/workflows/ci.yml/badge.svg)](https://github.com/NotACop38/Sextant/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/sextant-re.svg)](https://crates.io/crates/sextant-re)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
@@ -18,7 +17,7 @@ Sextant infers the structure of unknown binary file formats and network protocol
 -----
 
 > [!NOTE]
-> **Project status: v0.1.0, ready for the first public release.** Sextant infers simple binary file formats and protocols end to end today, and the verified core runs fully offline under `--no-llm`. The public CLI is statistics-only in this release; the model semantic path exists in the engine and test suite, but provider flags are not wired into the CLI yet. It is pre-1.0, so interfaces may still change before v1.0. See the [roadmap](#roadmap), the [changelog](CHANGELOG.md), and the [benchmarks](#benchmarks) for what is verified.
+> **Project status: pre-release development.** The CLI runs statistics-only and offline by default. The optional model path is available through the engine API. Current accuracy measurements cover 21 development samples in five formats; broader inference accuracy, held-out generalization, and all export runtimes are not yet qualified. Build from source; no GitHub release is currently published. See the [benchmarks](#benchmarks) and [review record](docs/REVIEW_2026-09-12.md).
 
 -----
 
@@ -48,21 +47,17 @@ Reverse engineers constantly hit binary blobs with no documentation: proprietary
 Sextant takes a handful of **samples** of an unknown format (a directory of files, or a packet capture) and produces:
 
 - a **field map**: boundaries, types, and inferred roles (magic, version, length, count, offset, checksum, timestamp, enum, payload);
-- a **runnable parser** in the format of your choice (Kaitai Struct, ImHex pattern, Wireshark Lua dissector, 010 Editor template);
+- an **editable parser specification** in the format of your choice (Kaitai Struct, ImHex pattern, Wireshark Lua dissector, 010 Editor template);
 - an **annotated hex view** for any sample, so you can read the bytes through the inferred structure;
 - a **confidence report** describing what was verified, what is uncertain, and why.
 
-The point is not to replace the reverse engineer. It is to get you ~70% of the way to a working parser in minutes, with the uncertain parts clearly flagged, so your time goes to the genuinely hard 30%.
+Use the result as a starting hypothesis for analysis. A structure can consume every byte without recovering its meaning: an opaque payload alone can earn a perfect fit score. Inspect the evidence, vary the samples, and validate exported code in its target runtime before relying on it.
 
 ## The problem
 
-Tooling for unknown binary structure is split across three groups that don’t talk to each other:
+Manual parser authoring requires repeated guesses about boundaries, lengths, and repetition. Sextant makes those guesses executable and compares them against all retained samples. Its useful scope today is simple structured data with observable constants, lengths, counts, or delimiters.
 
-- **Practical tools** (Kaitai Struct, ImHex, 010 Editor, PolyFile) are either *fully manual* (a human writes the spec) or only *recognize already-known formats*. The hard inference is left entirely to the analyst.
-- **Academic protocol-reverse-engineering tools** (Netzob, NetPlier, NEMESYS, BinaryInferno, DynPRE, BinPRE) *do* infer structure, but they’re research prototypes with modest real-world accuracy, they often require expert hints (known delimiters, key fields), they tend to struggle with packed fields, and they emit raw field boundaries rather than a usable parser.
-- **LLM reverse-engineering tools** (GhidraMCP, ida-pro-mcp, Gepetto, ReverserAI) have converged almost entirely on *disassembly*: renaming functions and commenting decompiled code. None of them address format or protocol structure.
-
-Nobody is sitting in the middle. Sextant is built for that gap: statistical inference for the boundaries, a verification-gated semantic layer, and (the part everyone is missing) **verification that the result actually parses the input**.
+The project combines established inference techniques with a native verification loop and editable exports. It does not establish a novelty or accuracy advantage over existing research tools; those comparisons require common data and independently reproduced results.
 
 ## How it works
 
@@ -99,7 +94,7 @@ Nobody is sitting in the middle. Sextant is built for that gap: statistical infe
                  └──────────────┘
 ```
 
-The heart of Sextant is the **Format Hypothesis IR** and its **native executor**. Every hypothesis about a format is compiled to a structured intermediate representation and then *executed directly against the raw bytes* and scored on how well it fits. This is what separates Sextant from a model that simply emits a guess: hypotheses are **falsifiable and tested**, and parse failures feed back into the next round of refinement, localizing exactly which assumption was wrong. Real parsers (Kaitai, ImHex, Wireshark, 010) are just **exporters** off that verified IR at the very end.
+The heart of Sextant is the **Format Hypothesis IR** and its **native executor**. Every hypothesis about a format is compiled to a structured intermediate representation and then *executed directly against the raw bytes* and scored on how well it fits. This is what separates Sextant from a model that simply emits a guess: hypotheses are **falsifiable and tested**, and parse failures feed back into the next round of refinement, localizing exactly which assumption was wrong. The exporters translate this IR into target source. That translation has its own correctness boundary: native fit alone does not prove the exported code behaves identically.
 
 A note on the alignment step: comparing many samples to discover where fields begin and end is related to sequence alignment, and the PRD keeps gap-aware alignment as the target. The current v0.1.0 implementation uses a bounded positional alignment over normalized samples; adding gap-aware alignment is planned future work.
 
@@ -107,7 +102,7 @@ The language-model path is **optional** and never weakens verification. The stat
 
 ## Demo
 
-An unknown binary blob goes in; a verified field map and a working parser come out, fully offline. The demo is recorded as an [asciinema cast](docs/demo.cast). Play it locally with:
+The demo shows offline inference, inspection, and export on bundled samples. The demo is recorded as an [asciinema cast](docs/demo.cast). Play it locally with:
 
 ```bash
 asciinema play docs/demo.cast
@@ -129,16 +124,15 @@ Full user documentation lives in [`docs/`](docs/index.md):
 
 ## How Sextant is positioned
 
-The table reflects design goals for v1.
-
-|                                            |Manual tools<br>(Kaitai, ImHex, 010)|Academic PRE<br>(Netzob, BinaryInferno…)|LLM-disasm bridges<br>(GhidraMCP, Gepetto)|**Sextant**       |
-|--------------------------------------------|:----------------------------------:|:--------------------------------------:|:----------------------------------------:|:----------------:|
-|Infers unknown structure from samples       |✗ *(you write the spec)*            |✓                                       |✗ *(works on disassembly)*                |**✓**             |
-|Semantic field meaning (names, roles, types)|manual                              |limited                                 |✓                                         |**partial today** |
-|Produces a runnable parser                  |✓ *(after manual work)*             |✗                                       |✗                                         |**✓**             |
-|Verifies output against the input           |n/a                                 |✗                                       |✗                                         |**✓ (core loop)** |
-|Handles packed flags and bit evidence       |✓                                   |often ✗                                 |n/a                                       |**partial today** |
-|Runs without sending data to a model        |✓                                   |✓                                       |✗                                         |**✓ (`--no-llm`)**|
+| Capability | Current boundary |
+|---|---|
+| Native inference and verification | Offline, tested against the retained input samples |
+| Semantic names and roles | Heuristic or model suggestions; fit does not prove meaning |
+| Sample alignment | Bounded positional alignment; gap-aware alignment is planned |
+| Protocol input | Captured UDP payloads and TCP segment payloads; no TCP stream reassembly |
+| Parser export | Supported IR subset per target; unsupported layouts return errors |
+| External runtime checks | Kaitai compiler/Python and Lua tests; ImHex and 010 runtime qualification remains open |
+| Accuracy evidence | Development corpus only; no held-out or competitor evaluation |
 
 ## Benchmarks
 
@@ -147,7 +141,7 @@ Accuracy is measured against a ground-truth corpus by `sextant bench` (PRD Secti
 <!-- BENCH:START -->
 These numbers are produced by `sextant bench` over the ground-truth corpus and are regenerated by the harness, not written by hand. The run is statistics-only (`--no-llm`), so it reflects the verified core with no language model involved.
 
-| Format | Samples | Boundary F1 | Perfect | Role acc. | Type acc. | Parser validity |
+| Format | Samples | Boundary F1 | Exact boundaries | Role acc. | Type acc. | Native validity |
 |---|--:|--:|:-:|--:|--:|--:|
 | tlv | 3 | 0.943 | no | 0.778 | 0.556 | 100% |
 | scma | 5 | 0.834 | no | 0.333 | 0.333 | 100% |
@@ -156,9 +150,9 @@ These numbers are produced by `sextant bench` over the ground-truth corpus and a
 | png | 3 | 1.000 | yes | 0.923 | 0.692 | 100% |
 | **corpus** | **21** | **0.956** | **60%** | **0.807** | **0.716** | **100%** |
 
-Targets (PRD Section 15): field-boundary F1 at least 0.85, perfection rate at least 0.50, parser validity 100%. The corpus run meets them: F1 0.956, perfection 60%, validity 100%.
+Regression targets for this development corpus: field-boundary F1 at least 0.85, exact-boundary rate at least 0.50, native validity 100%. Measured: F1 0.956, exact boundaries 60%, native validity 100%.
 
-How to read this against academic baselines: compare numbers only within the same corpus and methodology. The important property here is not just the score, but that every number above is verified: the chosen IR parses every sample by construction, and the same IR exports a Kaitai, Wireshark, ImHex, or 010 parser.
+These are development-set results: inference and evaluation use the same samples, including four synthetic formats and three PNG files. Exact boundaries do not imply correct field types or semantics. Native validity measures complete native parsing with passing constraints; it does not execute exported parsers. The broader PRD corpus and held-out accuracy targets remain unqualified. No competing tool was run.
 <!-- BENCH:END -->
 
 ## Output formats
@@ -182,7 +176,7 @@ sextant infer ./samples/*.sav --out report.json
 # Read a sample through the inferred field map (annotated hex)
 sextant inspect report.json --sample ./samples/save_01.sav
 
-# Export a verified parser
+# Export a parser specification
 sextant export report.json --format kaitai    --out save_format.ksy
 sextant export report.json --format imhex     --out save_format.hexpat
 sextant export report.json --format wireshark --out save_dissector.lua
@@ -210,63 +204,20 @@ offset  size  field          role        type     value           confidence
 
 ## Installation
 
-Sextant ships a single binary named `sextant` for Linux, macOS, and Windows
-once a tagged release is published. Pick whichever method suits you.
-
-### Prebuilt binaries (install script)
-
-After the GitHub Release is published, the scripts download the release archive
-for your platform, verify its SHA-256 checksum, and install the `sextant` binary.
-No compiler required.
-
-```bash
-# Linux and macOS
-curl -fsSL https://raw.githubusercontent.com/NotACop38/Sextant/main/scripts/install.sh | sh
-```
-
-```powershell
-# Windows (PowerShell)
-irm https://raw.githubusercontent.com/NotACop38/Sextant/main/scripts/install.ps1 | iex
-```
-
-You can also download an archive and its `.sha256` directly from the
-[Releases page](https://github.com/NotACop38/Sextant/releases) and verify it
-against the published `SHA256SUMS`.
-
-### From crates.io
-
-The crates.io name `sextant` belongs to an unrelated project, so the CLI package
-is `sextant-re`. After publication, it installs a binary called `sextant`.
-
-```bash
-cargo install sextant-re
-```
-
-### Homebrew
-
-A formula template is provided in `packaging/homebrew/sextant.rb` for a Homebrew
-tap. Once published:
-
-```bash
-brew install NotACop38/tap/sextant
-```
-
-### From source
+Build from source with the pinned Rust toolchain:
 
 ```bash
 git clone https://github.com/NotACop38/Sextant
 cd Sextant
 cargo build --release
-# binary at ./target/release/sextant
+./target/release/sextant --help
 ```
 
-See [docs/RELEASING.md](docs/RELEASING.md) for the versioning policy, the
-release process, and how artifacts are built and checksummed.
+The binary is named `sextant`. The repository contains release workflows, install scripts, and a Homebrew formula template, but no tagged GitHub release is currently published. Registry publication is not verified here. Use the source build until distribution artifacts are available and tested.
 
-Sextant ships as a single static binary. Optional dependencies:
+Ordinary inference, inspection, and export need no JVM or model account. Optional Kaitai cross-validation requires the Kaitai Struct compiler, a JVM, Python, and the `kaitaistruct` runtime. The engine model API reads API keys from the environment or config only.
 
-- **Kaitai export** shells out to the Kaitai Struct compiler (`kaitai-struct-compiler`), which requires a JVM. Other export formats have no external dependency.
-- **The model semantic pass** exists in the engine and reads API keys from the environment or config only. The v0.1.0 CLI does not expose provider flags yet, so CLI inference remains statistics-only and offline.
+See [installation](docs/installation.md) and the [release process](docs/RELEASING.md).
 
 ## Design principles
 
@@ -276,13 +227,17 @@ Sextant ships as a single static binary. Optional dependencies:
 - **The model is an accelerant, not a dependency.** The statistical engine stands on its own and runs offline. The semantic pass can add labels and refinements only after executor verification, and the public CLI remains statistics-only in v0.1.0.
 - **Editable, standard outputs.** Sextant hands you a Kaitai spec or a Wireshark dissector (open formats you can read, correct, and own), not a black box.
 
-The v0.1.0 core below is implemented. Product work that remains, including CLI provider flags and gap-aware alignment, should be tracked in [issues](https://github.com/NotACop38/Sextant/issues) and [discussions](https://github.com/NotACop38/Sextant/discussions).
+## Roadmap
 
-- [x] **Phase 0: Scaffold.** CLI skeleton, sample-corpus harness, the IR type definitions, and a suite of *known* formats with hand-verified ground truth for measuring accuracy from day one.
-- [x] **Phase 1: MVP engine (no model).** Statistical inference + IR executor + accuracy scoring against the known-format suite.
-- [x] **Phase 2: The novel core.** Provider-agnostic semantic pass in the engine and the generate-test-refine loop. CLI provider flags remain future work.
-- [x] **Phase 3: Exporters.** Kaitai, ImHex, Wireshark, 010, and the annotated hex view.
-- [x] **Phase 4: Protocols and showcases.** pcap ingestion, an industrial/IoT protocol case study (Modbus/TCP), and published benchmarks against the academic baselines.
+The native pipeline, optional model API, protocol ingestion, and four exporters are implemented. The next priorities are evidence and fidelity:
+
+- Complete the PRD corpus and add held-out samples before claiming general accuracy.
+- Qualify generated code in each actual target runtime and extend supported layouts.
+- Add gap-aware alignment and TCP stream reassembly where evidence supports them.
+- Expose model configuration only with clear data handling and cost controls.
+- Publish and smoke-test release artifacts before advertising installation channels.
+
+The [engineering checklist](docs/ENGINEERING_CHECKLIST.md) distinguishes implementation from outstanding acceptance criteria.
 
 ## Project documents
 
@@ -292,13 +247,13 @@ The v0.1.0 core below is implemented. Product work that remains, including CLI p
 
 ## Prior art and acknowledgements
 
-Sextant stands on a great deal of prior work. The academic protocol-reverse-engineering literature (Netzob, NetPlier, NEMESYS, BinaryInferno, DynPRE, BinPRE) defined the statistical techniques this project builds on. [Kaitai Struct](https://kaitai.io/) is both an inspiration and a primary export target, and [ImHex](https://imhex.werwolv.net/) and 010 Editor shaped how analysts expect to read binary structure. Sextant’s contribution is to connect sample-based inference, language-model semantics, and **round-trip verification** into a single tool that emits a tested parser.
+Sextant stands on a great deal of prior work. The academic protocol-reverse-engineering literature (Netzob, NetPlier, NEMESYS, BinaryInferno, DynPRE, BinPRE) defined the statistical techniques this project builds on. [Kaitai Struct](https://kaitai.io/) is both an inspiration and a primary export target, and [ImHex](https://imhex.werwolv.net/) and 010 Editor shaped how analysts expect to read binary structure. Sextant connects sample-based inference, optional language-model semantics, native fit testing, and parser export in one workflow.
 
 ## Contributing
 
 Contributions are welcome. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) and the [agent guide](AGENTS.md), which together describe how the project is built one checklist step at a time and the verification invariant every change must respect. The maintainers triage incoming issues against the labels and process in [`docs/TRIAGE.md`](docs/TRIAGE.md).
 
-Open-ended questions, format requests, and corpus suggestions are best raised in [GitHub Discussions](https://github.com/NotACop38/Sextant/discussions). Issues describing **formats or protocols you would like to be able to reverse**, or **public sample corpora** suitable for benchmarking, are especially valuable: they directly shape the test suite. Report security vulnerabilities privately as described in [`SECURITY.md`](SECURITY.md).
+Use [GitHub issues](https://github.com/NotACop38/Sextant/issues) for format requests and corpus suggestions. Issues describing **formats or protocols you would like to be able to reverse**, or **public sample corpora** suitable for benchmarking, are especially valuable: they directly shape the test suite. Report security vulnerabilities privately as described in [`SECURITY.md`](SECURITY.md).
 
 ## License
 

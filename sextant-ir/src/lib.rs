@@ -52,8 +52,9 @@ pub use primitives::{
     StringEncoding,
 };
 pub use validate::{
-    MAX_ARRAY_COUNT, MAX_FIELD_COUNT, MAX_FIXED_FIELD_BYTES, MAX_NESTING_DEPTH, ValidationError,
-    ValidationErrorKind, ValidationReport,
+    MAX_ARRAY_COUNT, MAX_DIAGNOSTIC_TEXT_BYTES, MAX_FIELD_COUNT, MAX_FIXED_FIELD_BYTES,
+    MAX_NESTING_DEPTH, MAX_VALIDATION_ERRORS, ValidationError, ValidationErrorKind,
+    ValidationReport,
 };
 
 impl Format {
@@ -62,12 +63,14 @@ impl Format {
     /// Checks that every length, count, offset, and checksum reference resolves
     /// in scope to an appropriate field, that fixed fields do not overlap, and
     /// that all sizes, widths, ranges, and confidences are sane. Returns the
-    /// full [`ValidationReport`] when anything is wrong (FR-19 acceptance).
+    /// bounded [`ValidationReport`] when anything is wrong (FR-19 acceptance).
+    /// Shape limits are checked before recursive semantic work. Diagnostics
+    /// report when validation stops early and visibly shorten long labels.
     ///
     /// # Errors
     ///
-    /// Returns a [`ValidationReport`] listing every problem found when the IR is
-    /// not semantically well-formed.
+    /// Returns a [`ValidationReport`] with at most [`MAX_VALIDATION_ERRORS`]
+    /// diagnostics when the IR is not semantically well-formed.
     pub fn validate(&self) -> Result<(), ValidationReport> {
         let report = validate::validate(self);
         if report.is_ok() { Ok(()) } else { Err(report) }
