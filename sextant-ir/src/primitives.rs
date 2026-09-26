@@ -54,14 +54,34 @@ pub enum StringEncoding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChecksumAlgorithm {
-    /// CRC-32 (the IEEE polynomial, as used by PNG and zlib).
+    /// CRC-32/ISO-HDLC, as used by PNG and zlib: reflected polynomial
+    /// `0xEDB88320`, initial value and final XOR `0xFFFFFFFF` (check value
+    /// `0xCBF43926` for the ASCII bytes `123456789`).
     Crc32,
-    /// CRC-16.
+    /// CRC-16/ARC: reflected polynomial `0xA001`, initial value `0`, no final
+    /// XOR (check value `0xBB3D` for the ASCII bytes `123456789`). Other CRC-16
+    /// variants, such as CCITT or MODBUS, are different algorithms.
     Crc16,
-    /// A simple additive checksum (sum of bytes modulo the field width).
+    /// The sum of every covered byte, modulo two to the power of eight times
+    /// the field width.
     Additive,
-    /// A bytewise XOR checksum.
+    /// Every covered byte folded together with XOR into one byte, then
+    /// zero-extended to the field width.
     Xor,
+}
+
+impl std::fmt::Display for ChecksumAlgorithm {
+    /// The algorithm's catalogued name, as reports and exported comments show
+    /// it. The names use only characters that are inert in every comment
+    /// syntax the exporters generate.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ChecksumAlgorithm::Crc32 => "CRC-32 (ISO-HDLC)",
+            ChecksumAlgorithm::Crc16 => "CRC-16 (ARC)",
+            ChecksumAlgorithm::Additive => "additive byte sum",
+            ChecksumAlgorithm::Xor => "XOR of bytes",
+        })
+    }
 }
 
 /// The semantic role a field plays in a format (FR-17, FR-18, PRD Section 10).

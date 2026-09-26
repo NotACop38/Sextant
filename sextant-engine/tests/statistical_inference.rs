@@ -244,3 +244,41 @@ fn garbage_input_never_panics_and_stays_valid() {
         }
     }
 }
+
+#[test]
+fn inference_is_deterministic_across_runs() {
+    // The same samples must always yield the same ranked candidates, down to
+    // the last bit of every score (NFR-6). Repeated runs in one process see
+    // different hash seeds and allocation addresses, so any ranking or score
+    // that depends on hash-map iteration order shows up here.
+    for (format, extension) in [
+        ("tlv", "tlv"),
+        ("png", "png"),
+        ("bmp", "bmp"),
+        ("zip", "zip"),
+    ] {
+        let samples = read_samples(format, extension);
+        let slices: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
+        let render = || {
+            infer_candidates(&slices, &Limits::default())
+                .iter()
+                .map(|candidate| {
+                    format!(
+                        "{}|{:?}|{}",
+                        serde_json::to_string(&candidate.format).expect("serialize a candidate"),
+                        candidate.score.structure.to_bits(),
+                        candidate.score.overall.to_bits()
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = render();
+        for _ in 0..3 {
+            assert_eq!(
+                render(),
+                first,
+                "inference on {format} is not deterministic"
+            );
+        }
+    }
+}

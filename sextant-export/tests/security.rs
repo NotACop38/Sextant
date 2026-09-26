@@ -333,6 +333,349 @@ fn templates_reject_layouts_they_cannot_preserve() {
     }
 }
 
+/// Names that each try to close a comment or doc form some target generates.
+const HOSTILE_NAMES: &[&str] = &[
+    "p */ throw new Error('INJECTED'); /* q",
+    "p ]## quit(3) ##[ q",
+    "p \\u002a/ q",
+    "r\nthrow new Error('INJECTED')\n// q",
+    "p \"\"\" ''' ` --[[ ]] --> <!-- ?> \u{202e} \u{2028} \u{85} q",
+];
+
+/// Sequences that must never reach generated source from IR text.
+const TERMINATORS: &[&str] = &[
+    "*/", "/*", "]##", "##[", "\"\"\"", "'''", "`", "--[[", "]]", "-->", "<!--", "?>", "\\u002a",
+    "\u{202e}", "\u{2028}", "\u{85}",
+];
+
+fn checksum_over(index: usize, name: &str) -> Field {
+    let mut checksum = Field::new(
+        Kind::Integer {
+            width: 1,
+            signed: Signedness::Unsigned,
+            endianness: None,
+        },
+        Confidence::CERTAIN,
+    )
+    .with_name(format!("sum_{index}"));
+    checksum.constraints.push(Constraint::Checksum {
+        spec: ChecksumSpec {
+            algorithm: ChecksumAlgorithm::Additive,
+            covered: CoveredRange {
+                from: RangeAnchor::FieldStart {
+                    field: FieldRef::new(name),
+                },
+                to: RangeAnchor::FieldEnd {
+                    field: FieldRef::new(name),
+                },
+            },
+        },
+    });
+    checksum
+}
+
+#[test]
+fn hostile_names_cannot_escape_comments_or_docs_in_any_exporter() {
+    let mut fields = Vec::new();
+    for (index, name) in HOSTILE_NAMES.iter().enumerate() {
+        fields.push(
+            Field::new(Kind::Bytes, Confidence::CERTAIN)
+                .with_name(*name)
+                .with_size(SizeRule::Fixed { bytes: 1 }),
+        );
+        fields.push(checksum_over(index, name));
+    }
+    let mut format = format_of(fields);
+    format.metadata.description = Some(HOSTILE_NAMES.join(" "));
+    format.validate().expect("hostile names are valid IR data");
+    for target in ExportFormat::ALL {
+        let source = export(&format, target).unwrap();
+        // Lua has no C-style comments and carries IR names only inside escaped
+        // string literals, which the Lua tests cover; every other target places
+        // IR text in comments or docs, which must hold no terminator at all.
+        if target != ExportFormat::Wireshark {
+            for terminator in TERMINATORS {
+                assert!(
+                    !source.contains(terminator),
+                    "{target}: {terminator:?} reached generated source:\n{source}"
+                );
+            }
+        }
+        let mut seen = 0;
+        for line in source.lines().filter(|line| line.contains("INJECTED")) {
+            seen += 1;
+            let line = line.trim_start();
+            match target {
+                // The compiler copies these notes into doc comments.
+                ExportFormat::Kaitai => assert!(
+                    line.starts_with("doc: 'checksum: additive byte sum from the ")
+                        || line.starts_with("title: '"),
+                    "{target}: active source: {line}"
+                ),
+                ExportFormat::ImHex | ExportFormat::Bt => {
+                    assert!(line.starts_with("//"), "{target}: active source: {line}")
+                }
+                // Labels are string literals in field registrations, never
+                // comment text.
+                ExportFormat::Wireshark => assert!(
+                    line.starts_with("f[\"") && line.contains("ProtoField."),
+                    "{target}: unexpected line: {line}"
+                ),
+            }
+        }
+        // Comment-bearing targets keep the sanitized text for review. Lua
+        // labels these fields with their sanitized identifiers instead.
+        if target != ExportFormat::Wireshark {
+            assert!(seen > 0, "{target}: the hostile text was dropped entirely");
+        }
+    }
+}
+
+fn struct_named(name: &str) -> Field {
+    Field::new(
+        Kind::Struct {
+            structure: Structure::new(vec![
+                Field::new(
+                    Kind::Integer {
+                        width: 1,
+                        signed: Signedness::Unsigned,
+                        endianness: None,
+                    },
+                    Confidence::CERTAIN,
+                )
+                .with_name("inner"),
+            ]),
+        },
+        Confidence::CERTAIN,
+    )
+    .with_name(name)
+}
+
+#[test]
+fn kaitai_builtin_type_names_become_user_types() {
+    let names = [
+        "f4", "u4", "u1", "s2be", "f8le", "str", "strz", "b1", "b12", "b64le",
+    ];
+    let format = format_of(names.iter().map(|name| struct_named(name)).collect());
+    format.validate().unwrap();
+    let ksy = export(&format, ExportFormat::Kaitai).unwrap();
+    for name in names {
+        assert!(
+            ksy.contains(&format!("- id: {name}\n    type: {name}_x\n")),
+            "{name}:\n{ksy}"
+        );
+        assert!(
+            ksy.contains(&format!("\n  {name}_x:\n    seq:\n")),
+            "{name}:\n{ksy}"
+        );
+        assert!(
+            !ksy.contains(&format!("- id: {name}\n    type: {name}\n")),
+            "{name} still names a built-in type:\n{ksy}"
+        );
+    }
+    // The capability check follows the same renaming: an enum spelled like
+    // the renamed type shares its generated class name and is rejected.
+    for enum_name in ["f4", "f4_x"] {
+        let mut clash = format_of(vec![struct_named("f4")]);
+        clash.enums.insert(enum_name.into(), enum_def(&["one"]));
+        clash.validate().unwrap();
+        let error = export(&clash, ExportFormat::Kaitai).unwrap_err();
+        assert!(error.to_string().contains("identifiers collide"), "{error}");
+    }
+    // Two types that both want f4_x get distinct allocated names instead.
+    let both = format_of(vec![struct_named("f4"), struct_named("f4_x")]);
+    both.validate().unwrap();
+    let ksy = export(&both, ExportFormat::Kaitai).unwrap();
+    assert!(
+        ksy.contains("type: f4_x\n") && ksy.contains("type: f4_x_2\n"),
+        "{ksy}"
+    );
+}
+
+#[test]
+fn kaitai_keywords_are_renamed_at_declaration_and_every_reference() {
+    let byte = |name: &str| {
+        Field::new(
+            Kind::Integer {
+                width: 1,
+                signed: Signedness::Unsigned,
+                endianness: None,
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name(name)
+    };
+    let mut fields = Vec::new();
+    // Expression keywords, YAML 1.1 words, and target-language keywords.
+    let words = [
+        "true", "not", "and", "yes", "off", "null", "class", "def", "wait", "read",
+    ];
+    for word in words {
+        fields.push(byte(word));
+        fields.push(
+            Field::new(Kind::Bytes, Confidence::CERTAIN)
+                .with_name(format!("{word} body"))
+                .with_size(SizeRule::Derived {
+                    length_field: FieldRef::new(word),
+                }),
+        );
+    }
+    let mut format = format_of(fields);
+    format.name = "none".into();
+    format.validate().unwrap();
+    let ksy = export(&format, ExportFormat::Kaitai).unwrap();
+    assert!(ksy.contains("  id: none_x\n"), "{ksy}");
+    for word in words {
+        assert!(ksy.contains(&format!("- id: {word}_x\n")), "{word}:\n{ksy}");
+        assert!(ksy.contains(&format!("size: {word}_x\n")), "{word}:\n{ksy}");
+        assert!(!ksy.contains(&format!("- id: {word}\n")), "{word}:\n{ksy}");
+    }
+    // Ordinary names are not renamed.
+    assert!(ksy.contains("- id: true_body\n"), "{ksy}");
+}
+
+#[test]
+fn template_reserved_names_are_renamed_at_declaration_and_every_reference() {
+    let byte = |name: &str| {
+        Field::new(
+            Kind::Integer {
+                width: 1,
+                signed: Signedness::Unsigned,
+                endianness: None,
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name(name)
+    };
+    let sized = |name: &str| {
+        Field::new(Kind::Bytes, Confidence::CERTAIN)
+            .with_name(format!("{name} body"))
+            .with_size(SizeRule::Derived {
+                length_field: FieldRef::new(name),
+            })
+    };
+    let counted = |name: &str| {
+        Field::new(
+            Kind::Array {
+                element: Box::new(byte("item")),
+                count: CountRule::FromField {
+                    count_field: FieldRef::new(name),
+                },
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name(format!("{name} items"))
+    };
+    for (target, words, type_name) in [
+        (ExportFormat::ImHex, ["u8", "struct", "std"], "FileSize"),
+        (ExportFormat::Bt, ["int", "local", "string"], "FileSize_"),
+    ] {
+        let mut fields = Vec::new();
+        for word in words {
+            fields.push(byte(word));
+            fields.push(sized(word));
+            fields.push(counted(word));
+        }
+        fields.push(struct_named("file size"));
+        let mut format = format_of(fields);
+        format.name = "struct".into();
+        format.validate().unwrap();
+        let source = export(&format, target).unwrap();
+        for word in words {
+            for expected in [
+                format!(" {word}_;"),
+                format!("{word}_body[{word}_];"),
+                format!("{word}_items[{word}_];"),
+            ] {
+                assert!(source.contains(&expected), "{target}: {expected}\n{source}");
+            }
+            assert!(
+                !source.contains(&format!(" {word};")),
+                "{target}:\n{source}"
+            );
+        }
+        assert!(
+            source.contains(&format!("{type_name} file_size;")),
+            "{target}:\n{source}"
+        );
+        let root = match target {
+            ExportFormat::ImHex => "Struct struct_ @ 0x00;",
+            _ => "} struct_;",
+        };
+        assert!(source.contains(root), "{target}:\n{source}");
+        // A field whose sanitized name already carries the suffix would
+        // collide with the renamed keyword, so the pair is rejected.
+        let clash = format_of(vec![byte(words[1]), byte(&format!("{}_", words[1]))]);
+        clash.validate().unwrap();
+        let error = export(&clash, target).unwrap_err();
+        assert!(error.to_string().contains("collide"), "{target}: {error}");
+    }
+    // 010 keeps typedefs and enum constants clear of the functions the
+    // template calls and of upper-case built-in types.
+    let mut format = format_of(vec![struct_named("d w o r d")]);
+    format.enums.insert("f eof".into(), enum_def(&["f tell"]));
+    format.validate().unwrap();
+    let bt = export(&format, ExportFormat::Bt).unwrap();
+    for expected in ["} DWORD_;", "} FEof_;", "FTell_ = 1"] {
+        assert!(bt.contains(expected), "{expected}:\n{bt}");
+    }
+}
+
+#[test]
+fn kaitai_rejects_enum_values_its_compiler_cannot_represent() {
+    let enum_field = Field::new(
+        Kind::Enum {
+            enum_ref: "wide".into(),
+            width: 8,
+            endianness: None,
+        },
+        Confidence::CERTAIN,
+    )
+    .with_name("value");
+    for (value, accepted) in [
+        (i128::from(i64::MAX), true),
+        (i128::from(i64::MIN), true),
+        (i128::from(i64::MAX) + 1, false),
+        (i128::from(u64::MAX), false),
+        (i128::from(i64::MIN) - 1, false),
+    ] {
+        let mut format = format_of(vec![enum_field.clone()]);
+        format.enums.insert(
+            "wide".into(),
+            EnumDef {
+                width: Some(8),
+                variants: vec![EnumVariant {
+                    value,
+                    name: "top".into(),
+                    description: None,
+                }],
+            },
+        );
+        format.validate().unwrap();
+        match export(&format, ExportFormat::Kaitai) {
+            Ok(ksy) => {
+                assert!(accepted, "{value} accepted:\n{ksy}");
+                assert!(ksy.contains(&format!("{value}: top")), "{ksy}");
+            }
+            Err(error) => {
+                assert!(!accepted, "{value} rejected: {error}");
+                assert!(
+                    error.to_string().contains("signed 64-bit"),
+                    "{value}: {error}"
+                );
+            }
+        }
+        // The other targets are unaffected by the Kaitai key limit.
+        for target in [
+            ExportFormat::ImHex,
+            ExportFormat::Bt,
+            ExportFormat::Wireshark,
+        ] {
+            assert!(export(&format, target).is_ok(), "{target} {value}");
+        }
+    }
+}
+
 #[test]
 fn deeply_repeated_long_names_cannot_amplify_generated_source() {
     let leaf =

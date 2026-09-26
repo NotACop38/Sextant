@@ -76,9 +76,11 @@ pub(crate) enum Seg {
 }
 
 /// Enumerate a path to every field in `format`, in pre-order (each field before
-/// its descendants). The order matches the flattened field map in
-/// [`crate::report`], so a position in this list is a stable index a caller can
-/// hand to and receive back from an external proposer such as the semantic pass.
+/// its descendants), at any depth: struct children, array elements, and the
+/// elements of arrays whose element is itself an array. The order is exactly
+/// the order of the report's flattened field map ([`crate::report::Report`]),
+/// so a position in this list is a stable index a caller can hand to and
+/// receive back from an external proposer such as the semantic pass.
 #[must_use]
 pub(crate) fn field_paths(format: &Format) -> Vec<Vec<Seg>> {
     let mut out = Vec::new();
@@ -87,25 +89,30 @@ pub(crate) fn field_paths(format: &Format) -> Vec<Vec<Seg>> {
     out
 }
 
-/// Walk a structure in pre-order, recording the path to each field and
-/// descending into nested structures and array elements.
+/// Record the path to each field of `structure`, in order, each followed by
+/// the paths to its descendants.
 fn collect_paths(structure: &Structure, prefix: &mut Vec<Seg>, out: &mut Vec<Vec<Seg>>) {
     for (index, field) in structure.fields.iter().enumerate() {
         prefix.push(Seg::Field(index));
-        out.push(prefix.clone());
-        match &field.kind {
-            Kind::Struct { structure } => collect_paths(structure, prefix, out),
-            Kind::Array { element, .. } => {
-                prefix.push(Seg::Element);
-                out.push(prefix.clone());
-                if let Kind::Struct { structure } = &element.kind {
-                    collect_paths(structure, prefix, out);
-                }
-                prefix.pop();
-            }
-            _ => {}
-        }
+        collect_field_paths(field, prefix, out);
         prefix.pop();
+    }
+}
+
+/// Record the path to `field`, which sits at `prefix`, and then the paths to
+/// its descendants. This mirrors the report's field flattening step for step:
+/// a struct contributes its children in order, and an array contributes its
+/// element, which may itself be a struct or another array.
+fn collect_field_paths(field: &Field, prefix: &mut Vec<Seg>, out: &mut Vec<Vec<Seg>>) {
+    out.push(prefix.clone());
+    match &field.kind {
+        Kind::Struct { structure } => collect_paths(structure, prefix, out),
+        Kind::Array { element, .. } => {
+            prefix.push(Seg::Element);
+            collect_field_paths(element, prefix, out);
+            prefix.pop();
+        }
+        _ => {}
     }
 }
 

@@ -109,11 +109,14 @@ impl LlmProvider for MockProvider {
         self.enter_call()?;
         let value = match &self.json {
             Some(value) => value.clone(),
+            // Like a real provider, a response that fails to parse still spent
+            // its tokens, so the usage travels with the error (NFR-9).
             None => serde_json::from_str(&self.text).map_err(|error| {
                 LlmError::InvalidResponse(format!(
                     "mock has no canned JSON and its text is not JSON: {error} (schema hint was: {})",
                     request.schema_hint
                 ))
+                .with_usage(self.usage)
             })?,
         };
         Ok(JsonResponse {
@@ -135,6 +138,21 @@ mod tests {
             .expect("ok");
         assert_eq!(response.text, "hello");
         assert_eq!(mock.calls(), 1);
+    }
+
+    #[test]
+    fn a_non_json_text_error_carries_the_usage() {
+        let usage = Usage {
+            input_tokens: 3,
+            output_tokens: 4,
+        };
+        let mock = MockProvider::new("m").with_text("prose").with_usage(usage);
+        let error = mock
+            .complete_json(&JsonRequest::new("ignored", "an object"))
+            .expect_err("not JSON");
+        let (inner, attached) = error.into_parts();
+        assert!(matches!(inner, LlmError::InvalidResponse(_)));
+        assert_eq!(attached, Some(usage));
     }
 
     #[test]

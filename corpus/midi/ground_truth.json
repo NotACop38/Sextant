@@ -1,0 +1,33 @@
+{
+  "format": "midi",
+  "display_name": "Standard MIDI File (SMF)",
+  "description": "A real music file format: an MThd header chunk with a fixed length of 6, the file format, the track count, and the time division, followed by that many MTrk chunks, each a big-endian length and that many bytes of delta-timed events. Exercises four-character chunk tags, big-endian lengths, a count in the header that governs the chunk array, and repeated length-prefixed records.",
+  "endianness": "big",
+  "provenance": {
+    "source": "synthetic",
+    "origin": "Short melodies written by corpus/midi/generate.py and read back by an independent chunk and event walker; file identifies each as Standard MIDI data.",
+    "license": "CC0-1.0",
+    "notes": "Not derived from any third-party music. Safe to redistribute."
+  },
+  "structure": {
+    "header": [
+      { "name": "chunk_id", "offset": 0, "size": 4, "type": "bytes", "role": "magic", "constant": "MThd" },
+      { "name": "header_length", "offset": 4, "size": 4, "type": "u32be", "role": "length", "constant": "6" },
+      { "name": "format", "offset": 8, "size": 2, "type": "u16be", "role": "enum" },
+      { "name": "track_count", "offset": 10, "size": 2, "type": "u16be", "role": "count" },
+      { "name": "division", "offset": 12, "size": 2, "type": "u16be", "role": "unknown" }
+    ],
+    "record": [
+      { "name": "track_id", "size": 4, "type": "bytes", "role": "magic", "constant": "MTrk" },
+      { "name": "track_length", "size": 4, "type": "u32be", "role": "length" },
+      { "name": "track_events", "size": "track_length", "type": "bytes", "role": "payload" }
+    ]
+  },
+  "samples": [
+    { "path": "samples/sample_01.mid", "size": 57, "record_count": 1 },
+    { "path": "samples/sample_02.mid", "size": 81, "record_count": 2 },
+    { "path": "samples/sample_03.mid", "size": 120, "record_count": 3 },
+    { "path": "samples/sample_04.mid", "size": 42, "record_count": 1 },
+    { "path": "samples/sample_05.mid", "size": 117, "record_count": 2 }
+  ]
+}

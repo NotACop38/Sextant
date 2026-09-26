@@ -2,25 +2,23 @@
 
 Describe what this change does and why.
 
-## Related checklist step
+## Related issue
 
-Which step in [`docs/ENGINEERING_CHECKLIST.md`](../docs/ENGINEERING_CHECKLIST.md)
-does this advance? Link any related issues.
+Link the issue this change addresses, if there is one.
 
 ## Checklist
 
-- [ ] `cargo build` and `cargo build --release` succeed.
-- [ ] `cargo test` passes.
-- [ ] `cargo clippy --all-targets --all-features` is clean.
-- [ ] `cargo fmt --all --check` passes.
-- [ ] `cargo deny check` passes.
+- [ ] The full local gate in [`AGENTS.md`](../AGENTS.md#commands) passes.
 - [ ] New input-facing code paths have negative or malformed-input tests.
 - [ ] No new `unsafe` without a written justification and a covering test.
 - [ ] Public items have doc comments; affected docs are updated.
+- [ ] If the benchmark numbers moved, the README block was regenerated with
+      `cargo run -p sextant-bench -- --write-readme`.
 - [ ] No em dashes or en dashes were introduced.
 
 ## Notes for reviewers
 
 Anything reviewers should focus on. If this change touches the executor, the
-scorer, or the refinement loop, confirm the verification invariant still holds:
-no change may lower the verified parse score on the full sample set.
+scorer, inference ranking, or the refinement loop, confirm the verification
+invariant still holds: no change may lower the verified parse score on the full
+sample set.

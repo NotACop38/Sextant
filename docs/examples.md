@@ -8,13 +8,13 @@ on a fresh checkout. They are all fully offline. The sources live in
 Build the binary first:
 
 ```bash
-cargo build --release
+cargo build --release -p sextant-re
 ```
 
 ## The recorded demo
 
-The demo shows the project's one-line pitch: an unknown binary blob goes in, and
-a field map plus a working parser come out, fully offline.
+The demo shows the project's one-line pitch: unknown binary samples go in, and
+a field map plus an editable parser spec come out, fully offline.
 
 It is recorded as an asciinema cast at [`docs/demo.cast`](demo.cast). Play it
 locally:
@@ -56,4 +56,5 @@ cargo run -p sextant-engine --example infer_corpus -- png
 
 - [Quick start](quickstart.md): the flow explained step by step.
 - [Workflows](workflows.md): the full command reference.
-- [How it works](how-it-works.md): why the output is verified, not guessed.
+- [How it works](how-it-works.md): what verification establishes, and what it
+  does not.

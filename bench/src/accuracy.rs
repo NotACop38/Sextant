@@ -15,8 +15,11 @@
 //!   is 100 percent by construction of the verification loop and is asserted
 //!   rather than assumed.
 //!
-//! These are the numbers the full `sextant bench` command reports, so the
-//! published figures and the CI regression guard are computed here, not by hand.
+//! Boundaries are compared over the interior of each sample: offset zero and
+//! the sample end are known without inference and are excluded on both sides.
+//!
+//! These are the numbers `sextant bench` reports, so the published figures and
+//! the CI regression guard are computed here, not by hand.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -24,7 +27,9 @@ use std::path::Path;
 use sextant_engine::{FieldInstance, Limits, Value, execute, infer_candidates, refine};
 use sextant_ir::{Endianness, Role};
 
-use crate::{Field, GroundTruth, SizeRule, corpus_dir, load_ground_truth_in, read_sample_in};
+use crate::{
+    Field, GroundTruth, SizeRule, SizeRuleKind, corpus_dir, load_ground_truth_in, read_sample_in,
+};
 
 /// Accuracy metrics for a single sample.
 #[derive(Debug, Clone)]
@@ -64,42 +69,24 @@ pub struct FormatMetrics {
     pub type_accuracy: f64,
     /// Fraction of samples the chosen IR parsed to a clean end (parser validity).
     pub parser_validity: f64,
+    /// The chosen hypothesis's structure measure over the format's samples.
+    pub structure: f64,
     /// Per-sample metrics, in corpus order.
     pub samples: Vec<SampleMetrics>,
 }
 
-/// Accuracy metrics across a set of formats (the corpus).
-#[derive(Debug, Clone)]
-pub struct CorpusMetrics {
-    /// Per-format metrics, in the order evaluated.
-    pub formats: Vec<FormatMetrics>,
-    /// The macro-averaged field-boundary F1 across formats.
-    pub macro_f1: f64,
-    /// The macro-averaged field-boundary precision across formats.
-    pub macro_precision: f64,
-    /// The macro-averaged field-boundary recall across formats.
-    pub macro_recall: f64,
-    /// The perfection rate: the fraction of formats recovered exactly.
-    pub perfection_rate: f64,
-    /// The macro-averaged semantic role accuracy across formats.
-    pub macro_role_accuracy: f64,
-    /// The macro-averaged semantic type accuracy across formats.
-    pub macro_type_accuracy: f64,
-    /// The fraction of all samples parsed to a clean end (parser validity).
-    pub parser_validity: f64,
-}
-
 /// The integer width and byte order encoded by a ground-truth type string, when
-/// it names a fixed-width integer.
+/// it names a fixed-width integer. Signed and unsigned names map to the same
+/// storage: type accuracy scores width and byte order, not signedness.
 fn int_type(ty: &str) -> Option<(usize, bool)> {
     match ty {
-        "u8" => Some((1, false)),
-        "u16le" => Some((2, false)),
-        "u16be" => Some((2, true)),
-        "u32le" => Some((4, false)),
-        "u32be" => Some((4, true)),
-        "u64le" => Some((8, false)),
-        "u64be" => Some((8, true)),
+        "u8" | "i8" => Some((1, false)),
+        "u16le" | "i16le" => Some((2, false)),
+        "u16be" | "i16be" => Some((2, true)),
+        "u32le" | "i32le" => Some((4, false)),
+        "u32be" | "i32be" => Some((4, true)),
+        "u64le" | "i64le" => Some((8, false)),
+        "u64be" | "i64be" => Some((8, true)),
         _ => None,
     }
 }
@@ -281,14 +268,14 @@ fn decode_int(field: &Field, sample: &[u8], offset: usize) -> Option<u64> {
 }
 
 /// The byte length of a ground-truth field at `cursor`, given the values decoded
-/// so far. A derived size is clamped to the bytes remaining, so a length field
-/// that names the whole file (as the STOT total-length field does) resolves to
-/// "the rest of the buffer" rather than overrunning.
+/// so far. A to-end field runs to `limit`: the sample end, or where a fixed-size
+/// trailer begins. A derived size must fit in the sample; an overrun is a
+/// ground-truth error rather than something to clamp away.
 fn field_size(
     field: &Field,
     values: &HashMap<String, u64>,
     cursor: usize,
-    len: usize,
+    limit: usize,
 ) -> std::io::Result<usize> {
     match &field.size {
         SizeRule::Fixed(bytes) => usize::try_from(*bytes).map_err(crate::invalid_corpus),
@@ -296,8 +283,11 @@ fn field_size(
             let value = values
                 .get(name)
                 .ok_or_else(|| crate::invalid_corpus("unresolved ground-truth length"))?;
-            Ok((*value).min(len.saturating_sub(cursor) as u64) as usize)
+            usize::try_from(*value).map_err(crate::invalid_corpus)
         }
+        SizeRule::Rule {
+            rule: SizeRuleKind::ToEnd,
+        } => Ok(limit.saturating_sub(cursor)),
     }
 }
 
@@ -314,6 +304,41 @@ struct TruthField {
     ty: TypeToken,
 }
 
+/// The bytes a ground-truth `constant` denotes for a field. For an integer type
+/// the constant is a decimal value encoded with the field's width and byte
+/// order; for any other type it is literal ASCII text, or hexadecimal after a
+/// `hex:` prefix.
+fn constant_bytes(field: &Field) -> std::io::Result<Option<Vec<u8>>> {
+    let Some(text) = field.constant.as_deref() else {
+        return Ok(None);
+    };
+    if let Some((width, big)) = int_type(&field.ty) {
+        let value: u64 = text
+            .parse()
+            .map_err(|_| crate::invalid_corpus("integer constant is not a decimal value"))?;
+        if width < 8 && value >= 1u64 << (8 * width) {
+            return Err(crate::invalid_corpus("integer constant exceeds its width"));
+        }
+        let mut bytes = value.to_le_bytes()[..width].to_vec();
+        if big {
+            bytes.reverse();
+        }
+        return Ok(Some(bytes));
+    }
+    match text.strip_prefix("hex:") {
+        Some(hex) if hex.len() % 2 == 0 => (0..hex.len())
+            .step_by(2)
+            .map(|i| {
+                u8::from_str_radix(&hex[i..i + 2], 16)
+                    .map_err(|_| crate::invalid_corpus("constant is not valid hexadecimal"))
+            })
+            .collect::<std::io::Result<Vec<u8>>>()
+            .map(Some),
+        Some(_) => Err(crate::invalid_corpus("hexadecimal constant has odd length")),
+        None => Ok(Some(text.as_bytes().to_vec())),
+    }
+}
+
 /// Walk the ground-truth header and records against one concrete sample,
 /// resolving each field to a start offset, the values needed by later derived
 /// sizes, and the cursor where the structure ends. The returned cursor is the
@@ -328,8 +353,12 @@ fn walk_ground_truth(
     let mut values: HashMap<String, u64> = HashMap::new();
     let len = sample.len();
     let mut cursor = 0usize;
+    // A to-end field before a fixed-size trailer stops where the trailer
+    // begins (validation allows that only when the trailer is fixed-size).
+    let body_end = len.saturating_sub(crate::fixed_trailer_len(gt).unwrap_or(0));
 
     let place = |field: &Field,
+                 limit: usize,
                  cursor: &mut usize,
                  values: &mut HashMap<String, u64>,
                  fields: &mut Vec<TruthField>|
@@ -341,11 +370,19 @@ fn walk_ground_truth(
         if let Some(value) = decode_int(field, sample, start) {
             values.insert(field.name.clone(), value);
         }
-        let size = field_size(field, values, start, len)?;
+        let size = field_size(field, values, start, limit)?;
         let end = start
             .checked_add(size)
             .filter(|&end| end <= len)
             .ok_or_else(|| crate::invalid_corpus("ground-truth field overruns its sample"))?;
+        if let Some(constant) = constant_bytes(field)? {
+            if sample[start..end] != constant[..] {
+                return Err(crate::invalid_corpus(format!(
+                    "ground-truth constant `{}` does not match the sample at offset {start}",
+                    field.name
+                )));
+            }
+        }
         fields.push(TruthField {
             start,
             end,
@@ -357,18 +394,21 @@ fn walk_ground_truth(
     };
 
     for field in &gt.structure.header {
-        place(field, &mut cursor, &mut values, &mut fields)?;
+        place(field, body_end, &mut cursor, &mut values, &mut fields)?;
     }
     for _ in 0..record_count {
         let start = cursor;
         for field in &gt.structure.record {
-            place(field, &mut cursor, &mut values, &mut fields)?;
+            place(field, body_end, &mut cursor, &mut values, &mut fields)?;
         }
         if cursor <= start {
             return Err(crate::invalid_corpus(
                 "ground-truth record makes no progress",
             ));
         }
+    }
+    for field in &gt.structure.trailer {
+        place(field, len, &mut cursor, &mut values, &mut fields)?;
     }
     if cursor != len {
         return Err(crate::invalid_corpus(
@@ -378,31 +418,32 @@ fn walk_ground_truth(
     Ok((fields, cursor))
 }
 
-/// Build boundaries from the already bounded and validated field expansion.
+/// The interior field boundaries of the ground truth for one sample: every
+/// offset where a field begins, excluding offset zero and the sample end. Those
+/// two are known without any inference, so counting them would credit even an
+/// opaque hypothesis with correct boundaries.
 fn ground_truth_boundaries(fields: &[TruthField], end: usize) -> BTreeSet<usize> {
-    let mut boundaries = BTreeSet::from([0, end]);
-    for field in fields {
-        boundaries.insert(field.start);
-    }
-    boundaries
+    fields
+        .iter()
+        .map(|field| field.start)
+        .filter(|&start| start != 0 && start != end)
+        .collect()
 }
 
 /// A single inferred leaf field, flattened from the executed parse tree.
 #[derive(Debug, Clone)]
 struct InferredField {
-    /// The field's end offset (exclusive), so a match can require the whole span
-    /// to agree, not just the start.
-    end: usize,
     /// The field's role token.
     role: String,
     /// The field's storage type.
     ty: TypeToken,
 }
 
-/// Collect the start offset of every field instance (recursively into structs
-/// and arrays), plus the final consumed offset: the boundaries the pipeline
-/// inferred for one sample.
-fn inferred_boundaries(fields: &[FieldInstance], consumed: usize) -> BTreeSet<usize> {
+/// Collect the interior field boundaries the pipeline inferred for one sample:
+/// the start offset of every field instance (recursively into structs and
+/// arrays) plus the offset where parsing stopped, excluding offset zero and the
+/// sample end for the reason given at [`ground_truth_boundaries`].
+fn inferred_boundaries(fields: &[FieldInstance], consumed: usize, len: usize) -> BTreeSet<usize> {
     fn walk(field: &FieldInstance, out: &mut BTreeSet<usize>) {
         out.insert(field.start);
         match &field.value {
@@ -415,22 +456,25 @@ fn inferred_boundaries(fields: &[FieldInstance], consumed: usize) -> BTreeSet<us
         }
     }
     let mut out = BTreeSet::new();
-    out.insert(0);
     for field in fields {
         walk(field, &mut out);
     }
     out.insert(consumed);
+    out.remove(&0);
+    out.remove(&len);
     out
 }
 
-/// Index the inferred leaf fields by their start offset, so a ground-truth field
-/// can be matched to the inferred field that begins at the same place. The
-/// sample bytes are needed to recover an integer field's byte order.
-fn inferred_leaves_by_start(
+/// Index the inferred leaf fields by their byte span, so a ground-truth field
+/// can be matched to the inferred field that occupies exactly the same bytes.
+/// Keying by span rather than start keeps an empty field (a zero-length chunk
+/// body, say) from hiding the field that starts where it does. The sample bytes
+/// are needed to recover an integer field's byte order.
+fn inferred_leaves_by_span(
     fields: &[FieldInstance],
     bytes: &[u8],
-) -> HashMap<usize, InferredField> {
-    fn walk(field: &FieldInstance, bytes: &[u8], out: &mut HashMap<usize, InferredField>) {
+) -> HashMap<(usize, usize), InferredField> {
+    fn walk(field: &FieldInstance, bytes: &[u8], out: &mut HashMap<(usize, usize), InferredField>) {
         match &field.value {
             Value::Struct(children) | Value::Array(children) => {
                 for child in children {
@@ -438,11 +482,11 @@ fn inferred_leaves_by_start(
                 }
             }
             value => {
-                out.entry(field.start).or_insert_with(|| InferredField {
-                    end: field.end,
-                    role: canonical_field_role(field.role),
-                    ty: inferred_type_token(value, bytes, field.start, field.end),
-                });
+                out.entry((field.start, field.end))
+                    .or_insert_with(|| InferredField {
+                        role: canonical_field_role(field.role),
+                        ty: inferred_type_token(value, bytes, field.start, field.end),
+                    });
             }
         }
     }
@@ -454,7 +498,12 @@ fn inferred_leaves_by_start(
 }
 
 /// Precision, recall, and F1 of an inferred boundary set against the truth.
+/// When neither side has an interior boundary the sample is a perfect match;
+/// when only one side does, the empty side scores zero.
 fn boundary_scores(truth: &BTreeSet<usize>, inferred: &BTreeSet<usize>) -> (f64, f64, f64) {
+    if truth.is_empty() && inferred.is_empty() {
+        return (1.0, 1.0, 1.0);
+    }
     let hits = inferred.iter().filter(|b| truth.contains(b)).count();
     let precision = if inferred.is_empty() {
         0.0
@@ -462,7 +511,7 @@ fn boundary_scores(truth: &BTreeSet<usize>, inferred: &BTreeSet<usize>) -> (f64,
         hits as f64 / inferred.len() as f64
     };
     let recall = if truth.is_empty() {
-        1.0
+        0.0
     } else {
         hits as f64 / truth.len() as f64
     };
@@ -518,20 +567,17 @@ pub fn evaluate_format_in(corpus_dir: &Path, format: &str) -> std::io::Result<Fo
         let (truth_fields, end) = walk_ground_truth(&gt, bytes, *record_count)?;
         let truth_boundaries = ground_truth_boundaries(&truth_fields, end);
         let execution = execute(&refined.format, bytes, &limits);
-        let inferred = inferred_boundaries(&execution.fields, execution.consumed);
-        let leaves = inferred_leaves_by_start(&execution.fields, bytes);
+        let inferred = inferred_boundaries(&execution.fields, execution.consumed, bytes.len());
+        let leaves = inferred_leaves_by_span(&execution.fields, bytes);
         let (precision, recall, f1) = boundary_scores(&truth_boundaries, &inferred);
 
         for truth in &truth_fields {
             field_total += 1;
-            // Award semantic credit only when the inferred field occupies the
+            // Award semantic credit only when an inferred field occupies the
             // same span as the ground-truth field. A field at the right start but
             // the wrong length was not recovered, so it earns no role or type
             // hit even if its label happens to agree.
-            if let Some(inferred_field) = leaves.get(&truth.start) {
-                if inferred_field.end != truth.end {
-                    continue;
-                }
+            if let Some(inferred_field) = leaves.get(&(truth.start, truth.end)) {
                 if inferred_field.role == truth.role {
                     role_hits += 1;
                 }
@@ -581,61 +627,8 @@ pub fn evaluate_format_in(corpus_dir: &Path, format: &str) -> std::io::Result<Fo
         role_accuracy,
         type_accuracy,
         parser_validity,
+        structure: refined.score.structure,
         samples: sample_metrics,
-    })
-}
-
-/// Evaluate accuracy across several formats and aggregate the corpus-level
-/// metrics, reading the repository `corpus/` directory.
-///
-/// # Errors
-///
-/// Returns an error if any format's ground truth or samples cannot be read.
-pub fn evaluate_corpus(formats: &[&str]) -> std::io::Result<CorpusMetrics> {
-    evaluate_corpus_in(&corpus_dir(), formats)
-}
-
-/// Evaluate accuracy across several formats under an arbitrary corpus directory
-/// and aggregate the corpus-level metrics.
-///
-/// # Errors
-///
-/// Returns an error if any format's ground truth or samples cannot be read.
-pub fn evaluate_corpus_in(corpus_dir: &Path, formats: &[&str]) -> std::io::Result<CorpusMetrics> {
-    let mut format_metrics = Vec::with_capacity(formats.len());
-    for format in formats {
-        format_metrics.push(evaluate_format_in(corpus_dir, format)?);
-    }
-    let count = format_metrics.len().max(1) as f64;
-    let macro_f1 = format_metrics.iter().map(|m| m.f1).sum::<f64>() / count;
-    let macro_precision = format_metrics.iter().map(|m| m.precision).sum::<f64>() / count;
-    let macro_recall = format_metrics.iter().map(|m| m.recall).sum::<f64>() / count;
-    let perfect = format_metrics.iter().filter(|m| m.perfect).count();
-    let perfection_rate = perfect as f64 / count;
-    let macro_role_accuracy = format_metrics.iter().map(|m| m.role_accuracy).sum::<f64>() / count;
-    let macro_type_accuracy = format_metrics.iter().map(|m| m.type_accuracy).sum::<f64>() / count;
-
-    let total_samples: usize = format_metrics.iter().map(|m| m.sample_count).sum();
-    let valid_samples: usize = format_metrics
-        .iter()
-        .flat_map(|m| m.samples.iter())
-        .filter(|s| s.valid)
-        .count();
-    let parser_validity = if total_samples == 0 {
-        1.0
-    } else {
-        valid_samples as f64 / total_samples as f64
-    };
-
-    Ok(CorpusMetrics {
-        formats: format_metrics,
-        macro_f1,
-        macro_precision,
-        macro_recall,
-        perfection_rate,
-        macro_role_accuracy,
-        macro_type_accuracy,
-        parser_validity,
     })
 }
 
@@ -655,24 +648,31 @@ mod tests {
     }
 
     #[test]
-    fn ground_truth_boundaries_cover_the_whole_sample() {
-        // Every format's ground-truth boundaries must start at zero and end at
-        // the sample length, with no offset beyond the sample.
+    fn ground_truth_walks_every_sample_exactly() {
+        // Every format's ground truth must lay its fields out over each sample
+        // from offset zero to exactly the sample end, with every declared
+        // constant present and interior boundaries strictly inside the sample.
+        // This checks the corpus description itself; it runs no inference.
         for format in crate::FILE_FORMAT_CORPUS {
             let gt = crate::load_ground_truth(format).expect("load ground truth");
             for entry in &gt.samples {
                 let bytes = crate::read_sample(format, entry).expect("read sample");
-                let (fields, end) =
-                    walk_ground_truth(&gt, &bytes, entry.record_count).expect("valid ground truth");
-                let boundaries = ground_truth_boundaries(&fields, end);
-                assert!(boundaries.contains(&0), "{format}: missing start boundary");
-                assert!(
-                    boundaries.contains(&bytes.len()),
-                    "{format}: missing end boundary"
+                let (fields, end) = walk_ground_truth(&gt, &bytes, entry.record_count)
+                    .unwrap_or_else(|error| panic!("{format} {}: {error}", entry.path));
+                assert_eq!(
+                    end,
+                    bytes.len(),
+                    "{format}: walk must end at the sample end"
                 );
+                assert_eq!(
+                    fields.first().map(|f| f.start),
+                    Some(0),
+                    "{format}: must start at 0"
+                );
+                let boundaries = ground_truth_boundaries(&fields, end);
                 assert!(
-                    boundaries.iter().all(|&b| b <= bytes.len()),
-                    "{format}: a boundary lies past the sample end"
+                    boundaries.iter().all(|&b| b > 0 && b < bytes.len()),
+                    "{format}: interior boundaries must lie strictly inside the sample"
                 );
             }
         }

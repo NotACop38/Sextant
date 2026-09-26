@@ -1,0 +1,36 @@
+{
+  "format": "pcapfile",
+  "display_name": "libpcap capture file (classic)",
+  "description": "A real file format evaluated as a file rather than as network traffic: a 24-byte global header followed by records, each a 16-byte record header and the captured frame. Exercises a binary magic, version and link-type constants, per-record timestamps, and a length field eight bytes into each record that governs that record's data.",
+  "endianness": "little",
+  "provenance": {
+    "source": "synthetic",
+    "origin": "Captures of synthetic Ethernet, IPv4, and UDP frames between RFC 5737 documentation addresses, written by corpus/pcapfile/generate.py.",
+    "license": "CC0-1.0",
+    "notes": "Not derived from any real network traffic. Safe to redistribute."
+  },
+  "structure": {
+    "header": [
+      { "name": "magic", "offset": 0, "size": 4, "type": "bytes", "role": "magic", "constant": "hex:d4c3b2a1" },
+      { "name": "version_major", "offset": 4, "size": 2, "type": "u16le", "role": "version", "constant": "2" },
+      { "name": "version_minor", "offset": 6, "size": 2, "type": "u16le", "role": "version", "constant": "4" },
+      { "name": "thiszone", "offset": 8, "size": 4, "type": "i32le", "role": "unknown", "constant": "0" },
+      { "name": "sigfigs", "offset": 12, "size": 4, "type": "u32le", "role": "unknown", "constant": "0" },
+      { "name": "snaplen", "offset": 16, "size": 4, "type": "u32le", "role": "length", "constant": "65535" },
+      { "name": "network", "offset": 20, "size": 4, "type": "u32le", "role": "enum", "constant": "1" }
+    ],
+    "record": [
+      { "name": "ts_sec", "size": 4, "type": "u32le", "role": "timestamp" },
+      { "name": "ts_usec", "size": 4, "type": "u32le", "role": "timestamp" },
+      { "name": "incl_len", "size": 4, "type": "u32le", "role": "length" },
+      { "name": "orig_len", "size": 4, "type": "u32le", "role": "length" },
+      { "name": "packet_data", "size": "incl_len", "type": "bytes", "role": "payload" }
+    ]
+  },
+  "samples": [
+    { "path": "samples/sample_01.pcap", "size": 156, "record_count": 2 },
+    { "path": "samples/sample_02.pcap", "size": 237, "record_count": 3 },
+    { "path": "samples/sample_03.pcap", "size": 102, "record_count": 1 },
+    { "path": "samples/sample_04.pcap", "size": 286, "record_count": 4 }
+  ]
+}

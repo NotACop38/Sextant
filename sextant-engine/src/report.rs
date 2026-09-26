@@ -23,7 +23,7 @@ use crate::scorer::Score;
 /// It is written into every report as `schema_version` and matches the `$id`
 /// version of the committed JSON Schema. Bump it when the structure changes in a
 /// way that is not backward compatible.
-pub const REPORT_SCHEMA_VERSION: &str = "1.0";
+pub const REPORT_SCHEMA_VERSION: &str = "1.1";
 
 /// Cap on report JSON size when loading from disk for `inspect` / `export`.
 /// Bounds memory before serde parses the document (FR-24).
@@ -42,6 +42,37 @@ pub struct RunMetadata {
     /// Whether the run was statistics-only with the language model disabled. In
     /// this mode no bytes leave the machine (NFR-4).
     pub no_llm: bool,
+    /// How the language model was used, when the run consulted one. Absent in
+    /// a statistics-only run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelUsage>,
+}
+
+/// What a run asked of the language model and what came of it (PRD Section
+/// 13: model usage), so a report shows whether a model contributed and at what
+/// cost, including when the call failed and the run fell back to the verified
+/// statistics-only result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelUsage {
+    /// The provider consulted, such as `anthropic`.
+    pub provider: String,
+    /// The model identifier requested.
+    pub model: String,
+    /// How many provider calls were made (a cached answer makes none).
+    pub calls: u32,
+    /// Input tokens the provider reported, including for rejected responses.
+    pub input_tokens: u64,
+    /// Output tokens the provider reported, including thinking and rejected
+    /// responses.
+    pub output_tokens: u64,
+    /// How many model proposals the executor verified and accepted.
+    pub accepted: usize,
+    /// How many model proposals were considered and rejected.
+    pub rejected: usize,
+    /// Why the model contributed nothing, when the call failed or its result
+    /// was discarded. The report then holds the statistics-only result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// One row of the flattened field map: a single field rendered for display, with
@@ -119,6 +150,11 @@ impl Report {
     }
 
     /// Deserialize a report from JSON (FR-19, FR-34).
+    ///
+    /// Parsing is recursion-limited and reads any report whose format
+    /// validates. Memory use grows with the input, so a caller reading an
+    /// untrusted file should cap the bytes it reads first (the CLI reads at
+    /// most [`DEFAULT_MAX_REPORT_BYTES`]).
     ///
     /// # Errors
     ///

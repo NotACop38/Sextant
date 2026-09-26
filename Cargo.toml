@@ -20,7 +20,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/NotACop38/Sextant"
 homepage = "https://github.com/NotACop38/Sextant"
 authors = ["The Sextant contributors"]
-description = "Infers the structure of unknown binary formats and protocols from samples and emits verified parsers."
+description = "Infers the structure of unknown binary formats and protocols from samples, verifies each hypothesis natively, and exports parser specifications."
 keywords = ["reverse-engineering", "binary", "parser", "protocol", "kaitai"]
 categories = ["command-line-utilities", "parser-implementations", "development-tools"]
 
@@ -41,3 +41,6 @@ sextant-bench = { path = "bench", version = "0.1.0" }
 # The parsing core handles untrusted input, so unsafe is denied by default
 # (NFR-1). Any exception requires a written justification and a covering test.
 unsafe_code = "deny"
+# Every public item carries a doc comment (the Global Definition of Done).
+# Clippy runs with warnings as errors, so a missing doc fails the gate.
+missing_docs = "warn"

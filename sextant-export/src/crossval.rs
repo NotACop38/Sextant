@@ -4,6 +4,13 @@
 //! Child processes have deadlines and bounded captured output. Samples live in
 //! a private temporary directory; Python runs in isolated mode so the analysis
 //! directory cannot replace imported runtime modules.
+//!
+//! A pass is structural evidence from the Kaitai Python runtime only: the spec
+//! compiled and consumed every sample. It does not compare decoded values with
+//! the native executor. The two also decode text differently: the native
+//! executor replaces invalid bytes, while the Python runtime raises. A sample
+//! rejected for that reason is reported as a decoding divergence, not as
+//! agreement and not as an unexplained structural failure.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -28,12 +35,15 @@ pub enum CrossValidation {
         /// Why the check could not run.
         reason: String,
     },
-    /// The spec compiled and every sample was fully consumed.
+    /// The spec compiled and every sample was fully consumed by the Kaitai
+    /// Python runtime. Decoded values are not compared with the native parse.
     Passed {
         /// How many samples were parsed.
         samples: usize,
     },
-    /// Export, compilation, execution, or full-consumption checks failed.
+    /// Export, compilation, execution, or full-consumption checks failed. When
+    /// the runtime rejected text the native executor decodes leniently, the
+    /// detail says so explicitly.
     Failed {
         /// A bounded human-readable explanation.
         detail: String,
@@ -59,6 +69,11 @@ impl CrossValidation {
 /// child's stdout and stderr to 256 KiB each. The child is killed and reaped on
 /// timeout or excessive output. The operator must trust the selected compiler;
 /// this is process containment, not a sandbox for arbitrary external programs.
+///
+/// A pass means only that the Kaitai Python runtime consumed every sample. The
+/// runtime decodes ASCII, UTF-8, and UTF-16 strictly, unlike the native
+/// executor, so a sample with invalid text fails here with a detail that names
+/// this decoding divergence.
 #[must_use]
 pub fn cross_validate(format: &Format, samples: &[Vec<u8>]) -> CrossValidation {
     if samples.is_empty() {
@@ -156,16 +171,27 @@ fn run_check(
         PARSE_TIMEOUT,
     )?;
     if !parsed.status.success() {
+        if parsed.stdout.starts_with(TEXT_FAILURE.as_bytes()) {
+            return Err(parsed.failure(TEXT_DIVERGENCE));
+        }
         return Err(parsed.failure("sample parsing failed"));
     }
     Ok(())
 }
 
+/// The driver's output prefix for a sample whose text failed strict decoding.
+const TEXT_FAILURE: &str = "TEXT ";
+
+/// The failure context for a strict decoding error.
+const TEXT_DIVERGENCE: &str = "sample parsing failed on text decoding: the Kaitai Python runtime rejects invalid ASCII, UTF-8, or UTF-16 bytes that the native executor decodes leniently, so this is a known decoding divergence and not evidence of a structural mismatch";
+
+/// The generated module and `meta/id`, exactly as the exporter allocates it.
 fn sextant_id(format: &Format) -> String {
-    crate::naming::snake(&format.name, "format")
+    crate::kaitai::root_id(format)
 }
+/// The generated root class: the compiler's UpperCamelCase form of the id.
 fn class_name(format: &Format) -> String {
-    pascal(&format.name, "Format")
+    pascal(&sextant_id(format), "Format")
 }
 
 fn driver_script(id: &str, format: &Format, samples: &[PathBuf]) -> String {
@@ -181,7 +207,9 @@ fn driver_script(id: &str, format: &Format, samples: &[PathBuf]) -> String {
     }
     script.push_str("]\nfor p in paths:\n    try:\n        with open(p, 'rb') as sample:\n            stream = KaitaiStream(sample)\n");
     script.push_str("            parsed = parser_class(stream)\n");
-    script.push_str("            if not stream.is_eof():\n                raise ValueError('unconsumed trailing bytes')\n    except Exception as exc:\n        print('FAILED %s: %s' % (p, exc))\n        sys.exit(1)\nprint('OK')\n");
+    // A strict decoding error is reported with its own prefix so the result can
+    // name the divergence instead of claiming a structural failure.
+    script.push_str("            if not stream.is_eof():\n                raise ValueError('unconsumed trailing bytes')\n    except UnicodeError as exc:\n        print('TEXT %s: %s' % (p, exc))\n        sys.exit(1)\n    except Exception as exc:\n        print('FAILED %s: %s' % (p, exc))\n        sys.exit(1)\nprint('OK')\n");
     script
 }
 
@@ -353,9 +381,18 @@ mod tests {
 
     #[test]
     fn id_and_class_match_the_exporter() {
-        let format = sextant_ir::fixtures::tlv_ground_truth();
+        let mut format = sextant_ir::fixtures::tlv_ground_truth();
         assert_eq!(sextant_id(&format), "tlv");
         assert_eq!(class_name(&format), "Tlv");
+        // Reserved format names are renamed in the spec, and the driver must
+        // import the renamed module and class (Python cannot name `None`).
+        for (name, id, class) in [("None", "none_x", "NoneX"), ("u4", "u4_x", "U4X")] {
+            format.name = name.into();
+            assert_eq!(sextant_id(&format), id);
+            assert_eq!(class_name(&format), class);
+            let ksy = export(&format, ExportFormat::Kaitai).unwrap();
+            assert!(ksy.contains(&format!("  id: {id}\n")), "{ksy}");
+        }
     }
 
     #[test]

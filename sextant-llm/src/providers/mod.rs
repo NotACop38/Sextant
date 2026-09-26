@@ -13,3 +13,9 @@ pub mod openai;
 
 #[cfg(feature = "http")]
 mod http;
+
+// Test support shared by every provider's tests. A build with only some
+// providers enabled does not use every helper.
+#[cfg(all(test, feature = "http"))]
+#[allow(dead_code)]
+mod fake_server;

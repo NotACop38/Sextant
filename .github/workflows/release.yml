@@ -5,6 +5,9 @@ name: Release
 # binary natively on Linux, macOS, and Windows (NFR-5), packages each build with
 # the licenses and changelog, computes a SHA-256 checksum for every archive
 # (NFR-10), and publishes them all to a GitHub Release. See docs/RELEASING.md.
+#
+# Every third-party action is pinned to a full commit SHA, with the release it
+# corresponds to in a trailing comment, so a moved tag cannot change what runs.
 
 on:
   push:
@@ -15,8 +18,11 @@ on:
       # `v0.1.0-rc.1` (the trailing `*` also matches `-` and `.`).
       - "v*.*.*"
 
+# Least privilege: every job gets read-only access to the repository by
+# default. Only the `release` job, which creates the GitHub Release and uploads
+# its assets, is granted `contents: write`.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,8 +37,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Compare the git tag with the workspace version
         id: check
         run: |
@@ -53,6 +62,19 @@ jobs:
             exit 1
           fi
           echo "version=$tag" >> "$GITHUB_OUTPUT"
+          # A SemVer prerelease (a `-` suffix such as `-rc.1`, `-beta.2`, or
+          # `-alpha`) is published as a GitHub prerelease. GitHub never reports a
+          # prerelease as the latest release, so the install scripts, which
+          # resolve `releases/latest`, keep installing the newest stable version.
+          # Build metadata (`+...`) is stripped first: it may contain `-` but does
+          # not make a version a prerelease.
+          core="${tag%%+*}"
+          case "$core" in
+            *-*) prerelease=true ;;
+            *) prerelease=false ;;
+          esac
+          echo "prerelease=$prerelease"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.target }}
@@ -61,10 +83,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # A glibc binary can require symbol versions as new as the glibc it
+          # was linked against: built on ubuntu-latest (glibc 2.39) it needs
+          # glibc 2.39. So the glibc build uses the oldest supported Ubuntu
+          # image (glibc 2.35), and the result runs on glibc 2.34 or newer,
+          # which the smoke test enforces and scripts/install.sh relies on.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
-          - os: macos-13
+          # A fully static build (NFR-5: a single static binary with no required
+          # runtime). It runs on any x86_64 Linux, including musl distributions
+          # such as Alpine and distributions with a glibc older than 2.34, so
+          # scripts/install.sh picks it there.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+          # GitHub retired the macos-13 image; macos-15-intel is the Intel
+          # (x86_64) macOS runner. The arm64 build stays on macos-latest.
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             archive: tar.gz
           - os: macos-latest
@@ -75,13 +111,27 @@ jobs:
             archive: zip
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install the pinned Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           target: ${{ matrix.target }}
+      - name: Install the musl C toolchain
+        # The Rust musl target links with its bundled static C runtime, which is
+        # enough for today's pure-Rust dependency graph. musl-gcc is installed
+        # as well so a dependency that compiles C code still builds against musl
+        # instead of failing the release.
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y musl-tools
       - name: Build the release binary
-        run: cargo build --release --locked -p ${{ env.CLI_PACKAGE }} --target ${{ matrix.target }}
+        # Release binaries include the model providers (the `llm` feature), so
+        # `infer --provider` works out of the box. Without `--provider` no
+        # provider is constructed and nothing is sent.
+        run: cargo build --release --locked -p ${{ env.CLI_PACKAGE }} --features llm --target ${{ matrix.target }}
 
       - name: Smoke test the release binary
         shell: bash
@@ -94,6 +144,37 @@ jobs:
           exe="target/${{ matrix.target }}/release/$bin"
           "$exe" --version
           "$exe" --help
+          # The model providers must be compiled in: with no key configured,
+          # --provider must ask for the key, not for a rebuild with the feature.
+          if env -u ANTHROPIC_API_KEY "$exe" infer corpus/tlv/samples --provider anthropic 2> provider.err; then
+            echo "::error::--provider ran without a credential" >&2
+            exit 1
+          fi
+          if ! grep -q ANTHROPIC_API_KEY provider.err; then
+            echo "::error::the model providers are not compiled in" >&2
+            cat provider.err >&2
+            exit 1
+          fi
+          # The musl build exists to be one static binary with no libc
+          # dependency (NFR-5), so refuse to ship it dynamically linked.
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            file "$exe"
+            if ! file "$exe" | grep -Eq 'statically linked|static-pie linked'; then
+              echo "::error::$exe is not statically linked" >&2
+              exit 1
+            fi
+          fi
+          # scripts/install.sh installs the glibc build only on glibc 2.34 or
+          # newer, so refuse to ship one that the dynamic loader would reject
+          # there (for example after a runner image upgrade).
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
+            newest="$(readelf -V "$exe" | grep -o 'Name: GLIBC_[0-9.]*' | sed 's/.*GLIBC_//' | sort -uV | tail -n 1)"
+            echo "Newest glibc symbol version required: $newest"
+            if [ "$(printf '%s\n' "$newest" 2.34 | sort -V | tail -n 1)" != "2.34" ]; then
+              echo "::error::$exe requires glibc $newest, newer than 2.34" >&2
+              exit 1
+            fi
+          fi
           # End to end on the committed corpus: a binary that launches but
           # cannot infer, inspect, or export must never ship.
           mkdir -p smoke
@@ -138,11 +219,17 @@ jobs:
           $archive = "$env:stage.zip"
           Compress-Archive -Path $env:stage -DestinationPath $archive
           $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower()
-          "$hash  $archive" | Out-File -Encoding ascii "$archive.sha256"
-          Get-Content "$archive.sha256"
+          # Write exactly one ASCII line with an LF ending and no byte order
+          # mark, the format `shasum -a 256 -c` and `sha256sum -c` expect.
+          # Out-File would end the line with CRLF, which shasum on macOS
+          # rejects. The .NET call takes an absolute path because it does not
+          # follow Set-Location.
+          $sumPath = Join-Path $PWD.Path "$archive.sha256"
+          [System.IO.File]::WriteAllText($sumPath, "$hash  $archive`n", [System.Text.Encoding]::ASCII)
+          Get-Content $sumPath
 
       - name: Upload the build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ env.stage }}
           path: |
@@ -155,10 +242,16 @@ jobs:
     name: Publish the GitHub Release
     needs: [verify-version, build]
     runs-on: ubuntu-latest
+    # The only job that writes to the repository: creating the release and
+    # uploading its assets needs `contents: write`.
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Download every build artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
       - name: Collect archives and aggregate the checksums
@@ -171,6 +264,11 @@ jobs:
           # One aggregate manifest over all platforms, alongside the per-archive
           # .sha256 files, so downloads can be verified offline (NFR-10).
           cat ./*.sha256 | sort -k2 > SHA256SUMS
+          # Verify every archive against the manifest with the same tool macOS
+          # users run. `--strict` also fails on a malformed line, so a CRLF line
+          # ending or a byte order mark in any per-archive checksum file stops
+          # the release here instead of breaking verification for users.
+          shasum -a 256 --strict -c SHA256SUMS
           echo "Release artifacts:"
           ls -l
           echo "----- SHA256SUMS -----"
@@ -190,10 +288,13 @@ jobs:
             echo "See CHANGELOG.md for details." > release-notes.md
           fi
       - name: Create the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           name: Sextant v${{ needs.verify-version.outputs.version }}
           body_path: release-notes.md
+          # `true` for a SemVer prerelease tag (see verify-version), so install
+          # scripts that follow `releases/latest` never pick it up.
+          prerelease: ${{ needs.verify-version.outputs.prerelease }}
           files: |
             release/*.tar.gz
             release/*.zip

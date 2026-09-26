@@ -7,12 +7,15 @@
 //! IR parses every message cleanly (generality 1.0), which is what the generated
 //! Wireshark dissector, a faithful translation of that IR, decodes.
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
+use sextant_engine::protocol::Population;
 use sextant_engine::{
-    ExtractOptions, Limits, Transport, cluster_messages, extract_messages, infer_protocol,
+    Direction, Endpoint, ExtractOptions, ExtractedMessage, Flow, Limits, Transport,
+    cluster_messages, extract_messages, infer_protocol,
 };
-use sextant_ir::Role;
+use sextant_ir::{Field, Role, SampleSupport};
 
 /// Read a committed capture file from the corpus.
 fn read_capture(format: &str, name: &str) -> Vec<u8> {
@@ -131,6 +134,168 @@ fn toy_capture_clusters_message_types() {
     );
     assert!(roles.contains(&Role::Sequence), "no sequence: {roles:?}");
     assert!(roles.contains(&Role::Length), "no length: {roles:?}");
+}
+
+/// The field with `role` in an inferred format.
+fn field_with_role(fields: &[Field], role: Role) -> &Field {
+    fields
+        .iter()
+        .find(|field| field.role == Some(role))
+        .unwrap_or_else(|| panic!("no {role:?} field"))
+}
+
+#[test]
+fn modbus_evidence_records_the_population_each_detector_tested() {
+    let messages = extract("modbus", "session_01.pcap", Transport::Tcp, 502);
+    assert_eq!(messages.len(), 24);
+    let inference = infer_protocol(&messages, Transport::Tcp, 502, &Limits::default());
+    let fields = &inference.report.format.root.fields;
+
+    // The transaction id was tested on the 12 requests only, not all 24.
+    let sequence = field_with_role(fields, Role::Sequence);
+    assert_eq!(
+        sequence.evidence.support,
+        Some(SampleSupport {
+            agreeing: 12,
+            total: 12
+        })
+    );
+    assert!(
+        sequence
+            .evidence
+            .notes
+            .iter()
+            .any(|note| note.contains("12 request(s)")),
+        "notes were {:?}",
+        sequence.evidence.notes
+    );
+
+    // The function code was found by clustering the requests.
+    let message_type = field_with_role(fields, Role::MessageType);
+    assert_eq!(
+        message_type.evidence.support,
+        Some(SampleSupport {
+            agreeing: 12,
+            total: 12
+        })
+    );
+    assert_eq!(inference.clustering.population, Population::Requests);
+    assert_eq!(inference.clustering.clustered(), 12);
+
+    // The length relationship was tested on every message.
+    let length = field_with_role(fields, Role::Length);
+    assert_eq!(
+        length.evidence.support,
+        Some(SampleSupport {
+            agreeing: 24,
+            total: 24
+        })
+    );
+}
+
+/// A message on the flow between the client port and server port 7000.
+fn message(client_port: u16, to_server: bool, data: Vec<u8>, index: usize) -> ExtractedMessage {
+    let client = Endpoint {
+        addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        port: client_port,
+    };
+    let server = Endpoint {
+        addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        port: 7000,
+    };
+    let (source, destination, direction) = if to_server {
+        (client, server, Direction::ToServer)
+    } else {
+        (server, client, Direction::FromServer)
+    };
+    ExtractedMessage {
+        data,
+        direction,
+        flow: Flow::canonical(client, server),
+        source,
+        destination,
+        timestamp_micros: index as u64,
+        capture_offset: index as u64,
+        index,
+    }
+}
+
+/// A big-endian message: a constant marker, a 16-bit sequence, a 16-bit
+/// payload length, then the payload.
+fn framed(sequence: u16, payload: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x7e];
+    out.extend_from_slice(&sequence.to_be_bytes());
+    out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+#[test]
+fn the_sequence_fallback_pools_requests_and_never_mixes_in_responses() {
+    // Four short connections, one request and its echoing response each. No
+    // flow has enough requests alone, so the requests are pooled across flows
+    // in capture order. Mixing in the responses (1, 1, 2, 2, ...) would repeat
+    // every value and hide the sequence.
+    let bodies: [&[u8]; 4] = [b"a", b"bbbb", b"cc", b"ddddddd"];
+    let mut messages = Vec::new();
+    for (round, body) in bodies.iter().enumerate() {
+        let sequence = round as u16 + 1;
+        let port = 40001 + round as u16;
+        messages.push(message(port, true, framed(sequence, body), messages.len()));
+        messages.push(message(
+            port,
+            false,
+            framed(sequence, b"ok"),
+            messages.len(),
+        ));
+    }
+    let inference = infer_protocol(&messages, Transport::Tcp, 7000, &Limits::default());
+    let fields = &inference.report.format.root.fields;
+    let sequence = field_with_role(fields, Role::Sequence);
+    assert_eq!(
+        sequence.evidence.support,
+        Some(SampleSupport {
+            agreeing: 4,
+            total: 4
+        })
+    );
+    assert!(
+        sequence
+            .evidence
+            .notes
+            .iter()
+            .any(|note| note.contains("pooled across flows")),
+        "notes were {:?}",
+        sequence.evidence.notes
+    );
+}
+
+#[test]
+fn one_outlier_short_message_does_not_hide_the_message_types() {
+    let mut messages = extract("modbus", "session_01.pcap", Transport::Tcp, 502);
+    // A stray one-byte request, such as a keep-alive that slipped through.
+    let mut stray = messages[0].clone();
+    stray.data = vec![0];
+    messages.insert(2, stray);
+    for (index, message) in messages.iter_mut().enumerate() {
+        message.index = index;
+    }
+
+    let clustering = cluster_messages(&messages);
+    let discriminant = clustering
+        .discriminant
+        .as_ref()
+        .expect("the function code is still found");
+    assert_eq!(discriminant.offset, 7);
+    assert_eq!(discriminant.values, vec![0x01, 0x03, 0x06]);
+    assert_eq!(clustering.population, Population::Requests);
+    assert_eq!(clustering.clustered(), 12);
+    assert_eq!(clustering.excluded_short, 1);
+
+    // Every message is still scored, including the one left out of detection.
+    let inference = infer_protocol(&messages, Transport::Tcp, 502, &Limits::default());
+    assert_eq!(inference.message_count, 25);
+    assert_eq!(inference.report.score.samples.len(), 25);
 }
 
 #[test]

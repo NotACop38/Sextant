@@ -16,7 +16,12 @@
       SEXTANT_BIN_DIR   Install directory (default: %LOCALAPPDATA%\Sextant\bin).
       SEXTANT_REPO      GitHub owner/repo (default: NotACop38/Sextant).
 
-    To build from source instead, use `cargo install sextant-re`.
+    To build from source instead (needs git and Rust 1.85 or newer from
+    https://rustup.rs), clone the repository and build the CLI package; the
+    binary is written to target\release\sextant.exe:
+      git clone https://github.com/NotACop38/Sextant.git sextant-src
+      cd sextant-src
+      cargo build --release --locked -p sextant-re
 #>
 
 $ErrorActionPreference = "Stop"
@@ -71,8 +76,15 @@ try {
     Write-Host "Installed $binName $version to $binDir\$binName.exe"
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ($userPath -notlike "*$binDir*") {
-        Write-Host "Note: $binDir is not on your PATH. Add it, for example:"
-        Write-Host "  setx PATH `"$binDir;`$env:PATH`""
+        # Suggest appending to the user PATH only. `setx PATH "...;$env:PATH"`
+        # would truncate the value at 1024 characters and copy the machine PATH
+        # into the user PATH. The directory is printed as a single-quoted
+        # PowerShell string, so any quote in it is doubled.
+        $quotedBinDir = "'" + $binDir.Replace("'", "''") + "'"
+        Write-Host "Note: $binDir is not on your PATH. To add it to your user PATH, run:"
+        Write-Host "  `$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')"
+        Write-Host "  [Environment]::SetEnvironmentVariable('Path', ((@(`$userPath, $quotedBinDir) | Where-Object { `$_ }) -join ';'), 'User')"
+        Write-Host "Then open a new terminal for the change to take effect."
     }
     Write-Host "Run '$binName --help' to get started."
 }

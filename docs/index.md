@@ -1,8 +1,10 @@
 # Sextant user guide
 
 Sextant infers the structure of unknown binary file formats and network
-protocols from sample data, then generates a parser it has verified against
-those samples. This guide covers installing the tool, running it, and
+protocols from sample data. It verifies every structural hypothesis by
+executing it natively against the samples, reports a per-field confidence, and
+exports the result as a Kaitai Struct, Wireshark Lua, ImHex, or 010 Editor
+parser specification. This guide covers installing the tool, running it, and
 understanding what it produces.
 
 If you are new here, read the pages in order. If you are evaluating Sextant,
@@ -21,8 +23,10 @@ apart.
   verification loop, the heart of the tool.
 - [Privacy and the `--no-llm` story](privacy.md): what is and is not
   transmitted, and how to run fully offline.
-- [Model data handling](model-data-handling.md): what the optional engine
-  language-model path sends when an integrator enables it.
+- [Model data handling](model-data-handling.md): what the optional model pass
+  sends when you enable it with `--provider`, and how to cap and cache it.
+- [Threat model](threat-model.md): the assets, entry points, and trust
+  boundaries Sextant is designed around.
 - [Examples](examples.md): runnable examples against the bundled corpus and the
   recorded demo.
 
@@ -38,7 +42,7 @@ cargo build --release
 # Read a sample through the inferred field map.
 ./target/release/sextant inspect report.json --sample corpus/tlv/samples/sample_01.tlv
 
-# Export a verified Kaitai Struct parser.
+# Export the inferred layout as a Kaitai Struct spec.
 ./target/release/sextant export report.json --format kaitai --out tlv.ksy
 ```
 
@@ -57,8 +61,7 @@ beside it:
 - [Issue triage and contribution flow](TRIAGE.md): how issues and pull requests
   are labeled and handled.
 - [Releasing](RELEASING.md): how Sextant is versioned, packaged, and published.
-- [Public launch checklist](LAUNCH.md): the maintainer steps to take the project
-  public and cut a release.
+- [Changelog](../CHANGELOG.md): what each version contains.
 
 ## A safety note
 

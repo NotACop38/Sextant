@@ -125,14 +125,18 @@ pub fn windowed_entropy(data: &[u8], window: usize) -> Vec<f64> {
 /// fixed tables. An `n` of zero, or a buffer shorter than `n`, yields an empty
 /// map. The map is ordered, so iteration and any derived output are
 /// deterministic (NFR-6).
+///
+/// Keys borrow from `data` rather than copying each window, so memory grows
+/// with the number of distinct windows (at most `data.len()`) and not with
+/// `n`: a large `n` over a large buffer cannot allocate `n` bytes per window.
 #[must_use]
-pub fn ngram_counts(data: &[u8], n: usize) -> BTreeMap<Vec<u8>, u64> {
-    let mut counts: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+pub fn ngram_counts(data: &[u8], n: usize) -> BTreeMap<&[u8], u64> {
+    let mut counts: BTreeMap<&[u8], u64> = BTreeMap::new();
     if n == 0 || data.len() < n {
         return counts;
     }
     for window in data.windows(n) {
-        *counts.entry(window.to_vec()).or_insert(0) += 1;
+        *counts.entry(window).or_insert(0) += 1;
     }
     counts
 }

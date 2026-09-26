@@ -15,8 +15,10 @@
 //! - First-class [`providers::anthropic`] and [`providers::openai`]
 //!   implementations and an optional [`providers::ollama`] one, each behind a
 //!   feature flag.
-//! - [`LlmClient`]: wraps any provider with on-disk caching, retries with
-//!   backoff, a per-run call cap, and an optional spend budget (NFR-6, NFR-9).
+//! - [`LlmClient`]: wraps any provider with on-disk caching, bounded retries
+//!   that honor provider retry hints, a per-run call cap, and an optional
+//!   spend budget that also counts responses rejected after they were billed
+//!   (NFR-6, NFR-9).
 //! - [`resolve_provider`] and [`build_provider`]: auto-detect the provider from
 //!   credentials present in the environment, disambiguated by an explicit
 //!   choice. Secrets come only from the environment or configuration, never
@@ -26,7 +28,11 @@
 //!
 //! Nothing here runs unless a caller constructs a provider, and a caller in
 //! `--no-llm` mode never does. The default build compiles no network code at
-//! all; the HTTP providers are pulled in only by their feature flags.
+//! all; the HTTP providers are pulled in only by their feature flags. Those
+//! providers enforce an overall deadline per request, cap response bodies,
+//! refuse to send an API key over plain `http` to a non-loopback host, never
+//! route loopback traffic through a proxy, and keep the key out of error
+//! messages.
 
 mod cache;
 mod client;
@@ -36,19 +42,21 @@ mod factory;
 mod mock;
 mod provider;
 pub mod providers;
+mod sanitize;
 
-pub use cache::{ResponseCache, request_key};
-pub use client::{Backoff, CallLimits, DEFAULT_MAX_CALLS, LlmClient, Pricing};
+pub use cache::{CACHE_FORMAT_VERSION, ResponseCache, request_key};
+pub use client::{Backoff, CallLimits, DEFAULT_MAX_CALLS, LlmClient, MAX_RETRY_AFTER, Pricing};
 pub use config::{
-    ConfigFileSource, EnvSource, LayeredEnv, ProcessEnv, ProviderKind, SEXTANT_CONFIG_ENV,
+    ANTHROPIC_EFFORT_ENV, ANTHROPIC_FALLBACKS_ENV, ConfigFileSource, EnvSource, LayeredEnv,
+    MAX_CONFIG_FILE_BYTES, MODEL_CACHE_DIR_ENV, ProcessEnv, ProviderKind, SEXTANT_CONFIG_ENV,
     default_secret_source, detect_available, resolve_provider,
 };
 pub use error::LlmError;
-pub use factory::build_provider;
+pub use factory::{ANTHROPIC_BASE_URL_ENV, OPENAI_BASE_URL_ENV, build_provider};
 pub use mock::MockProvider;
 pub use provider::{
-    CompletionRequest, CompletionResponse, JsonRequest, JsonResponse, LlmProvider, Message, Role,
-    Usage,
+    CompletionRequest, CompletionResponse, DEFAULT_MAX_TOKENS, JsonRequest, JsonResponse,
+    LlmProvider, Message, Role, Usage,
 };
 
 #[cfg(test)]

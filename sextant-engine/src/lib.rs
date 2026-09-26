@@ -20,14 +20,14 @@
 //!
 //! [`infer_candidates`] turns a sample set into one or more candidate
 //! [`Format`](sextant_ir::Format) hypotheses using classical techniques:
-//! byte statistics (FR-6), positional [`align`]ment (FR-7), magic, length,
+//! byte statistics (FR-6), positional [alignment](mod@align) (FR-7), magic, length,
 //! count, offset, checksum, and packed-flag evidence detection (FR-8 to FR-11).
 //! Each candidate is validated and scored by the executor and scorer, so the
 //! list is ranked by a verified preliminary score (FR-12).
 //!
 //! # Ingestion (Step 4)
 //!
-//! [`ingest`] turns user inputs (files, directories, and glob patterns) into a
+//! [`ingest()`] turns user inputs (files, directories, and glob patterns) into a
 //! [`SampleSet`]: an ordered list of [`Sample`]s, each with [`Provenance`].
 //! Per-sample and total byte caps bound memory and are surfaced through
 //! [`Notice`]s (FR-1, FR-3, FR-4, FR-5).
@@ -72,12 +72,16 @@ pub mod protocol;
 pub mod refine;
 pub mod report;
 pub mod scorer;
+pub mod segment;
 pub mod semantic;
 pub mod stats;
+pub mod text;
 
 pub use align::{Alignment, Column, Region, align};
 pub use candidate::{Candidate, infer_candidates};
-pub use chunk::{ChunkChecksum, ChunkChecksumStart, ChunkLayout, detect_chunks};
+pub use chunk::{
+    ChunkChecksum, ChunkChecksumStart, ChunkLayout, detect_chunk_layouts, detect_chunks,
+};
 pub use detect::{
     Bitfield, ChecksumField, ChecksumStart, IntField, IntRelation, Magic, OffsetField,
     detect_bitfields, detect_int_fields, detect_magic, detect_offsets, detect_trailing_checksum,
@@ -103,7 +107,7 @@ pub use protocol::{
 };
 pub use refine::{RefineOutcome, RefineStep, Refinement, refine};
 pub use report::{
-    DEFAULT_MAX_REPORT_BYTES, FieldMapEntry, REPORT_SCHEMA_VERSION, Report, RunMetadata,
+    DEFAULT_MAX_REPORT_BYTES, FieldMapEntry, ModelUsage, REPORT_SCHEMA_VERSION, Report, RunMetadata,
 };
 pub use scorer::{SampleScore, Score, ScoreWeights, score, score_with};
 pub use semantic::{

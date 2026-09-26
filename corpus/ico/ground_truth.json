@@ -1,0 +1,41 @@
+{
+  "format": "ico",
+  "display_name": "Windows icon (ICO) with an embedded PNG",
+  "description": "A real icon format holding one image: a 6-byte little-endian ICONDIR, one 16-byte ICONDIRENTRY giving the image's dimensions, size, and offset, and the image stored as a PNG, whose big-endian chunks (IHDR, IDAT, IEND) each carry a CRC-32. Exercises a little-endian directory that locates a big-endian payload, a size and an offset that describe the same region, mixed byte orders in one file, and a chunk array inside the payload.",
+  "endianness": "little",
+  "provenance": {
+    "source": "synthetic",
+    "origin": "Single-image icons written by corpus/ico/generate.py; file identifies each as an icon resource with PNG data, and Java ImageIO decodes every embedded PNG.",
+    "license": "CC0-1.0",
+    "notes": "Not derived from any third-party image. Safe to redistribute."
+  },
+  "structure": {
+    "header": [
+      { "name": "reserved", "offset": 0, "size": 2, "type": "u16le", "role": "reserved", "constant": "0" },
+      { "name": "image_type", "offset": 2, "size": 2, "type": "u16le", "role": "enum", "constant": "1" },
+      { "name": "image_count", "offset": 4, "size": 2, "type": "u16le", "role": "count", "constant": "1" },
+      { "name": "width", "offset": 6, "size": 1, "type": "u8", "role": "unknown" },
+      { "name": "height", "offset": 7, "size": 1, "type": "u8", "role": "unknown" },
+      { "name": "color_count", "offset": 8, "size": 1, "type": "u8", "role": "count", "constant": "0" },
+      { "name": "entry_reserved", "offset": 9, "size": 1, "type": "u8", "role": "reserved", "constant": "0" },
+      { "name": "color_planes", "offset": 10, "size": 2, "type": "u16le", "role": "count", "constant": "1" },
+      { "name": "bits_per_pixel", "offset": 12, "size": 2, "type": "u16le", "role": "enum", "constant": "32" },
+      { "name": "image_size", "offset": 14, "size": 4, "type": "u32le", "role": "length" },
+      { "name": "image_offset", "offset": 18, "size": 4, "type": "u32le", "role": "offset", "constant": "22" },
+      { "name": "png_signature", "offset": 22, "size": 8, "type": "bytes", "role": "magic", "constant": "hex:89504e470d0a1a0a" }
+    ],
+    "record": [
+      { "name": "length", "size": 4, "type": "u32be", "role": "length" },
+      { "name": "chunk_type", "size": 4, "type": "string", "role": "enum" },
+      { "name": "data", "size": "length", "type": "bytes", "role": "payload" },
+      { "name": "crc", "size": 4, "type": "u32be", "role": "checksum" }
+    ]
+  },
+  "samples": [
+    { "path": "samples/sample_01.ico", "size": 270, "record_count": 3 },
+    { "path": "samples/sample_02.ico", "size": 383, "record_count": 3 },
+    { "path": "samples/sample_03.ico", "size": 501, "record_count": 3 },
+    { "path": "samples/sample_04.ico", "size": 635, "record_count": 3 },
+    { "path": "samples/sample_05.ico", "size": 788, "record_count": 3 }
+  ]
+}

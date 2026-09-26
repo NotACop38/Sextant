@@ -20,19 +20,51 @@ use serde::{Deserialize, Serialize};
 pub mod accuracy;
 pub mod report;
 
-pub use accuracy::{CorpusMetrics, FormatMetrics, SampleMetrics, evaluate_corpus, evaluate_format};
+pub use accuracy::{FormatMetrics, SampleMetrics, evaluate_format, evaluate_format_in};
 pub use report::{
-    Baseline, BenchOptions, BenchReport, FormatReport, Summary, TargetCheck, Targets,
+    BenchOptions, BenchReport, FLOORS, Floor, FormatReport, Summary, TargetCheck, Tier, TierReport,
     render_readme_section, render_table, run_benchmark,
 };
 
-/// The file-format corpus the statistics-only MVP is measured against (PRD
-/// Section 15). These are the formats present under `corpus/` with the
-/// header-and-record ground-truth schema this harness evaluates. The protocol
-/// track (Modbus/TCP and the toy protocol) is captured-packet input with its own
-/// ground-truth schema and is exercised by the Step 11 protocol tests and the
-/// Wireshark dissector round-trip, not by these file-format metrics.
-pub const FILE_FORMAT_CORPUS: [&str; 5] = ["tlv", "scma", "stot", "sdlp", "png"];
+/// The file-format formats the engine is developed and tuned against: four
+/// controlled formats authored for this project plus real PNG, BMP, WAV, and ZIP
+/// files. Results on these formats are in-sample and measure fit to known data.
+pub const DEVELOPMENT_CORPUS: [&str; 8] =
+    ["tlv", "scma", "stot", "sdlp", "png", "bmp", "wav", "zip"];
+
+/// Real file formats that were held out from tuning, then evaluated once, after
+/// which the first result exposed one generic defect (spurious chunk streams
+/// over zero padding) that was fixed. Their numbers are therefore no longer a
+/// blind estimate; they are published alongside the first-run result.
+pub const VALIDATION_CORPUS: [&str; 4] = ["gif", "elf", "tar", "pcapfile"];
+
+/// Real file formats held out from all development (PRD Section 15). They are
+/// evaluated with the same harness but were never examined before the
+/// published run, so their numbers estimate accuracy on formats the engine was
+/// not fitted to. A format leaves this tier once it has been consulted.
+pub const HELD_OUT_CORPUS: [&str; 4] = ["gzip", "midi", "qoi", "ico"];
+
+/// Every file-format corpus entry, tier by tier. The protocol track (Modbus/TCP
+/// and the toy protocol) is captured-packet input with its own ground-truth
+/// schema and is exercised by the protocol tests and the Wireshark dissector
+/// round trip, not by these file-format metrics.
+pub const FILE_FORMAT_CORPUS: [&str; 16] = [
+    "tlv", "scma", "stot", "sdlp", "png", "bmp", "wav", "zip", "gif", "elf", "tar", "pcapfile",
+    "gzip", "midi", "qoi", "ico",
+];
+
+/// The total size of the trailer when every trailer field has a fixed size,
+/// else `None`.
+pub(crate) fn fixed_trailer_len(gt: &GroundTruth) -> Option<usize> {
+    gt.structure
+        .trailer
+        .iter()
+        .map(|field| match field.size {
+            SizeRule::Fixed(bytes) => usize::try_from(bytes).ok(),
+            _ => None,
+        })
+        .sum()
+}
 
 /// A hand-verified description of a single corpus format.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -66,13 +98,26 @@ pub struct Provenance {
     pub notes: String,
 }
 
-/// The structural template of a format: a fixed header and a repeating record.
+/// The structural template of a format: a header, a repeating record, and a
+/// trailer, laid out in that order.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Structure {
     /// Fields at the start of every sample, in order.
     pub header: Vec<Field>,
-    /// Fields of one repeating record, in order.
+    /// Fields of one repeating record, in order. Each sample declares how many
+    /// records it holds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub record: Vec<Field>,
+    /// Fields after the last record, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trailer: Vec<Field>,
+}
+
+impl Structure {
+    /// Every field in layout order: header, one record, then trailer.
+    pub fn fields(&self) -> impl Iterator<Item = &Field> {
+        self.header.iter().chain(&self.record).chain(&self.trailer)
+    }
 }
 
 /// One field in a ground-truth structure.
@@ -96,6 +141,9 @@ pub struct Field {
 }
 
 /// How the size of a field is determined.
+///
+/// In JSON a fixed size is a number, a derived size is the name of the length
+/// field, and a rule is an object such as `{"rule": "to_end"}`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum SizeRule {
@@ -103,6 +151,21 @@ pub enum SizeRule {
     Fixed(u64),
     /// Derived from another field, named here (for example `length`).
     Derived(String),
+    /// A size given by a named rule rather than a number or a field.
+    Rule {
+        /// The rule.
+        rule: SizeRuleKind,
+    },
+}
+
+/// A size rule that is neither a fixed number nor a length field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SizeRuleKind {
+    /// The field runs to the end of the sample, or, as the last header field
+    /// of a structure without records, to where its fixed-size trailer begins.
+    /// No other field may use it.
+    ToEnd,
 }
 
 /// One sample file belonging to a format.
@@ -240,14 +303,40 @@ fn validate_ground_truth(gt: &GroundTruth) -> std::io::Result<()> {
     if gt.samples.is_empty() || gt.samples.len() > MAX_SAMPLES {
         return Err(invalid_corpus("invalid corpus sample count"));
     }
-    let fields = gt.structure.header.iter().chain(&gt.structure.record);
-    for field in fields {
+    let fields: Vec<&Field> = gt.structure.fields().collect();
+    for field in &fields {
         if [&field.name, &field.ty, &field.role]
             .iter()
             .any(|value| value.len() > 256)
             || matches!(&field.size, SizeRule::Derived(name) if name.len() > 256)
         {
             return Err(invalid_corpus("ground-truth field labels exceed 256 bytes"));
+        }
+    }
+    // A to-end field consumes the rest of the sample, so it must be the last
+    // field laid out, or the last header field when no record follows and the
+    // trailer after it has a fixed size (it then stops where the trailer
+    // begins). It can never sit inside a repeating record.
+    let last = fields.len().saturating_sub(1);
+    let before_fixed_trailer = gt.structure.record.is_empty()
+        && !gt.structure.trailer.is_empty()
+        && fixed_trailer_len(gt).is_some();
+    let last_header = gt.structure.header.len().checked_sub(1);
+    for (index, field) in fields.iter().enumerate() {
+        if matches!(
+            field.size,
+            SizeRule::Rule {
+                rule: SizeRuleKind::ToEnd
+            }
+        ) {
+            let in_record = gt.structure.record.iter().any(|f| std::ptr::eq(f, *field));
+            let allowed = index == last || (before_fixed_trailer && Some(index) == last_header);
+            if !allowed || in_record {
+                return Err(invalid_corpus(
+                    "only the final ground-truth field, or the final header field before a \
+                     fixed-size trailer, may run to the end",
+                ));
+            }
         }
     }
     let mut bytes = 0u64;
@@ -277,9 +366,10 @@ fn expanded_field_count(gt: &GroundTruth, records: u64) -> std::io::Result<u64> 
     if records > MAX_TRUTH_FIELDS || (records > 0 && gt.structure.record.is_empty()) {
         return Err(invalid_corpus("invalid ground-truth record count"));
     }
+    let fixed = (gt.structure.header.len() + gt.structure.trailer.len()) as u64;
     let count = records
         .checked_mul(gt.structure.record.len() as u64)
-        .and_then(|count| count.checked_add(gt.structure.header.len() as u64))
+        .and_then(|count| count.checked_add(fixed))
         .filter(|&count| count <= MAX_TRUTH_FIELDS)
         .ok_or_else(|| invalid_corpus("ground truth exceeds its expanded field limit"))?;
     Ok(count)
@@ -444,6 +534,30 @@ mod tests {
         let reparsed = parse_ground_truth(&json).expect("re-parse ground truth");
         assert_eq!(reparsed.format, ground_truth.format);
         assert_eq!(reparsed.samples.len(), ground_truth.samples.len());
+    }
+
+    #[test]
+    fn to_end_may_stop_only_at_a_fixed_size_trailer() {
+        // The gzip layout: a to-end body, then a fixed eight-byte trailer.
+        let original = load_ground_truth("gzip").expect("fixture");
+        assert!(validate_ground_truth(&original).is_ok());
+        assert_eq!(fixed_trailer_len(&original), Some(8));
+
+        // A trailer field with a derived size has no fixed start.
+        let mut gt = original.clone();
+        gt.structure.trailer[1].size = SizeRule::Derived("mtime".to_owned());
+        assert!(validate_ground_truth(&gt).is_err());
+
+        // A to-end field that is not the last header field is still refused.
+        let mut gt = original.clone();
+        let body = gt.structure.header.pop().expect("the body field");
+        gt.structure.header.insert(0, body);
+        assert!(validate_ground_truth(&gt).is_err());
+
+        // So is a to-end body followed by a repeating record.
+        let mut gt = original;
+        gt.structure.record = gt.structure.trailer.clone();
+        assert!(validate_ground_truth(&gt).is_err());
     }
 
     #[test]

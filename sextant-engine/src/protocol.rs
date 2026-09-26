@@ -17,6 +17,17 @@
 //!   It never returns a hypothesis that scores below the statistics-only
 //!   baseline (the non-regression invariant, FR-26).
 //!
+//! Clustering, and a second round of field detection, scan within a robust
+//! length bound (the 10th percentile of the message lengths), so one
+//! outlier-short message, such as a stray keep-alive or a cut segment, cannot
+//! shrink the scanned header to nothing. Messages below the bound are left out
+//! of that detection but are always scored, so a header they cannot hold still
+//! costs the fit, and the detection over every message is kept unless leaving
+//! them out verifiably fits better. Each field's evidence records the messages
+//! its detector actually examined and how many agreed: the sequence detector
+//! tests one direction (requests, unless there are too few), and clustering
+//! tests the requests when both directions are present.
+//!
 //! Every function is bounded and panic-free: an empty message set, a single
 //! message, or hostile bytes all yield a valid (possibly trivial) result.
 
@@ -59,6 +70,28 @@ pub struct Discriminant {
     pub values: Vec<u8>,
 }
 
+/// Which messages a clustering or field detector examined (FR-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Population {
+    /// Only the requests: messages toward the selected port.
+    Requests,
+    /// Only the responses: messages away from the selected port.
+    Responses,
+    /// Every message, whatever its direction.
+    AllMessages,
+}
+
+impl Population {
+    /// The singular noun for one member of the population.
+    fn noun(self) -> &'static str {
+        match self {
+            Population::Requests => "request",
+            Population::Responses => "response",
+            Population::AllMessages => "message",
+        }
+    }
+}
+
 /// The result of clustering messages by type (FR-2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Clustering {
@@ -67,6 +100,32 @@ pub struct Clustering {
     pub discriminant: Option<Discriminant>,
     /// The clusters, ordered by their discriminating value.
     pub clusters: Vec<Cluster>,
+    /// Which messages were clustered: the requests when both directions are
+    /// present and there are enough of them, otherwise every message.
+    pub population: Population,
+    /// How many messages of that population were left out of the clusters
+    /// because they are too short to hold the discriminating byte.
+    pub excluded_short: usize,
+}
+
+impl Clustering {
+    /// How many messages the clusters cover.
+    #[must_use]
+    pub fn clustered(&self) -> usize {
+        self.clusters
+            .iter()
+            .map(|cluster| cluster.indices.len())
+            .sum()
+    }
+
+    /// How many clustered messages fall in a type seen more than once.
+    fn recurring(&self) -> usize {
+        self.clusters
+            .iter()
+            .map(|cluster| cluster.indices.len())
+            .filter(|&size| size >= 2)
+            .sum()
+    }
 }
 
 /// One request paired with its response on the same flow (FR-2).
@@ -85,6 +144,11 @@ pub struct Association {
 /// consistent within each group and the message lengths most uniform. A byte
 /// that is constant (one value) or unique to each message (a counter) is never a
 /// discriminant. When nothing discriminates, every message lands in one cluster.
+///
+/// The discriminant is searched within the messages at least as long as the
+/// robust length bound, so one outlier-short message cannot hide it. Every
+/// message long enough to hold the discriminating byte is then clustered; the
+/// rest are counted in [`Clustering::excluded_short`].
 #[must_use]
 pub fn cluster_messages(messages: &[ExtractedMessage]) -> Clustering {
     // When both directions are present, cluster over the requests alone: mixing
@@ -97,38 +161,76 @@ pub fn cluster_messages(messages: &[ExtractedMessage]) -> Clustering {
         .filter(|(_, m)| m.direction == Direction::ToServer)
         .map(|(index, _)| index)
         .collect();
-    let population: Vec<usize> =
+    let (population, members): (Population, Vec<usize>) =
         if request_indices.len() >= 4 && request_indices.len() < messages.len() {
-            request_indices
+            (Population::Requests, request_indices)
         } else {
-            (0..messages.len()).collect()
+            (Population::AllMessages, (0..messages.len()).collect())
         };
 
-    let datas: Vec<&[u8]> = population
+    let bound = robust_min_len(members.iter().map(|&index| messages[index].data.len()));
+    let datas: Vec<&[u8]> = members
         .iter()
         .map(|&index| messages[index].data.as_slice())
+        .filter(|data| data.len() >= bound)
         .collect();
-    let mut clustering = cluster_slices(&datas);
-    // Remap the population-local indices back to original message indices.
-    for cluster in &mut clustering.clusters {
-        for index in &mut cluster.indices {
-            *index = population[*index];
-        }
-    }
-    clustering
-}
-
-/// Cluster raw message slices (the testable core of [`cluster_messages`]).
-fn cluster_slices(datas: &[&[u8]]) -> Clustering {
-    if datas.len() < 2 {
-        let indices = (0..datas.len()).collect();
+    let Some(offset) = find_discriminant(&datas) else {
         return Clustering {
             discriminant: None,
             clusters: vec![Cluster {
                 type_value: None,
-                indices,
+                indices: members,
             }],
+            population,
+            excluded_short: 0,
         };
+    };
+
+    let mut groups: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
+    let mut excluded_short = 0usize;
+    for &index in &members {
+        match messages[index].data.get(offset) {
+            Some(&value) => groups.entry(value).or_default().push(index),
+            None => excluded_short += 1,
+        }
+    }
+    let values: Vec<u8> = groups.keys().copied().collect();
+    let clusters = groups
+        .into_iter()
+        .map(|(value, indices)| Cluster {
+            type_value: Some(value),
+            indices,
+        })
+        .collect();
+    Clustering {
+        discriminant: Some(Discriminant { offset, values }),
+        clusters,
+        population,
+        excluded_short,
+    }
+}
+
+/// The robust lower bound on message length that detection scans within: the
+/// 10th percentile (nearest rank) of the lengths, or zero when there are none.
+/// Up to a tenth of the messages may fall below it, so a few stray short
+/// messages cannot collapse the scan, while a set of ten or fewer messages
+/// keeps its minimum.
+fn robust_min_len(lengths: impl Iterator<Item = usize>) -> usize {
+    let mut lengths: Vec<usize> = lengths.collect();
+    if lengths.is_empty() {
+        return 0;
+    }
+    lengths.sort_unstable();
+    let rank = lengths.len().div_ceil(10);
+    lengths[rank - 1]
+}
+
+/// Find the byte offset that best discriminates the message types among raw
+/// message slices (the testable core of [`cluster_messages`]), or `None` when
+/// nothing does.
+fn find_discriminant(datas: &[&[u8]]) -> Option<usize> {
+    if datas.len() < 2 {
+        return None;
     }
     let min_len = datas.iter().map(|d| d.len()).min().unwrap_or(0);
     let scan = min_len.min(MAX_SCAN);
@@ -166,33 +268,7 @@ fn cluster_slices(datas: &[&[u8]]) -> Clustering {
         }
     }
 
-    match best {
-        Some((offset, _, _)) => {
-            let mut groups: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
-            for (index, data) in datas.iter().enumerate() {
-                groups.entry(data[offset]).or_default().push(index);
-            }
-            let values: Vec<u8> = groups.keys().copied().collect();
-            let clusters = groups
-                .into_iter()
-                .map(|(value, indices)| Cluster {
-                    type_value: Some(value),
-                    indices,
-                })
-                .collect();
-            Clustering {
-                discriminant: Some(Discriminant { offset, values }),
-                clusters,
-            }
-        }
-        None => Clustering {
-            discriminant: None,
-            clusters: vec![Cluster {
-                type_value: None,
-                indices: (0..datas.len()).collect(),
-            }],
-        },
-    }
+    best.map(|(offset, _, _)| offset)
 }
 
 /// How consistent the non-discriminant header bytes become when messages are
@@ -342,7 +418,10 @@ pub struct ProtocolInference {
 /// Infer a verified protocol Format from extracted messages (FR-2).
 ///
 /// The pass detects the length, message-type, and sequence fields, assembles a
-/// header and a payload, and scores the result against every message. If the
+/// header and a payload, and scores the result against every message. Detection
+/// is tried over every message and, when some messages fall below the robust
+/// length bound, again without those outlier-short messages; the better-scoring
+/// assembly is kept, and a message left out of detection is still scored. If the
 /// assembled hypothesis does not beat the statistics-only baseline, the baseline
 /// is used instead, so enabling protocol semantics never lowers the verified fit
 /// (FR-26). The transport and port are recorded in the format metadata so the
@@ -366,6 +445,7 @@ pub fn infer_protocol(
         sample_count: messages.len(),
         total_bytes,
         no_llm: true,
+        model: None,
     };
     let report = Report::build(format, score, Vec::new(), metadata);
 
@@ -389,12 +469,37 @@ fn build_verified(
 ) -> (Format, Score) {
     let (mut baseline_format, baseline_score) = baseline_format(datas, limits);
 
-    if let Some(format) = assemble(messages, datas, clustering, transport, port) {
-        if format.validate().is_ok() {
-            let score = score_with(&format, datas, limits, ScoreWeights::default());
-            if score.overall + 1e-9 >= baseline_score.overall {
-                return (format, score);
-            }
+    // Detection runs over every message, and again over the messages at least
+    // as long as the robust length bound when some fall below it. The second
+    // recovers the header when an outlier-short message would shrink the scan to
+    // nothing; the first protects messages that are legitimately short. Both
+    // are scored against every message, and on a tie the all-message assembly
+    // is kept, so leaving messages out of detection has to fit verifiably better.
+    let mut populations = vec![vec![true; datas.len()]];
+    let bound = robust_min_len(datas.iter().map(|data| data.len()));
+    let robust: Vec<bool> = datas.iter().map(|data| data.len() >= bound).collect();
+    if robust.contains(&false) {
+        populations.push(robust);
+    }
+    let mut best: Option<(Format, Score)> = None;
+    for eligible in &populations {
+        let Some(format) = assemble(messages, datas, eligible, clustering, transport, port) else {
+            continue;
+        };
+        if format.validate().is_err() {
+            continue;
+        }
+        let score = score_with(&format, datas, limits, ScoreWeights::default());
+        if best
+            .as_ref()
+            .is_none_or(|(_, kept)| score.overall > kept.overall + 1e-9)
+        {
+            best = Some((format, score));
+        }
+    }
+    if let Some((format, score)) = best {
+        if score.overall + 1e-9 >= baseline_score.overall {
+            return (format, score);
         }
     }
     // The protocol-specific assembly was absent or did not beat the baseline. The
@@ -462,34 +567,77 @@ struct LengthField {
 }
 
 /// A detected sequence or transaction field: an integer that increases across
-/// the requests on a flow.
+/// the messages of one direction on a flow.
 #[derive(Debug, Clone, Copy)]
 struct SeqField {
     offset: usize,
     width: usize,
     big_endian: bool,
+    /// The direction whose messages were tested.
+    direction: Direction,
+    /// How many messages the monotonicity check examined.
+    tested: usize,
+    /// Whether that direction's messages were pooled across flows because no
+    /// single flow had enough of them.
+    pooled: bool,
+}
+
+/// The messages a whole-population detector examined: those in the detection
+/// population, out of every message analyzed.
+#[derive(Debug, Clone, Copy)]
+struct DetectionScope {
+    /// How many messages were examined.
+    tested: usize,
+    /// How many messages were analyzed in all.
+    total: usize,
+}
+
+impl DetectionScope {
+    /// Evidence for a finding that held on every examined message.
+    fn evidence(self, note: &str) -> Evidence {
+        let scope = if self.tested == self.total {
+            format!("tested on all {} message(s); all agreed", self.total)
+        } else {
+            format!(
+                "tested on {} of {} message(s), leaving out {} shorter outlier(s); all \
+                 tested agreed",
+                self.tested,
+                self.total,
+                self.total - self.tested
+            )
+        };
+        evidence(self.tested, self.tested, note, scope)
+    }
 }
 
 /// Assemble a protocol Format from the detected length, message-type, and
 /// sequence fields, plus the constant and variable header bytes between them and
-/// a trailing payload. Returns `None` when no protocol field is detected, so the
-/// baseline covers that case.
+/// a trailing payload. Detection runs over the messages marked `eligible`.
+/// Returns `None` when no protocol field is detected, so the baseline covers
+/// that case.
 fn assemble(
     messages: &[ExtractedMessage],
     datas: &[&[u8]],
+    eligible: &[bool],
     clustering: &Clustering,
     transport: Transport,
     port: u16,
 ) -> Option<Format> {
-    if datas.is_empty() {
-        return None;
-    }
-    let min_len = datas.iter().map(|d| d.len()).min().unwrap_or(0);
+    let population: Vec<&[u8]> = datas
+        .iter()
+        .zip(eligible)
+        .filter_map(|(data, &keep)| keep.then_some(*data))
+        .collect();
+    let min_len = population.iter().map(|d| d.len()).min().unwrap_or(0);
     if min_len == 0 {
         return None;
     }
+    let scope = DetectionScope {
+        tested: population.len(),
+        total: datas.len(),
+    };
 
-    let length = detect_length_field(datas, min_len);
+    let length = detect_length_field(&population, min_len);
     let big_endian_default = length.is_none_or(|l| l.big_endian);
     let msgtype = clustering
         .discriminant
@@ -499,6 +647,7 @@ fn assemble(
     let seq = detect_sequence_field(
         messages,
         datas,
+        eligible,
         min_len,
         length,
         msgtype.as_ref(),
@@ -542,29 +691,29 @@ fn assemble(
 
     let mut enums: BTreeMap<String, EnumDef> = BTreeMap::new();
     let mut fields: Vec<Field> = Vec::new();
-    let total = datas.len();
     let mut cursor = 0usize;
     while cursor < header_end {
         if let Some((end, sem)) = starts.get(&cursor) {
-            fields.push(semantic_field(sem, &mut enums, total));
+            fields.push(semantic_field(sem, &mut enums, scope, clustering));
             cursor = *end;
             continue;
         }
         // An undetected run: extend it while the column-constant category holds
-        // and no semantic field starts.
-        let constant = column_constant(datas, cursor);
+        // and no semantic field starts. Every detection-population message is
+        // at least `min_len` long, so these columns exist in all of them.
+        let constant = column_constant(&population, cursor);
         let start = cursor;
         cursor += 1;
         while cursor < header_end
             && !starts.contains_key(&cursor)
-            && column_constant(datas, cursor) == constant
+            && column_constant(&population, cursor) == constant
         {
             cursor += 1;
         }
-        fields.push(filler_field(datas, start, cursor, constant, total));
+        fields.push(filler_field(&population, start, cursor, constant, scope));
     }
 
-    fields.push(payload_field(length, header_end, total));
+    fields.push(payload_field(length, header_end, scope));
 
     let mut metadata = Metadata {
         source: Some("protocol inference pass".to_owned()),
@@ -616,12 +765,20 @@ fn add_span(spans: &mut Vec<(usize, usize, Semantic)>, offset: usize, width: usi
 
 /// Whether the byte at `offset` is the same across every message.
 fn column_constant(datas: &[&[u8]], offset: usize) -> bool {
-    let first = datas[0].get(offset).copied();
+    let first = datas.first().and_then(|data| data.get(offset)).copied();
     first.is_some() && datas.iter().all(|d| d.get(offset).copied() == first)
 }
 
-/// Build the IR field for a detected semantic header field.
-fn semantic_field(sem: &Semantic, enums: &mut BTreeMap<String, EnumDef>, total: usize) -> Field {
+/// Build the IR field for a detected semantic header field. Its evidence
+/// records the messages its detector examined: the detection population for
+/// the length, one direction for the sequence, and the clustered messages for
+/// the message type.
+fn semantic_field(
+    sem: &Semantic,
+    enums: &mut BTreeMap<String, EnumDef>,
+    scope: DetectionScope,
+    clustering: &Clustering,
+) -> Field {
     match sem {
         Semantic::Length(length) => integer_field(
             "length",
@@ -629,8 +786,7 @@ fn semantic_field(sem: &Semantic, enums: &mut BTreeMap<String, EnumDef>, total: 
             length.big_endian,
             Role::Length,
             0.9,
-            total,
-            "value tracks the message length (a remaining-length field)",
+            scope.evidence("value tracks the message length (a remaining-length field)"),
         ),
         Semantic::Sequence(seq) => integer_field(
             "sequence",
@@ -638,8 +794,7 @@ fn semantic_field(sem: &Semantic, enums: &mut BTreeMap<String, EnumDef>, total: 
             seq.big_endian,
             Role::Sequence,
             0.8,
-            total,
-            "value increases across the requests on a flow (a sequence or transaction id)",
+            sequence_evidence(seq),
         ),
         Semantic::MessageType(values) => {
             let variants = values
@@ -669,13 +824,60 @@ fn semantic_field(sem: &Semantic, enums: &mut BTreeMap<String, EnumDef>, total: 
                 role: Some(Role::MessageType),
                 constraints: Vec::new(),
                 confidence: Confidence::clamped(0.85),
-                evidence: evidence(
-                    total,
-                    "byte that discriminates the message type (clustering separated the types here)",
-                ),
+                evidence: message_type_evidence(clustering),
             }
         }
     }
+}
+
+/// Evidence for a sequence field: the messages of one direction whose values
+/// the monotonicity check examined, every one of which continued the increase.
+fn sequence_evidence(seq: &SeqField) -> Evidence {
+    let noun = match seq.direction {
+        Direction::ToServer => "request",
+        Direction::FromServer => "response",
+    };
+    let grouping = if seq.pooled {
+        "pooled across flows in capture order"
+    } else {
+        "within each flow"
+    };
+    let scope = format!(
+        "tested on {} {noun}(s) only, {grouping}; every one increased",
+        seq.tested
+    );
+    evidence(
+        seq.tested,
+        seq.tested,
+        "value increases message by message in one direction (a sequence or transaction id)",
+        scope,
+    )
+}
+
+/// Evidence for a message-type field: the messages clustering grouped by the
+/// discriminating byte, of which those in a type seen more than once agree.
+fn message_type_evidence(clustering: &Clustering) -> Evidence {
+    let clustered = clustering.clustered();
+    let recurring = clustering.recurring();
+    let left_out = if clustering.excluded_short > 0 {
+        format!(
+            ", leaving out {} too short to hold the type byte",
+            clustering.excluded_short
+        )
+    } else {
+        String::new()
+    };
+    let scope = format!(
+        "clustering examined {clustered} {}(s){left_out}; {recurring} fell into a type seen \
+         more than once",
+        clustering.population.noun()
+    );
+    evidence(
+        recurring,
+        clustered,
+        "byte that discriminates the message type (clustering separated the types here)",
+        scope,
+    )
 }
 
 /// Build an integer header field.
@@ -685,8 +887,7 @@ fn integer_field(
     big_endian: bool,
     role: Role,
     confidence: f64,
-    total: usize,
-    note: &str,
+    evidence: Evidence,
 ) -> Field {
     let endianness = if width == 1 {
         None
@@ -707,16 +908,27 @@ fn integer_field(
         role: Some(role),
         constraints: Vec::new(),
         confidence: Confidence::clamped(confidence),
-        evidence: evidence(total, note),
+        evidence,
     }
 }
 
 /// Build a filler field for an undetected header run: a constant (reserved or,
 /// at the start, magic) when the bytes never vary, otherwise an unknown run.
-fn filler_field(datas: &[&[u8]], start: usize, end: usize, constant: bool, total: usize) -> Field {
+/// `datas` is the detection population, every member at least `end` long.
+fn filler_field(
+    datas: &[&[u8]],
+    start: usize,
+    end: usize,
+    constant: bool,
+    scope: DetectionScope,
+) -> Field {
     let width = (end - start) as u64;
     if constant {
-        let value = datas[0][start..end].to_vec();
+        let value = datas
+            .first()
+            .and_then(|data| data.get(start..end))
+            .unwrap_or_default()
+            .to_vec();
         let (name, role) = if start == 0 {
             ("magic".to_owned(), Role::Magic)
         } else {
@@ -732,7 +944,7 @@ fn filler_field(datas: &[&[u8]], start: usize, end: usize, constant: bool, total
                 value: Bytes::new(value),
             }],
             confidence: Confidence::clamped(0.85),
-            evidence: evidence(total, "constant header bytes shared by every message"),
+            evidence: scope.evidence("constant header bytes shared by every tested message"),
         }
     } else {
         Field {
@@ -743,7 +955,7 @@ fn filler_field(datas: &[&[u8]], start: usize, end: usize, constant: bool, total
             role: Some(Role::Unknown),
             constraints: Vec::new(),
             confidence: Confidence::clamped(0.4),
-            evidence: evidence(total, "varying header bytes of undetermined role"),
+            evidence: scope.evidence("varying header bytes of undetermined role"),
         }
     }
 }
@@ -751,7 +963,7 @@ fn filler_field(datas: &[&[u8]], start: usize, end: usize, constant: bool, total
 /// Build the trailing payload field. When the length field counts exactly the
 /// bytes from the header end to the message end, the payload is sized from it (a
 /// verified length relationship); otherwise it runs to the end of the message.
-fn payload_field(length: Option<LengthField>, header_end: usize, total: usize) -> Field {
+fn payload_field(length: Option<LengthField>, header_end: usize, scope: DetectionScope) -> Field {
     let derived = length.filter(|l| l.k == header_end).is_some();
     let size = if derived {
         SizeRule::Derived {
@@ -773,20 +985,22 @@ fn payload_field(length: Option<LengthField>, header_end: usize, total: usize) -
         role: Some(Role::Payload),
         constraints: Vec::new(),
         confidence: Confidence::clamped(0.6),
-        evidence: evidence(total, note),
+        evidence: scope.evidence(note),
     }
 }
 
-/// Build a statistics evidence record with one note.
-fn evidence(total: usize, note: &str) -> Evidence {
+/// Build an evidence record: `agreeing` of the `total` messages a detector
+/// examined supported the finding, with the detector's note and a note naming
+/// the examined population.
+fn evidence(agreeing: usize, total: usize, note: &str, scope: String) -> Evidence {
     Evidence {
         detector: Some("protocol".to_owned()),
         support: (total > 0).then_some(SampleSupport {
-            agreeing: total as u64,
+            agreeing: agreeing.min(total) as u64,
             total: total as u64,
         }),
         model_rationale: None,
-        notes: vec![note.to_owned()],
+        notes: vec![note.to_owned(), scope],
     }
 }
 
@@ -929,31 +1143,57 @@ fn distinct_lengths(datas: &[&[u8]]) -> usize {
 /// Detect a sequence or transaction field: an integer that strictly increases
 /// across the requests on each flow (FR-2).
 ///
-/// Detection uses the request direction so a transaction id that the response
-/// echoes does not break monotonicity. The field must not overlap the length or
-/// message-type field. When both byte orders are monotonic (a small counter),
-/// the format's prevailing byte order is preferred.
+/// Detection tests one direction and never mixes the two: a response that
+/// echoes its request's transaction id would repeat a value, and interleaving
+/// directions can fake or break an increase. The requests are used when there
+/// are at least three, otherwise the responses (a capture of one side only).
+/// They are tested within each flow when some flow has at least three, and
+/// otherwise pooled across flows in capture order. Only messages marked
+/// `eligible` take part. The field must not overlap the length or message-type
+/// field. When both byte orders are monotonic (a small counter), the format's
+/// prevailing byte order is preferred.
 fn detect_sequence_field(
     messages: &[ExtractedMessage],
     datas: &[&[u8]],
+    eligible: &[bool],
     min_len: usize,
     length: Option<LengthField>,
     msgtype: Option<&(usize, Vec<u8>)>,
     prefer_big_endian: bool,
 ) -> Option<SeqField> {
-    // The ordered request indices grouped by flow.
-    let mut flows: BTreeMap<_, Vec<usize>> = BTreeMap::new();
+    let included = |index: usize| eligible.get(index).copied().unwrap_or(false);
+    let count = |direction: Direction| {
+        messages
+            .iter()
+            .enumerate()
+            .filter(|(index, message)| included(*index) && message.direction == direction)
+            .count()
+    };
+    let direction = if count(Direction::ToServer) >= 3 {
+        Direction::ToServer
+    } else if count(Direction::FromServer) >= 3 {
+        Direction::FromServer
+    } else {
+        return None;
+    };
+
+    // That direction's message indices, grouped by flow and pooled, in capture
+    // order.
+    let mut flows: BTreeMap<Flow, Vec<usize>> = BTreeMap::new();
+    let mut pooled: Vec<usize> = Vec::new();
     for (index, message) in messages.iter().enumerate() {
-        if message.direction == Direction::ToServer {
+        if included(index) && message.direction == direction {
             flows.entry(message.flow).or_default().push(index);
+            pooled.push(index);
         }
     }
-    // Fall back to all messages, as one flow, when there are too few requests.
-    let groups: Vec<Vec<usize>> = if flows.values().map(Vec::len).max().unwrap_or(0) >= 3 {
+    let per_flow = flows.values().map(Vec::len).max().unwrap_or(0) >= 3;
+    let groups: Vec<Vec<usize>> = if per_flow {
         flows.into_values().collect()
     } else {
-        vec![(0..datas.len()).collect()]
+        vec![pooled]
     };
+    let tested: usize = groups.iter().map(Vec::len).filter(|&size| size >= 2).sum();
 
     let scan = min_len.min(MAX_SCAN);
     for width in [2usize, 4, 1] {
@@ -970,6 +1210,9 @@ fn detect_sequence_field(
                         offset,
                         width,
                         big_endian,
+                        direction,
+                        tested,
+                        pooled: !per_flow,
                     });
                 }
             }
@@ -1017,9 +1260,11 @@ fn monotonic_across_flows(
         }
         let mut previous: Option<u64> = None;
         for &index in group {
-            let value = match decode_uint(datas[index], offset, width, big_endian) {
-                Some(value) => value,
-                None => return false,
+            let decoded = datas
+                .get(index)
+                .and_then(|data| decode_uint(data, offset, width, big_endian));
+            let Some(value) = decoded else {
+                return false;
             };
             if first_value.is_none() {
                 first_value = Some(value);
@@ -1167,6 +1412,86 @@ mod tests {
                 request: 2,
                 response: 3
             }
+        );
+    }
+
+    #[test]
+    fn robust_min_len_is_the_tenth_percentile() {
+        assert_eq!(robust_min_len(std::iter::empty()), 0);
+        // Ten or fewer messages keep their minimum.
+        assert_eq!(robust_min_len([7, 3, 9].into_iter()), 3);
+        // Among a dozen, one stray short message no longer sets the bound.
+        let mut lengths = vec![1];
+        lengths.extend(std::iter::repeat_n(12, 11));
+        assert_eq!(robust_min_len(lengths.into_iter()), 12);
+    }
+
+    #[test]
+    fn detection_can_leave_out_an_outlier_short_message_and_says_so() {
+        let mut messages = toy_messages();
+        messages.push(message(vec![9], true, messages.len()));
+        let datas: Vec<&[u8]> = messages.iter().map(|m| m.data.as_slice()).collect();
+        let clustering = cluster_messages(&messages);
+
+        // With every message eligible, the one-byte message leaves no header
+        // to scan, so no length field can be found.
+        let everyone = vec![true; datas.len()];
+        let all = assemble(
+            &messages,
+            &datas,
+            &everyone,
+            &clustering,
+            Transport::Tcp,
+            8000,
+        );
+        assert!(all.is_none_or(|format| {
+            format
+                .root
+                .fields
+                .iter()
+                .all(|field| field.role != Some(Role::Length))
+        }));
+
+        // Leaving it out of detection recovers the length and the sequence,
+        // and the evidence names the message that was left out.
+        let robust: Vec<bool> = datas.iter().map(|data| data.len() > 1).collect();
+        let format = assemble(
+            &messages,
+            &datas,
+            &robust,
+            &clustering,
+            Transport::Tcp,
+            8000,
+        )
+        .expect("fields are detected");
+        let length = format
+            .root
+            .fields
+            .iter()
+            .find(|field| field.role == Some(Role::Length))
+            .expect("a length field");
+        assert_eq!(
+            length.evidence.support,
+            Some(SampleSupport {
+                agreeing: 6,
+                total: 6
+            })
+        );
+        assert!(
+            length
+                .evidence
+                .notes
+                .iter()
+                .any(|note| note.contains("leaving out 1 shorter outlier")),
+            "notes were {:?}",
+            length.evidence.notes
+        );
+        assert!(
+            format
+                .root
+                .fields
+                .iter()
+                .any(|field| field.role == Some(Role::Sequence))
         );
     }
 

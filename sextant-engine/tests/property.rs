@@ -90,6 +90,34 @@ fn counted_array_format() -> Format {
     }
 }
 
+/// A length followed by a body sized to it (a struct holding a tag and the rest
+/// as data), then a marker byte: the sized-struct invariant format.
+fn sized_chunk_format() -> Format {
+    let body = field(
+        "body",
+        Kind::Struct {
+            structure: Structure::new(vec![
+                field("tag", int(1)),
+                field("data", Kind::Bytes).with_size(SizeRule::ToEnd),
+            ]),
+        },
+    )
+    .with_size(SizeRule::Derived {
+        length_field: FieldRef::new("len"),
+    });
+    Format {
+        name: "sized_chunk".to_owned(),
+        endianness: Endianness::Big,
+        root: Structure::new(vec![
+            field("len", int(1)).with_role(Role::Length),
+            body,
+            field("marker", int(1)),
+        ]),
+        enums: Default::default(),
+        metadata: Default::default(),
+    }
+}
+
 /// The battery of IRs the overrun property runs every random sample through.
 fn battery() -> Vec<Format> {
     vec![
@@ -97,6 +125,7 @@ fn battery() -> Vec<Format> {
         sextant_ir::fixtures::tlv_ground_truth(),
         len_crc_format(),
         counted_array_format(),
+        sized_chunk_format(),
     ]
 }
 
@@ -141,7 +170,7 @@ proptest! {
     /// Invariant 1: a parse never overruns the sample, whatever the bytes or the
     /// IR, and the score is always a finite value in 0 to 1.
     #[test]
-    fn a_parse_never_overruns(sample in proptest::collection::vec(any::<u8>(), 0..512), pick in 0usize..4) {
+    fn a_parse_never_overruns(sample in proptest::collection::vec(any::<u8>(), 0..512), pick in 0usize..5) {
         let formats = battery();
         let limits = Limits::for_fuzzing();
         let format = &formats[pick % formats.len()];
@@ -151,6 +180,12 @@ proptest! {
         let report = score(format, std::slice::from_ref(&sample.as_slice()));
         prop_assert!(report.overall.is_finite());
         prop_assert!((0.0..=1.0).contains(&report.overall));
+        // Explained, gap, and trailing bytes partition the sample.
+        let scored = &report.samples[0];
+        prop_assert_eq!(
+            scored.explained_bytes + scored.gap_bytes + scored.trailing_bytes,
+            sample.len()
+        );
     }
 
     /// Invariant 2: in a valid parse, a length field always matches what it
@@ -182,6 +217,30 @@ proptest! {
         } else {
             prop_assert!(false, "the length field did not decode as an integer");
         }
+    }
+
+    /// In a valid parse, a sized struct spans exactly the length that governs
+    /// it, its fields stay inside that region, and the next field follows it.
+    #[test]
+    fn a_sized_struct_spans_exactly_its_length(body in proptest::collection::vec(any::<u8>(), 1..255)) {
+        let format = sized_chunk_format();
+        let mut sample = vec![body.len() as u8];
+        sample.extend_from_slice(&body);
+        sample.push(0xee);
+
+        let execution = execute(&format, &sample, &Limits::default());
+        prop_assert!(execution.succeeded(), "a well-formed buffer must parse");
+        let region = &execution.fields[1];
+        prop_assert_eq!((region.start, region.end), (1, 1 + body.len()));
+        if let Value::Struct(children) = &region.value {
+            for child in children {
+                prop_assert!(child.start >= region.start && child.end <= region.end);
+            }
+        } else {
+            prop_assert!(false, "the body did not decode as a struct");
+        }
+        prop_assert_eq!(execution.fields[2].start, region.end);
+        prop_assert!(score(&format, std::slice::from_ref(&sample.as_slice())).fully_verified());
     }
 
     /// In a valid parse, a count field always matches the number of array

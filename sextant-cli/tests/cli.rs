@@ -150,8 +150,14 @@ fn bench_writes_machine_readable_results() {
         .expect("run sextant bench --out");
     assert!(output.status.success(), "bench --out should exit zero");
     let json = std::fs::read_to_string(&out).expect("results.json written");
-    assert!(json.contains("\"boundary_f1\""), "results JSON: {json}");
-    assert!(json.contains("\"parser_validity\""), "results JSON: {json}");
+    for key in [
+        "\"tiers\"",
+        "\"boundary_f1\"",
+        "\"native_validity\"",
+        "\"floors\"",
+    ] {
+        assert!(json.contains(key), "results JSON is missing {key}");
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -464,4 +470,69 @@ fn infer_on_a_missing_path_is_an_input_error() {
         Some(2),
         "a missing input should exit with the PRD input-error code"
     );
+}
+
+#[test]
+fn a_reader_that_closes_the_pipe_ends_the_run_quietly() {
+    // `sextant infer samples | head -1`: once the reader is gone, the next write
+    // fails with a broken pipe. That must end the run with success, as a filter
+    // does, not with a panic.
+    use std::process::Stdio;
+    let mut child = sextant()
+        .arg("infer")
+        .arg(corpus_dir("png/samples"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sextant");
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("wait for sextant");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+    assert!(
+        output.status.success(),
+        "status {:?}, stderr: {stderr}",
+        output.status
+    );
+}
+
+#[test]
+fn a_hostile_report_cannot_write_control_sequences_to_the_terminal() {
+    // A report is untrusted input. When its IR fails validation, the error
+    // quotes the offending names, which must reach the terminal escaped.
+    let dir = std::env::temp_dir().join(format!("sextant-hostile-report-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let inferred = sextant()
+        .current_dir(&dir)
+        .arg("infer")
+        .arg(corpus_dir("tlv/samples"))
+        .args(["--out", "report.json"])
+        .output()
+        .unwrap();
+    assert!(inferred.status.success());
+    let path = dir.join("report.json");
+    let mut report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let hostile = "\u{1b}]0;owned\u{7}\u{1b}[2J";
+    for index in [0, 1] {
+        report["format"]["root"]["fields"][index]["name"] = serde_json::json!(hostile);
+    }
+    std::fs::write(&path, report.to_string()).unwrap();
+
+    for args in [
+        vec!["export", "report.json", "--format", "kaitai"],
+        vec!["inspect", "report.json", "--sample", "report.json"],
+    ] {
+        let output = sextant().current_dir(&dir).args(&args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("invalid format hypothesis"), "{stderr}");
+        assert!(
+            !output.stderr.contains(&0x1b) && !output.stderr.contains(&0x07),
+            "{args:?} wrote a raw control character: {stderr:?}"
+        );
+        assert!(stderr.contains("\\u{1b}"), "{stderr}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }

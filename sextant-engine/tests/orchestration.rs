@@ -68,6 +68,19 @@ fn infer_produces_a_scored_field_map_on_every_corpus_format() {
 }
 
 #[test]
+fn a_header_field_that_counts_the_records_is_named_for_its_role() {
+    let report = infer(&ingest_corpus("tlv"), &InferenceOptions::default());
+    let count = report
+        .format
+        .root
+        .fields
+        .iter()
+        .find(|field| field.role == Some(sextant_ir::Role::Count))
+        .expect("the TLV record count is found");
+    assert_eq!(count.name.as_deref(), Some("count"));
+}
+
+#[test]
 fn refinement_history_only_records_non_regressing_changes() {
     // Whatever the loop accepts, every recorded step must strictly improve the
     // verified score: the non-regression invariant (FR-26, FR-28).
@@ -114,11 +127,12 @@ fn dependencies_section(manifest: &Path) -> String {
 }
 
 #[test]
-fn the_no_llm_path_links_no_network_crate() {
-    // The `infer --no-llm` path is exactly the CLI binary plus `sextant-engine`
-    // and `sextant-ir`. Verifying that none of these declares a network crate,
-    // and that the CLI does not even depend on the optional `sextant-llm`,
-    // makes off-machine egress structurally impossible in this mode (NFR-4).
+fn the_default_build_links_no_network_crate() {
+    // The default CLI build is the CLI binary plus `sextant-engine` and
+    // `sextant-ir`. Verifying that none of these declares a network crate, and
+    // that the CLI links the model crate (and with it every network provider)
+    // only through its off-by-default `llm` feature, makes off-machine egress
+    // structurally impossible in a default build (NFR-4).
     let root = repo_root();
     let manifests = [
         root.join("sextant-engine").join("Cargo.toml"),
@@ -137,11 +151,24 @@ fn the_no_llm_path_links_no_network_crate() {
         }
     }
 
-    // The CLI must not link the optional model crate, so the `infer` path cannot
-    // reach a provider at all.
+    // The CLI may link the model crate only as an optional dependency, behind a
+    // feature that is not on by default.
     let cli_deps = dependencies_section(&root.join("sextant-cli").join("Cargo.toml"));
+    for line in cli_deps
+        .lines()
+        .filter(|line| line.starts_with("sextant-llm"))
+    {
+        assert!(
+            line.contains("optional = true"),
+            "the CLI links sextant-llm unconditionally: {line}"
+        );
+    }
+    let default_features = cli_deps
+        .lines()
+        .find(|line| line.trim_start().starts_with("default ="))
+        .expect("the CLI declares its default features");
     assert!(
-        !cli_deps.contains("sextant-llm"),
-        "the CLI depends on sextant-llm; the no-llm path could reach a provider"
+        !default_features.contains("llm"),
+        "the model providers are on by default: {default_features}"
     );
 }

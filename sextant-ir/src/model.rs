@@ -59,7 +59,11 @@ impl Format {
     /// Deserialize a format from JSON (FR-19).
     ///
     /// This is structural only and does not check semantic validity; call
-    /// [`Format::validate`](crate::Format::validate) afterward.
+    /// [`Format::validate`](crate::Format::validate) afterward. Parsing is
+    /// recursion-limited, so hostile nesting fails cleanly instead of
+    /// exhausting the stack, and every format that validates parses. Memory use
+    /// grows with the input, so a caller reading untrusted files should cap how
+    /// many bytes it reads first, as the CLI does for reports.
     ///
     /// # Errors
     ///
@@ -96,13 +100,16 @@ pub struct Field {
     pub kind: Kind,
     /// How the field's size is determined. Omitted when the kind implies the
     /// size (integers and enums from their width, structs from their fields,
-    /// arrays from their count rule).
+    /// arrays from their count rule). A struct may also carry a fixed, derived,
+    /// or to-end size, which makes it a bounded region (see [`Kind::Struct`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<SizeRule>,
-    /// An explicit start position relative to the enclosing structure. When
-    /// omitted the field follows the previous field sequentially. An explicit
-    /// offset enables absolute positioning and lets validation detect
-    /// overlapping fixed fields (FR-17).
+    /// An explicit start position relative to the start of the enclosing
+    /// structure. When omitted the field follows the previous field
+    /// sequentially; after a positioned field, parsing continues from that
+    /// field's end. An explicit offset enables absolute positioning and lets
+    /// validation detect overlapping fixed fields (FR-17). An array element
+    /// cannot be positioned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<FieldOffset>,
     /// The field's semantic role, if known.
@@ -191,7 +198,19 @@ pub enum Kind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endianness: Option<Endianness>,
     },
-    /// A nested structure. Its size is the sum of its fields.
+    /// A nested structure.
+    ///
+    /// Without a size rule, the structure spans from its start to the furthest
+    /// byte any of its fields reaches, and the next sequential field starts
+    /// there.
+    ///
+    /// With a size rule (fixed, derived, or to end; a terminator is not
+    /// allowed), the structure is a bounded region of exactly that many bytes:
+    /// its fields parse inside the region and may not run past it, and the next
+    /// sequential field starts after the region. Bytes the fields leave unread
+    /// stay part of the structure but are explained by no field, so they count
+    /// against coverage rather than failing the parse. This is how a
+    /// length-governed body (a chunk, a record, a container payload) is typed.
     Struct {
         /// The nested structure.
         structure: Structure,

@@ -1,0 +1,32 @@
+{
+  "format": "qoi",
+  "display_name": "Quite OK Image format (QOI)",
+  "description": "A real image format: a 14-byte big-endian header (a four-character magic, width, height, channel count, and colorspace), the encoded pixel stream, and a fixed 8-byte end marker. Exercises big-endian dimensions, small enumerated header bytes, an opaque body whose length is given by no field, and a constant trailer.",
+  "endianness": "big",
+  "provenance": {
+    "source": "synthetic",
+    "origin": "Small generated images encoded by corpus/qoi/generate.py and decoded pixel for pixel by both its own decoder and the reference implementation (the qoi Python package).",
+    "license": "CC0-1.0",
+    "notes": "Not derived from any third-party image. Safe to redistribute."
+  },
+  "structure": {
+    "header": [
+      { "name": "magic", "offset": 0, "size": 4, "type": "bytes", "role": "magic", "constant": "qoif" },
+      { "name": "width", "offset": 4, "size": 4, "type": "u32be", "role": "unknown" },
+      { "name": "height", "offset": 8, "size": 4, "type": "u32be", "role": "unknown" },
+      { "name": "channels", "offset": 12, "size": 1, "type": "u8", "role": "enum" },
+      { "name": "colorspace", "offset": 13, "size": 1, "type": "u8", "role": "enum" },
+      { "name": "pixel_stream", "offset": 14, "size": {"rule": "to_end"}, "type": "bytes", "role": "payload" }
+    ],
+    "trailer": [
+      { "name": "end_marker", "size": 8, "type": "bytes", "role": "magic", "constant": "hex:0000000000000001" }
+    ]
+  },
+  "samples": [
+    { "path": "samples/sample_01.qoi", "size": 70, "record_count": 0 },
+    { "path": "samples/sample_02.qoi", "size": 101, "record_count": 0 },
+    { "path": "samples/sample_03.qoi", "size": 119, "record_count": 0 },
+    { "path": "samples/sample_04.qoi", "size": 28, "record_count": 0 },
+    { "path": "samples/sample_05.qoi", "size": 135, "record_count": 0 }
+  ]
+}

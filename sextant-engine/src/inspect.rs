@@ -517,7 +517,7 @@ fn label_preview(text: &str, max: usize) -> String {
     let mut out = String::new();
     let mut count = 0;
     for ch in text.chars() {
-        if ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}') {
+        if crate::text::is_unsafe_to_display(ch) {
             for escaped in ch.escape_default() {
                 out.push(escaped);
                 count += 1;
@@ -763,5 +763,24 @@ mod tests {
             let preview = label_preview(&"\x1b".repeat(100), max);
             assert!(preview.chars().count() <= max);
         }
+    }
+
+    #[test]
+    fn inspect_escapes_bidirectional_and_invisible_characters() {
+        // A right-to-left override would make `exe.txt` display as `txt.exe`.
+        let (mut report, _) = tlv_report_and_sample();
+        report.format.name = "report\u{202e}txt.exe".to_owned();
+        report.format.root.fields = vec![
+            Field::new(Kind::Opaque, sextant_ir::Confidence::CERTAIN)
+                .with_size(sextant_ir::SizeRule::ToEnd)
+                .with_name("zero\u{200b}width\u{2066}isolate"),
+        ];
+        let view = render(&report, &[0], &InspectOptions::default());
+        for hidden in ['\u{202e}', '\u{200b}', '\u{2066}'] {
+            assert!(!view.contains(hidden), "{hidden:?} reached the view");
+        }
+        assert!(view.contains("report\\u{202e}txt.exe"));
+        let text = value_preview(&Value::Text("a\u{202e}b".to_owned()), &[], 0, 0);
+        assert!(!text.contains('\u{202e}'), "{text}");
     }
 }

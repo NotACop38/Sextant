@@ -138,6 +138,47 @@ fn build_battery() -> Vec<Format> {
         metadata: Default::default(),
     });
 
+    // Length-governed chunks whose bodies are sized structs, one nested inside
+    // another: the region bounds, unread tails, and truncation paths.
+    let body = named(
+        "body",
+        Kind::Struct {
+            structure: Structure::new(vec![
+                named("tag", int(1)),
+                named(
+                    "inner",
+                    Kind::Struct {
+                        structure: Structure::new(vec![named("x", int(2))]),
+                    },
+                )
+                .with_size(SizeRule::Fixed { bytes: 3 }),
+                named("data", Kind::Bytes).with_size(SizeRule::ToEnd),
+            ]),
+        },
+    )
+    .with_size(SizeRule::Derived {
+        length_field: FieldRef::new("len"),
+    });
+    formats.push(Format {
+        name: "sized_chunks".to_owned(),
+        endianness: Endianness::Little,
+        root: Structure::new(vec![Field::new(
+            Kind::Array {
+                element: Box::new(named(
+                    "chunk",
+                    Kind::Struct {
+                        structure: Structure::new(vec![named("len", int(1)), body]),
+                    },
+                )),
+                count: CountRule::ToEnd,
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name("chunks")]),
+        enums: Default::default(),
+        metadata: Default::default(),
+    });
+
     formats
 }
 
@@ -154,7 +195,13 @@ fuzz_target!(|data: &[u8]| {
         assert!(start <= end && end <= sample.len());
     }
 
-    // Scoring must always yield a finite value in 0..=1.
+    // Scoring must always yield a finite value in 0..=1, and explained, gap,
+    // and trailing bytes must partition the sample.
     let report = score(format, std::slice::from_ref(&sample));
     assert!(report.overall.is_finite() && (0.0..=1.0).contains(&report.overall));
+    let scored = &report.samples[0];
+    assert_eq!(
+        scored.explained_bytes + scored.gap_bytes + scored.trailing_bytes,
+        sample.len()
+    );
 });

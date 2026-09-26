@@ -2,44 +2,59 @@
 //!
 //! Many real formats are a short header followed by a run of records, each of
 //! which carries its own length: PNG chunks (a four-byte big-endian length, a
-//! four-byte type, the data, and a CRC-32), the Sextant TLV records (a tag, a
-//! two-byte length, and the value), and countless others. A single fixed-offset
-//! length field cannot describe this; the array is the structure.
+//! four-byte type, the data, and a CRC-32), RIFF chunks (a four-character tag
+//! and a little-endian size), capture file records (timestamps, then a length),
+//! and tag-length-value encodings. A single fixed-offset length field cannot
+//! describe this; the array is the structure.
 //!
-//! [`detect_chunks`] searches for a record template that, replayed from a header
-//! boundary, consumes every sample exactly to its end. The template has a small
-//! number of parameters: a header length, optional bytes before the length
-//! field, the length field width and byte order, optional bytes between the
-//! length and the data it governs, and optional trailing bytes (often a
-//! per-record checksum). Every candidate template is replayed against every
-//! sample; only a template that lands exactly on the end of all samples, with at
-//! least one record everywhere and more than one somewhere, is kept. The
-//! executor and scorer remain the final authority (FR-26); this detector only
-//! proposes the layout.
+//! [`detect_chunk_layouts`] searches for record templates that, replayed from a
+//! header boundary, consume every sample exactly to its end. A template has a
+//! header length, the bytes before the length field inside a record, the
+//! length field's width and byte order, and a number of fixed bytes after it
+//! that are split between a middle section (before the data) and a tail (after
+//! it, often a checksum). Every consistent layout is returned, and the
+//! candidate builder lets the executor and the structure measure choose among
+//! them (FR-26); this module only proposes.
 //!
-//! When a template's trailing bytes verify as a checksum over the record (the
-//! PNG CRC-32 case), that is recorded too: it both raises confidence and breaks
-//! ties toward the layout a human would recognize as correct.
+//! # Bounded work
+//!
+//! A replay's record boundaries depend only on the header length, the offset
+//! and reading of the length field, and the total fixed bytes per record, so
+//! each such geometry is replayed once and the middle and tail split is
+//! enumerated afterwards. A replay stops early when its first records are
+//! degenerate (every length zero, or every length equal), and the whole search
+//! is capped at a number of replay steps proportional to the input size, so an
+//! adversarial or low-entropy input cannot make detection slow (FR-24, NFR-3).
 
 use sextant_ir::ChecksumAlgorithm;
 
 use crate::checksum;
 
-/// The header lengths the search tries. A record array begins after a short
-/// header (a magic, perhaps a version and a count), so only small header
-/// boundaries are worth testing. Bounding this keeps detection cheap.
-const MAX_HEADER_LEN: usize = 16;
-/// The most bytes the search will hypothesize before the length field inside a
-/// record (for example a one-byte tag).
-const MAX_PRE: usize = 4;
-/// The most bytes the search will hypothesize between the length field and the
-/// data it governs, or trailing after the data.
-const MAX_GAP: usize = 8;
+/// The header lengths the search tries.
+const MAX_HEADER_LEN: usize = 64;
+/// The most bytes before the length field inside a record (for example a tag,
+/// or a pair of timestamps).
+const MAX_PRE: usize = 8;
+/// The most fixed bytes after the length field, split between the middle
+/// section and the tail.
+const MAX_AFTER: usize = 16;
 /// The length field widths the search hypothesizes, in bytes.
 const WIDTHS: [u8; 3] = [1, 2, 4];
-/// A hard cap on records produced by one replay, so an adversarial input cannot
-/// drive an unbounded loop during detection (NFR-2).
+/// A hard cap on records produced by one replay (NFR-2).
 const MAX_RECORDS: usize = 1 << 20;
+/// How many leading records a replay inspects before giving up on a length
+/// sequence that never changes: a field that is always zero, or always the same
+/// value, is not evidence of a length prefix.
+const DEGENERATE_PREFIX: usize = 64;
+/// Replay steps allowed per input byte, plus a fixed allowance. Detection stops
+/// and returns what it found once the budget is spent. A genuine layout needs
+/// one step per record, far below one step per byte, so the budget only binds
+/// when many templates replay deep into data that almost fits, such as sparse
+/// or low-entropy input.
+const STEPS_PER_BYTE: usize = 4;
+const BASE_STEPS: usize = 1 << 20;
+/// The most layouts returned.
+const MAX_LAYOUTS: usize = 64;
 
 /// Where a per-record checksum's covered range begins, relative to one record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,8 +74,7 @@ pub struct ChunkChecksum {
     pub algorithm: ChecksumAlgorithm,
     /// Where the covered range begins within a record.
     pub start: ChunkChecksumStart,
-    /// Whether the stored checksum value is big-endian (PNG stores its CRC-32
-    /// big-endian, for example).
+    /// Whether the stored checksum value is big-endian.
     pub big_endian: bool,
 }
 
@@ -69,16 +83,15 @@ pub struct ChunkChecksum {
 pub struct ChunkLayout {
     /// The header length: the byte offset at which the record array begins.
     pub header_len: usize,
-    /// Bytes inside each record before the length field (for example a tag).
+    /// Bytes inside each record before the length field.
     pub pre: usize,
     /// The length field width in bytes.
     pub width: u8,
     /// Whether the length field is big-endian.
     pub big_endian: bool,
-    /// Bytes between the length field and the data it governs (for example a
-    /// chunk type).
+    /// Bytes between the length field and the data it governs.
     pub mid: usize,
-    /// Bytes trailing after the data (often a per-record checksum).
+    /// Bytes trailing after the data.
     pub tail: usize,
     /// A per-record checksum over the trailing bytes, when one verifies.
     pub checksum: Option<ChunkChecksum>,
@@ -87,113 +100,129 @@ pub struct ChunkLayout {
 }
 
 impl ChunkLayout {
-    /// The total number of records across all samples. Used to prefer the
-    /// layout that explains the most structure.
-    fn total_records(&self) -> usize {
+    /// The fixed bytes of one record, excluding its data.
+    #[must_use]
+    pub fn fixed(&self) -> usize {
+        self.pre + usize::from(self.width) + self.mid + self.tail
+    }
+
+    /// The total number of records across all samples.
+    #[must_use]
+    pub fn total_records(&self) -> usize {
         self.record_counts.iter().sum()
     }
 }
 
 /// Read an unsigned integer of `width` bytes at `offset`, honoring byte order.
-/// Returns `None` when the field would run past the end of `data`.
 fn read_uint(data: &[u8], offset: usize, width: u8, big: bool) -> Option<u64> {
-    let width = usize::from(width);
-    let end = offset.checked_add(width)?;
-    if end > data.len() {
-        return None;
-    }
+    let end = offset.checked_add(usize::from(width))?;
+    let bytes = data.get(offset..end)?;
     let mut value = 0u64;
     if big {
-        for &byte in &data[offset..end] {
+        for &byte in bytes {
             value = (value << 8) | u64::from(byte);
         }
     } else {
-        for (index, &byte) in data[offset..end].iter().enumerate() {
+        for (index, &byte) in bytes.iter().enumerate() {
             value |= u64::from(byte) << (8 * index);
         }
     }
     Some(value)
 }
 
-/// A record template: the geometry of one length-prefixed record, shared by
-/// every record of a layout. Grouping these parameters keeps the detection
-/// functions readable and their signatures small.
+/// The geometry that determines record boundaries.
 #[derive(Debug, Clone, Copy)]
-struct Template {
-    /// Bytes inside each record before the length field.
+struct Geometry {
+    header_len: usize,
     pre: usize,
-    /// The length field width in bytes.
     width: u8,
-    /// Whether the length field is big-endian.
     big: bool,
-    /// Bytes between the length field and the data it governs.
-    mid: usize,
-    /// Bytes trailing after the data.
-    tail: usize,
+    fixed: usize,
 }
 
-impl Template {
-    /// The fixed bytes of one record, excluding its variable-length data.
-    fn fixed(&self) -> Option<usize> {
-        self.pre
-            .checked_add(usize::from(self.width))?
-            .checked_add(self.mid)?
-            .checked_add(self.tail)
-    }
-
-    /// The offset of the data field within a record.
-    fn data_offset(&self) -> usize {
-        self.pre + usize::from(self.width) + self.mid
-    }
-}
-
-/// One record's geometry inside a sample, recovered during a replay.
+/// The start and governed length of one record.
 #[derive(Debug, Clone, Copy)]
 struct Record {
-    /// The record's start offset.
     start: usize,
-    /// The decoded length value that governs the data field.
-    length: u64,
+    length: usize,
 }
 
-/// Replay a record template across one sample. Returns the records when the
-/// template consumes the sample exactly to its end, otherwise `None`.
-fn replay(sample: &[u8], header_len: usize, template: Template) -> Option<Vec<Record>> {
-    if header_len > sample.len() {
-        return None;
-    }
-    let fixed = template.fixed()?;
-    let mut records = Vec::new();
-    let mut cursor = header_len;
-    while cursor < sample.len() {
-        let length = read_uint(sample, cursor + template.pre, template.width, template.big)?;
-        let data_len = usize::try_from(length).ok()?;
-        let record_size = fixed.checked_add(data_len)?;
-        // A record must make progress, otherwise the replay would loop forever.
-        if record_size == 0 {
-            return None;
+/// A replay outcome.
+enum Replay {
+    /// The template consumed the sample exactly.
+    Exact(Vec<Record>),
+    /// The template did not fit the sample.
+    Mismatch,
+    /// The work budget ran out.
+    Exhausted,
+}
+
+/// A shared step budget for the whole search.
+struct Budget {
+    remaining: usize,
+}
+
+impl Budget {
+    fn spend(&mut self) -> bool {
+        if self.remaining == 0 {
+            return false;
         }
-        let end = cursor.checked_add(record_size)?;
-        if end > sample.len() {
-            return None;
+        self.remaining -= 1;
+        true
+    }
+}
+
+/// Replay a geometry across one sample.
+fn replay(sample: &[u8], geometry: Geometry, budget: &mut Budget) -> Replay {
+    if geometry.header_len > sample.len() {
+        return Replay::Mismatch;
+    }
+    let mut records = Vec::new();
+    let mut cursor = geometry.header_len;
+    let mut first_length = None;
+    let mut all_equal = true;
+    while cursor < sample.len() {
+        if !budget.spend() {
+            return Replay::Exhausted;
+        }
+        let Some(length) = read_uint(sample, cursor + geometry.pre, geometry.width, geometry.big)
+        else {
+            return Replay::Mismatch;
+        };
+        let Ok(length) = usize::try_from(length) else {
+            return Replay::Mismatch;
+        };
+        let Some(end) = cursor
+            .checked_add(geometry.fixed)
+            .and_then(|end| end.checked_add(length))
+        else {
+            return Replay::Mismatch;
+        };
+        if end > sample.len() || end == cursor {
+            return Replay::Mismatch;
+        }
+        match first_length {
+            None => first_length = Some(length),
+            Some(first) if first != length => all_equal = false,
+            Some(_) => {}
         }
         records.push(Record {
             start: cursor,
             length,
         });
-        if records.len() > MAX_RECORDS {
-            return None;
+        if (records.len() >= DEGENERATE_PREFIX && all_equal) || records.len() > MAX_RECORDS {
+            return Replay::Mismatch;
         }
         cursor = end;
     }
-    if cursor == sample.len() && !records.is_empty() {
-        Some(records)
+    if records.is_empty() {
+        Replay::Mismatch
     } else {
-        None
+        Replay::Exact(records)
     }
 }
 
-/// The checksum algorithms worth testing for a trailing field of `tail` bytes.
+/// The checksum algorithms worth testing for a tail of `tail` bytes.
 fn algorithms_for_tail(tail: usize) -> &'static [ChecksumAlgorithm] {
     match tail {
         4 => &[
@@ -206,67 +235,60 @@ fn algorithms_for_tail(tail: usize) -> &'static [ChecksumAlgorithm] {
             ChecksumAlgorithm::Additive,
             ChecksumAlgorithm::Xor,
         ],
-        _ => &[ChecksumAlgorithm::Additive, ChecksumAlgorithm::Xor],
+        1 => &[ChecksumAlgorithm::Additive, ChecksumAlgorithm::Xor],
+        _ => &[],
     }
 }
 
-/// Test whether the trailing `tail` bytes of every record verify as a checksum
-/// over a covered range, for one (algorithm, start) hypothesis.
-fn checksum_holds(
-    samples: &[&[u8]],
-    records: &[Vec<Record>],
-    template: Template,
-    algorithm: ChecksumAlgorithm,
-    start: ChunkChecksumStart,
-    big: bool,
-) -> bool {
-    let tail = template.tail as u8;
-    for (sample, sample_records) in samples.iter().zip(records) {
-        for record in sample_records {
-            let data_len = record.length as usize;
-            let cover_start = match start {
-                ChunkChecksumStart::RecordStart => record.start,
-                ChunkChecksumStart::AfterLength => {
-                    record.start + template.pre + usize::from(template.width)
-                }
-            };
-            let tail_start = record.start + template.data_offset() + data_len;
-            if cover_start >= tail_start || tail_start + template.tail > sample.len() {
-                return false;
-            }
-            // The stored checksum is decoded in the byte order under test, then
-            // compared numerically against the recomputed checksum.
-            let Some(stored) = read_uint(sample, tail_start, tail, big) else {
-                return false;
-            };
-            let data = &sample[cover_start..tail_start];
-            if !checksum::verify(algorithm, data, stored, tail) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-/// Find a per-record checksum for a replayed template, if one verifies. The
-/// most specific covered range (after the length field, as PNG uses) is tried
-/// before the whole record, and a true CRC before the weaker additive and XOR
-/// checks.
+/// Find a per-record checksum in the tail, if one verifies over every record.
+/// The most specific covered range (after the length field, as PNG uses) is
+/// tried before the whole record, and a true CRC before the weaker sums.
 fn find_checksum(
     samples: &[&[u8]],
     records: &[Vec<Record>],
-    template: Template,
+    geometry: Geometry,
+    mid: usize,
+    tail: usize,
 ) -> Option<ChunkChecksum> {
-    if template.tail == 0 {
+    let algorithms = algorithms_for_tail(tail);
+    if algorithms.is_empty() {
         return None;
     }
+    // One-byte sums verify by chance too often with few records.
+    let total: usize = records.iter().map(Vec::len).sum();
+    let data_offset = geometry.pre + usize::from(geometry.width) + mid;
     for start in [
         ChunkChecksumStart::AfterLength,
         ChunkChecksumStart::RecordStart,
     ] {
-        for &algorithm in algorithms_for_tail(template.tail) {
+        for &algorithm in algorithms {
+            if tail == 1 && total < 4 {
+                continue;
+            }
             for big in [true, false] {
-                if checksum_holds(samples, records, template, algorithm, start, big) {
+                let holds = samples.iter().zip(records).all(|(sample, records)| {
+                    records.iter().all(|record| {
+                        let cover = match start {
+                            ChunkChecksumStart::RecordStart => record.start,
+                            ChunkChecksumStart::AfterLength => {
+                                record.start + geometry.pre + usize::from(geometry.width)
+                            }
+                        };
+                        let tail_start = record.start + data_offset + record.length;
+                        if cover >= tail_start {
+                            return false;
+                        }
+                        read_uint(sample, tail_start, tail as u8, big).is_some_and(|stored| {
+                            checksum::verify(
+                                algorithm,
+                                &sample[cover..tail_start],
+                                stored,
+                                tail as u8,
+                            )
+                        })
+                    })
+                });
+                if holds {
                     return Some(ChunkChecksum {
                         algorithm,
                         start,
@@ -279,100 +301,131 @@ fn find_checksum(
     None
 }
 
-/// A sort key that ranks competing layouts. Higher is better. A verifying
-/// checksum dominates (it is a hard relationship), then the layout that explains
-/// the most records, then a wider length field, then the tightest record
-/// padding, then the earliest header boundary.
-fn layout_key(layout: &ChunkLayout) -> (u8, usize, u8, i64, i64) {
-    let padding = (layout.pre + layout.mid + layout.tail) as i64;
-    (
-        u8::from(layout.checksum.is_some()),
-        layout.total_records(),
-        layout.width,
-        -padding,
-        -(layout.header_len as i64),
-    )
-}
-
-/// Detect a repeating length-prefixed record layout shared by every sample
-/// (FR-9). Returns the best-scoring layout, or `None` when no template consumes
-/// every sample exactly.
+/// Detect every repeating length-prefixed record layout shared by the samples
+/// (FR-9), best first by a cheap preference: a verified checksum, then more
+/// records, then fewer fixed bytes, then an earlier header boundary.
 ///
-/// At least two samples are required so that a coincidental alignment in a
-/// single sample cannot invent a structure. A layout is accepted only when it
-/// replays to the exact end of every sample, finds at least one record in each,
-/// and more than one record somewhere, so a single non-repeating payload is not
-/// mistaken for an array.
+/// At least two samples are required, so a coincidental alignment in one
+/// sample cannot invent a structure. A layout is accepted only when it replays
+/// to the exact end of every sample, finds a record in each, more than one
+/// record somewhere, and more than one distinct length value, and when at most
+/// half of its records are made entirely of zero bytes: zero padding read with
+/// a zero length field parses as endless empty records, which is padding, not
+/// a record stream.
 #[must_use]
-pub fn detect_chunks(samples: &[&[u8]]) -> Option<ChunkLayout> {
+pub fn detect_chunk_layouts(samples: &[&[u8]]) -> Vec<ChunkLayout> {
     if samples.len() < 2 {
-        return None;
+        return Vec::new();
     }
-    let common_len = samples.iter().map(|s| s.len()).min().unwrap_or(0);
-    let max_header = common_len.min(MAX_HEADER_LEN);
+    let total_bytes: usize = samples.iter().map(|sample| sample.len()).sum();
+    let mut budget = Budget {
+        remaining: total_bytes
+            .saturating_mul(STEPS_PER_BYTE)
+            .saturating_add(BASE_STEPS),
+    };
+    // Replay the shortest sample first: mismatches surface fastest there.
+    let mut order: Vec<usize> = (0..samples.len()).collect();
+    order.sort_by_key(|&index| samples[index].len());
+    let common_len = samples.iter().map(|sample| sample.len()).min().unwrap_or(0);
 
-    let mut best: Option<ChunkLayout> = None;
-    for header_len in 0..=max_header {
+    let mut layouts = Vec::new();
+    'search: for header_len in 0..=common_len.min(MAX_HEADER_LEN) {
         for pre in 0..=MAX_PRE {
             for &width in &WIDTHS {
                 for big in [false, true] {
                     if width == 1 && big {
                         continue;
                     }
-                    for mid in 0..=MAX_GAP {
-                        for tail in 0..=MAX_GAP {
-                            let template = Template {
-                                pre,
-                                width,
-                                big,
-                                mid,
-                                tail,
-                            };
-                            let Some(records) = replay_all(samples, header_len, template) else {
-                                continue;
-                            };
-                            let record_counts: Vec<usize> = records.iter().map(Vec::len).collect();
-                            if record_counts.iter().copied().max().unwrap_or(0) < 2 {
-                                continue;
+                    for after in 0..=MAX_AFTER {
+                        let geometry = Geometry {
+                            header_len,
+                            pre,
+                            width,
+                            big,
+                            fixed: pre + usize::from(width) + after,
+                        };
+                        let mut records = vec![Vec::new(); samples.len()];
+                        let mut consistent = true;
+                        for &index in &order {
+                            match replay(samples[index], geometry, &mut budget) {
+                                Replay::Exact(found) => records[index] = found,
+                                Replay::Mismatch => {
+                                    consistent = false;
+                                    break;
+                                }
+                                Replay::Exhausted => break 'search,
                             }
-                            let checksum = find_checksum(samples, &records, template);
-                            let layout = ChunkLayout {
+                        }
+                        if !consistent {
+                            continue;
+                        }
+                        let counts: Vec<usize> = records.iter().map(Vec::len).collect();
+                        let distinct_lengths = records
+                            .iter()
+                            .flatten()
+                            .map(|record| record.length)
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .len();
+                        if counts.iter().copied().max().unwrap_or(0) < 2 || distinct_lengths < 2 {
+                            continue;
+                        }
+                        let zero_records: usize = records
+                            .iter()
+                            .zip(samples)
+                            .map(|(found, sample)| {
+                                found
+                                    .iter()
+                                    .filter(|record| {
+                                        record.length == 0
+                                            && sample[record.start..record.start + geometry.fixed]
+                                                .iter()
+                                                .all(|&byte| byte == 0)
+                                    })
+                                    .count()
+                            })
+                            .sum();
+                        if zero_records * 2 > counts.iter().sum::<usize>() {
+                            continue;
+                        }
+                        for mid in 0..=after {
+                            let tail = after - mid;
+                            layouts.push(ChunkLayout {
                                 header_len,
                                 pre,
                                 width,
                                 big_endian: big,
                                 mid,
                                 tail,
-                                checksum,
-                                record_counts,
-                            };
-                            if best
-                                .as_ref()
-                                .is_none_or(|current| layout_key(&layout) > layout_key(current))
-                            {
-                                best = Some(layout);
-                            }
+                                checksum: find_checksum(samples, &records, geometry, mid, tail),
+                                record_counts: counts.clone(),
+                            });
+                        }
+                        if layouts.len() >= 4 * MAX_LAYOUTS {
+                            break 'search;
                         }
                     }
                 }
             }
         }
     }
-    best
+    layouts.sort_by_key(|layout| {
+        (
+            std::cmp::Reverse(layout.checksum.is_some()),
+            std::cmp::Reverse(layout.total_records()),
+            layout.fixed(),
+            layout.header_len,
+            std::cmp::Reverse(layout.width),
+        )
+    });
+    layouts.truncate(MAX_LAYOUTS);
+    layouts
 }
 
-/// Replay a template across every sample, returning the per-sample records only
-/// when all samples consume exactly.
-fn replay_all(
-    samples: &[&[u8]],
-    header_len: usize,
-    template: Template,
-) -> Option<Vec<Vec<Record>>> {
-    let mut all = Vec::with_capacity(samples.len());
-    for sample in samples {
-        all.push(replay(sample, header_len, template)?);
-    }
-    Some(all)
+/// The single most preferred layout, or `None` when no template consumes every
+/// sample exactly. See [`detect_chunk_layouts`].
+#[must_use]
+pub fn detect_chunks(samples: &[&[u8]]) -> Option<ChunkLayout> {
+    detect_chunk_layouts(samples).into_iter().next()
 }
 
 #[cfg(test)]
@@ -434,25 +487,82 @@ mod tests {
             make(&[(&7, &[9, 9, 9, 9])]),
         ];
         let slices: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
-        let layout = detect_chunks(&slices).expect("a chunk layout");
-        assert_eq!(layout.pre, 1);
-        assert_eq!(layout.width, 2);
-        assert!(!layout.big_endian);
-        assert_eq!(layout.mid, 0);
-        assert_eq!(layout.tail, 0);
-        assert_eq!(layout.record_counts, vec![2, 3, 1]);
+        let layouts = detect_chunk_layouts(&slices);
+        assert!(
+            layouts.iter().any(|layout| layout.header_len == 6
+                && layout.pre == 1
+                && layout.width == 2
+                && !layout.big_endian
+                && layout.mid == 0
+                && layout.tail == 0
+                && layout.record_counts == vec![2, 3, 1]),
+            "the TLV layout must be among {layouts:?}"
+        );
+    }
+
+    #[test]
+    fn detects_records_with_a_long_prefix_before_the_length() {
+        // Two u32 timestamps, a u32 length, a u32 copy of it, then data.
+        let make = |sizes: &[usize]| {
+            let mut data = vec![0xAB; 24];
+            for (index, &size) in sizes.iter().enumerate() {
+                data.extend_from_slice(&(1_700_000_000u32 + index as u32).to_le_bytes());
+                data.extend_from_slice(&(index as u32 * 7).to_le_bytes());
+                data.extend_from_slice(&(size as u32).to_le_bytes());
+                data.extend_from_slice(&(size as u32).to_le_bytes());
+                data.extend(std::iter::repeat_n(0x5A, size));
+            }
+            data
+        };
+        let samples = [make(&[4, 12]), make(&[1, 30, 8]), make(&[20, 2, 2, 9])];
+        let slices: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
+        let layouts = detect_chunk_layouts(&slices);
+        assert!(
+            layouts
+                .iter()
+                .any(|layout| layout.header_len == 24 && layout.pre == 8 && layout.mid == 4),
+            "{layouts:?}"
+        );
     }
 
     #[test]
     fn rejects_a_single_non_repeating_payload() {
-        // A magic and one to-end payload is not a record array.
         let samples = [b"STOT\x07hello".to_vec(), b"STOT\x09bye".to_vec()];
         let slices: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
-        // No template should produce more than one record per sample here, so
-        // detection declines (or, if it finds a degenerate one-record layout,
-        // the max-records-below-two guard rejects it).
-        let layout = detect_chunks(&slices);
-        assert!(layout.is_none() || layout.unwrap().record_counts.iter().max() == Some(&1));
+        assert!(
+            detect_chunk_layouts(&slices)
+                .iter()
+                .all(|layout| layout.record_counts.iter().max() >= Some(&2))
+        );
+    }
+
+    #[test]
+    fn zero_padding_is_not_read_as_a_stream_of_empty_records() {
+        // A few real tag and length records, then zero padding. Read as
+        // [tag u8][length u8], the padding parses as empty all-zero records.
+        let make = |payloads: &[&[u8]], padding: usize| {
+            let mut out = Vec::new();
+            for (tag, payload) in payloads.iter().enumerate() {
+                out.push(tag as u8 + 1);
+                out.push(payload.len() as u8);
+                out.extend_from_slice(payload);
+            }
+            out.extend(std::iter::repeat_n(0u8, padding));
+            out
+        };
+        let samples = [
+            make(&[b"ab", b"cde"], 40),
+            make(&[b"xyz", b"q"], 64),
+            make(&[b"hello"], 36),
+        ];
+        let slices: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
+        let found = detect_chunk_layouts(&slices);
+        assert!(
+            !found
+                .iter()
+                .any(|layout| layout.header_len == 0 && layout.width == 1 && layout.pre == 1),
+            "padding was accepted as records: {found:?}"
+        );
     }
 
     #[test]
@@ -463,14 +573,30 @@ mod tests {
     }
 
     #[test]
+    fn degenerate_low_entropy_input_is_fast_and_finds_nothing() {
+        // All-zero samples replay every template to the end in the old search.
+        let zeros = vec![0u8; 256 * 1024];
+        let samples = [zeros.as_slice(), zeros.as_slice(), zeros.as_slice()];
+        let started = std::time::Instant::now();
+        let layouts = detect_chunk_layouts(&samples);
+        assert!(layouts.is_empty(), "{layouts:?}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
     fn hostile_input_never_panics() {
         let cases: Vec<Vec<&[u8]>> = vec![
             vec![&[], &[]],
             vec![&[0xFF; 3], &[0x00; 5]],
             vec![&[0xFF, 0xFF, 0xFF, 0xFF], &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF]],
+            vec![&[0x01; 300], &[0x01; 301]],
         ];
         for case in cases {
-            let _ = detect_chunks(&case);
+            let _ = detect_chunk_layouts(&case);
         }
     }
 }

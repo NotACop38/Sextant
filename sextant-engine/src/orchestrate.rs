@@ -18,7 +18,7 @@ use crate::candidate::infer_candidates;
 use crate::ingest::{Sample, SampleSet};
 use crate::limits::Limits;
 use crate::refine::{RefineOutcome, Refinement, refine};
-use crate::report::{Report, RunMetadata};
+use crate::report::{ModelUsage, Report, RunMetadata};
 use crate::semantic::{SemanticOptions, semantic_pass};
 
 /// Options controlling an inference run.
@@ -92,15 +92,44 @@ pub fn infer_with_llm<P: LlmProvider>(
 
     // The semantic pass records the model's format-family guess directly in the
     // returned format's metadata, so the outcome's format carries it already.
-    let (format, score, semantic_history) =
+    let (format, score, semantic_history, error) =
         match semantic_pass(&baseline.format, &slices, client, &options.limits, semantic) {
             // The pass guarantees non-regression, but guard the invariant here
             // too: never accept a result below the statistics-only baseline.
             Ok(outcome) if outcome.score.preserves_verified_fit(&baseline.score) => {
-                (outcome.format, outcome.score, outcome.history)
+                (outcome.format, outcome.score, outcome.history, None)
             }
-            _ => (baseline.format.clone(), baseline.score.clone(), Vec::new()),
+            Ok(_) => (
+                baseline.format.clone(),
+                baseline.score.clone(),
+                Vec::new(),
+                Some("the model's result scored below the statistics-only baseline".to_owned()),
+            ),
+            Err(error) => (
+                baseline.format.clone(),
+                baseline.score.clone(),
+                Vec::new(),
+                Some(error.to_string()),
+            ),
         };
+    let provider = client.provider();
+    let usage = client.usage();
+    let model = ModelUsage {
+        provider: provider.kind().to_string(),
+        model: provider.model().to_owned(),
+        calls: client.calls_made(),
+        input_tokens: u64::from(usage.input_tokens),
+        output_tokens: u64::from(usage.output_tokens),
+        accepted: semantic_history
+            .iter()
+            .filter(|step| step.outcome == RefineOutcome::Accepted)
+            .count(),
+        rejected: semantic_history
+            .iter()
+            .filter(|step| step.outcome == RefineOutcome::Rejected)
+            .count(),
+        error,
+    };
 
     // The report's refinement field is the list of accepted changes (FR-28), so
     // only accepted semantic steps are appended after the statistics-only steps.
@@ -113,7 +142,8 @@ pub fn infer_with_llm<P: LlmProvider>(
             .filter(|step| step.outcome == RefineOutcome::Accepted),
     );
 
-    let metadata = run_metadata(samples, false);
+    let mut metadata = run_metadata(samples, false);
+    metadata.model = Some(model);
     Report::build(format, score, history, metadata)
 }
 
@@ -138,6 +168,7 @@ fn run_metadata(samples: &SampleSet, no_llm: bool) -> RunMetadata {
         sample_count: samples.len(),
         total_bytes: samples.total_bytes,
         no_llm,
+        model: None,
     }
 }
 

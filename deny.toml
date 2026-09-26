@@ -1,6 +1,16 @@
 # cargo-deny configuration for Sextant.
 # Docs: https://embarkstudios.github.io/cargo-deny/
 
+[graph]
+# Check the dependency graph with every feature enabled. The network providers
+# in sextant-llm (and their HTTP and TLS stack: reqwest, rustls, webpki-roots)
+# are optional features that the default build never compiles, so without this
+# a local `cargo deny check` would skip them. CI's cargo-deny-action already
+# passes `--all-features`; this makes the local gate check exactly the same
+# graph, so an advisory or license problem in an optional provider dependency
+# fails locally too.
+all-features = true
+
 [advisories]
 # The advisory database is fetched from its default source. Security
 # vulnerabilities fail the check. List specific advisory ids here to ignore one
@@ -29,7 +39,8 @@ unused-allowed-license = "allow"
 # under the Community Data License Agreement Permissive 2.0. It is a permissive,
 # non-copyleft data license. The crate is pulled in only by the optional network
 # providers in sextant-llm (the `anthropic`, `openai`, and `ollama` features) and
-# is never on the default build or the offline `--no-llm` path. The exception is
+# is never on the default build or the offline `--no-llm` path. It is still in
+# the checked graph because `[graph]` enables all features. The exception is
 # scoped to this one crate rather than allowing the license globally.
 [[licenses.exceptions]]
 name = "webpki-roots"

@@ -12,14 +12,23 @@ honest as the tool changes. Regenerate it whenever the demo flow changes:
     cargo build --release
     python3 examples/record_demo.py
 
+The commands run inside a temporary working directory, because the CLI refuses
+to write ``--out`` files outside the current working directory without
+``--force``. The demo samples are copied into it at the same relative path, so
+each recorded command is exactly the one typed in the cast and no
+machine-specific path ends up in it. If any command fails, the script exits
+non-zero and leaves ``docs/demo.cast`` unchanged, so an error message is never
+recorded as the demo.
+
 The story is the project's one-line pitch: an unknown blob goes in, a field map
-and a working parser come out, fully offline.
+and a parser spec come out, fully offline.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,8 +36,14 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SEXTANT = os.environ.get("SEXTANT", str(REPO_ROOT / "target" / "release" / "sextant"))
+# A relative SEXTANT path is resolved against the directory this script is run
+# from, before the commands move into the temporary working directory.
+SEXTANT = os.path.abspath(
+    os.environ.get("SEXTANT", str(REPO_ROOT / "target" / "release" / "sextant"))
+)
 CAST_PATH = REPO_ROOT / "docs" / "demo.cast"
+# The demo input, relative to the repository root and to the working directory.
+DEMO_SAMPLES = Path("corpus") / "tlv" / "samples"
 
 WIDTH = 100
 HEIGHT = 34
@@ -69,16 +84,30 @@ class CastWriter:
         self.wait(POST_OUTPUT_PAUSE)
 
 
-def run(args: list[str]) -> str:
-    """Run a sextant command and return its combined output."""
+class CommandFailed(Exception):
+    """A recorded command exited non-zero."""
+
+
+def run(args: list[str], cwd: Path) -> str:
+    """Run a sextant command in ``cwd`` and return its combined output.
+
+    Raises ``CommandFailed`` when the command exits non-zero, so a failure is
+    reported instead of being recorded into the cast.
+    """
     result = subprocess.run(
         [SEXTANT, *args],
-        cwd=REPO_ROOT,
+        cwd=cwd,
         capture_output=True,
         text=True,
         check=False,
     )
-    return result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    if result.returncode != 0:
+        command = " ".join(["sextant", *args])
+        raise CommandFailed(
+            f"`{command}` exited with status {result.returncode}:\n{output}"
+        )
+    return output
 
 
 def main() -> int:
@@ -89,57 +118,54 @@ def main() -> int:
         )
         return 1
 
-    samples = "corpus/tlv/samples"
-    sample_one = "corpus/tlv/samples/sample_01.tlv"
+    samples = DEMO_SAMPLES.as_posix()
+    sample_one = (DEMO_SAMPLES / "sample_01.tlv").as_posix()
+    steps = [
+        ["infer", samples, "--no-llm", "--out", "report.json"],
+        ["inspect", "report.json", "--sample", sample_one],
+        ["export", "report.json", "--format", "kaitai"],
+    ]
 
-    with tempfile.TemporaryDirectory() as work:
-        report = str(Path(work) / "report.json")
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        shutil.copytree(REPO_ROOT / DEMO_SAMPLES, work / DEMO_SAMPLES)
 
         cast = CastWriter()
         banner = (
             "# Sextant demo: an unknown binary blob in, "
-            "a field map and a working parser out.\r\n"
+            "a field map and a parser spec out.\r\n"
         )
         cast.emit(banner)
         cast.wait(1.0)
 
-        steps = [
-            (
-                f"sextant infer {samples} --no-llm --out report.json",
-                ["infer", samples, "--no-llm", "--out", report],
-            ),
-            (
-                f"sextant inspect report.json --sample {sample_one}",
-                ["inspect", report, "--sample", sample_one],
-            ),
-            (
-                "sextant export report.json --format kaitai",
-                ["export", report, "--format", "kaitai"],
-            ),
-        ]
+        try:
+            for args in steps:
+                output = run(args, work)
+                cast.prompt()
+                cast.type_command(" ".join(["sextant", *args]))
+                cast.output(output)
+        except CommandFailed as failure:
+            print(f"error: {failure}", file=sys.stderr)
+            print(f"{CAST_PATH} was not changed.", file=sys.stderr)
+            return 1
 
-        for display, args in steps:
-            cast.prompt()
-            cast.type_command(display)
-            cast.output(run(args))
+    cast.prompt()
+    cast.wait(1.0)
 
-        cast.prompt()
-        cast.wait(1.0)
+    header = {
+        "version": 2,
+        "width": WIDTH,
+        "height": HEIGHT,
+        "timestamp": int(time.time()),
+        "title": "Sextant demo",
+        "env": {"TERM": "xterm-256color", "SHELL": "/bin/bash"},
+    }
 
-        header = {
-            "version": 2,
-            "width": WIDTH,
-            "height": HEIGHT,
-            "timestamp": int(time.time()),
-            "title": "Sextant demo",
-            "env": {"TERM": "xterm-256color", "SHELL": "/bin/bash"},
-        }
-
-        CAST_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with CAST_PATH.open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps(header) + "\n")
-            for event in cast.events:
-                handle.write(json.dumps(event) + "\n")
+    CAST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CAST_PATH.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(header) + "\n")
+        for event in cast.events:
+            handle.write(json.dumps(event) + "\n")
 
     print(f"Wrote {CAST_PATH}")
     print("Play it with: asciinema play docs/demo.cast")

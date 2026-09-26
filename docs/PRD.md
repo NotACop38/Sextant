@@ -4,24 +4,33 @@
 |---|---|
 | Project | Sextant |
 | Document | Product Requirements Document |
-| Status | Draft v0.2. Open decisions resolved (see Section 20). |
-| Owner | `<you>` |
-| Last updated | 2026-06-04 |
+| Status | v0.3, the requirements baseline for the first release. Decisions are recorded in Section 20. |
+| Owner | Repository maintainers |
+| Last updated | 2026-09-26 |
 | Related documents | `README.md`, `docs/ENGINEERING_CHECKLIST.md` |
 
 > **How to read this document.** This PRD is the source of truth for *what* Sextant does and *why*. The companion `ENGINEERING_CHECKLIST.md` describes *how* and *in what order* to build it. When the two disagree, the PRD wins and the checklist should be corrected. Requirements are numbered (FR for functional, NFR for non-functional) so the checklist and code reviews can reference them directly.
 
 ---
 
-## Implementation and qualification status, 2026-09-12
+## Implementation and qualification status, 2026-09-26
 
-This PRD states the product requirements, not a declaration that every requirement is implemented. Native execution verifies fit on retained samples; it does not establish semantic truth, unseen-input correctness, or equivalent behavior in exported code. A catch-all opaque field can achieve full byte coverage without recovering structure. Refinements must preserve both aggregate score and each previously successful or fully verified sample.
+This PRD states the product requirements, not a declaration that every requirement is implemented. Native execution verifies fit on retained samples; it does not establish semantic truth, correctness on unseen inputs, or equivalent behavior in exported code. A catch-all opaque field can achieve full byte coverage without recovering structure, which is why the score also reports a structure measure. Refinements must preserve both the aggregate score and each previously successful or fully verified sample.
 
-The current CLI is statistics-only. The benchmark covers 21 development samples across four synthetic formats and PNG, not the full Section 15 corpus or a held-out evaluation. Exporters support a checked subset of the IR; Kaitai/Python and Lua runtime tests are separate from native verification, and ImHex/010 runtime qualification remains open. TCP input is segment payload analysis without stream reassembly. The current timeout is per native execution, not a deadline for an entire inference run. These limitations remain acceptance gaps until measured and implemented; see [the checklist](ENGINEERING_CHECKLIST.md) and [review record](REVIEW_2026-09-12.md).
+The current version falls short of this document in the following measured ways:
+
+- **Accuracy.** The benchmark evaluates 16 file formats in three tiers (Section 15). The statistics-only targets are met on the development tier (field-boundary F1 0.957, perfection 0.75) and missed on the validation tier (F1 0.596) and the blind held-out tier (F1 0.786, perfection 0.25). The model-pass role-accuracy target is unmeasured because the benchmark runs statistics-only, and no academic baseline has been run on the corpus, so no comparative claim is made.
+- **Command line.** The model pass is wired (`--provider`, `--model`, `--max-llm-calls`) in builds with the `llm` feature. `--budget`, `--format-hint`, and the global verbosity and logging flags (FR-41) are not.
+- **Exporters.** Each supports a checked subset of the IR and refuses the rest. Generated Kaitai (through the Python runtime) and Wireshark Lua are executed in tests and compared with the native executor; ImHex and 010 Editor output has no runtime qualification yet.
+- **Protocols.** TCP input is analyzed per segment payload, without stream reassembly.
+- **Time limits.** `--timeout` bounds each native execution, not the whole inference run.
+- **Release.** No version has been published. The release pipeline is in place (Section 18).
+
+These gaps are tracked in [the checklist](ENGINEERING_CHECKLIST.md) until they are measured and closed.
 
 ## 1. Summary
 
-Sextant is a command-line reverse-engineering tool that infers the structure of unknown binary file formats and network protocols from sample data, then generates parsers that it has verified against those samples. The output is a field map plus an editable parser (Kaitai Struct, ImHex pattern, Wireshark dissector, or 010 Editor template), each accompanied by an honest, per-field confidence report.
+Sextant is a command-line reverse-engineering tool that infers the structure of unknown binary file formats and network protocols from sample data, verifies each structural hypothesis by executing it natively against those samples, and exports the result as an editable parser specification. The output is a field map plus an editable parser (Kaitai Struct, ImHex pattern, Wireshark dissector, or 010 Editor template), each accompanied by an honest, per-field confidence report.
 
 The defining idea is verification. Every structural hypothesis is compiled to an internal representation, the Format Hypothesis IR, then executed natively against the raw bytes and scored on how well it fits every sample. A language model proposes field semantics and refinements, but its proposals are accepted only when the native executor confirms they improve the fit. The result is a tested artifact, not an unverified guess. This is also the property that differentiates Sextant from existing tools and the property that must never be compromised during development.
 
@@ -249,10 +258,10 @@ The score is a value in 0 to 1 with a structured breakdown so that the report an
 
 ## 12. LLM integration
 
-- **Provider abstraction.** A single trait (for example `LlmProvider`) exposes a completion call and a structured or JSON-returning call. Decision: Anthropic and OpenAI are both first-class, feature-gated reference implementations; a local option via Ollama is optional. The active provider is auto-detected from whichever API credentials are present in the environment, and if more than one is available the user selects one with `--provider`. This keeps the runtime model layer aligned with a build executed by multiple coding agents.
+- **Provider abstraction.** A single trait (for example `LlmProvider`) exposes a completion call and a structured or JSON-returning call. Decision: Anthropic and OpenAI are both first-class, feature-gated reference implementations; a local option via Ollama is optional. The model pass runs only when the user names a provider with `--provider`; a credential present in the environment never enables it on its own, so a key exported for another tool cannot cause egress. The CLI's providers are behind a build feature (`llm`) that is off by default, and a build without it contains no network code.
 - **Structured proposals.** The model is prompted to return JSON conforming to a schema: field annotations and refinement operations expressed against the IR. Free-form text is not accepted as output.
 - **Grounding.** Proposals are applied only through the executor and scorer (FR-31, FR-26). The model accelerates search; it does not decide the result. This is the anti-hallucination guarantee and a hard requirement.
-- **Determinism and caching.** Low temperature; responses cached on disk keyed by a hash of the exact request, for reproducibility and cost control (NFR-6, NFR-9).
+- **Determinism and caching.** Proposals are requested as structured output against a JSON Schema. Sampling parameters are left at the provider default unless configured, because current models reject explicit values. When the user configures a cache directory, responses are cached on disk keyed by a hash of the exact request, for reproducibility and cost control (NFR-6, NFR-9); the cache is off by default because cached requests can echo sample bytes.
 - **Cost guardrails.** Maximum calls per run and an optional budget; the run degrades gracefully to the best verified statistics-only result if limits are hit.
 - **Privacy.** `--no-llm` transmits nothing. When enabled, the tool documents what is sent and supports a cap on how many bytes per sample are included in prompts (NFR-4).
 
@@ -264,15 +273,19 @@ The score is a value in 0 to 1 with a structured breakdown so that the report an
 
 ## 14. CLI specification
 
-This section specifies the v1 command surface. v0.1.0 implements a subset: the
-provider flags (`--provider`, `--model`, `--max-llm-calls`, `--budget`),
-`--format-hint`, and the global verbosity and logging flags are not wired into
-the CLI yet, and every release so far runs statistics-only.
+This section specifies the v1 command surface. The current CLI implements a
+subset: `--budget`, `--format-hint`, and the global `-v`, `-q`, and
+`--json-logs` flags are not wired yet, and `--provider` works only in builds
+with the `llm` feature (other builds refuse it with an explanation). Beyond
+this specification, `infer` takes `--max-messages` (a cap on extracted
+protocol messages), `export` takes `--cross-validate <dir>` (FR-38), and every
+command that writes a file takes `--force`, which lets `--out` overwrite a file
+or write outside the working directory.
 
 ```
 sextant infer <inputs...> [options]
   --no-llm                      Statistics-only; no network egress.
-  --provider <name>             LLM provider (default from config).
+  --provider <name>             Opt in to the model pass with this provider.
   --model <id>                  Model identifier.
   --max-llm-calls <N>           Cap model calls for this run.
   --budget <amount>             Optional spend cap.
@@ -310,6 +323,9 @@ File formats (v1):
 | TAR (ustar) header (subset) | Fixed-width ASCII octal numeric fields. |
 | pcap file and record header | A self-referential meta test. |
 | Custom TLV | Controlled difficulty for length and type fields. |
+| gzip, MIDI, QOI, ICO | Added as the blind held-out tier: opaque bodies with fixed trailers, counted chunk arrays, and mixed byte orders. |
+
+**Benchmark tiers (adopted).** Accuracy is reported per tier so that no number is quoted from data the heuristics were tuned against without saying so. The *development* tier (the custom TLV, three further controlled formats, PNG, BMP, WAV, and ZIP) is tuned against and measures fit to known data. The *validation* tier (GIF, ELF64, TAR, pcap) was held out, evaluated once, and then allowed to inform a generic fix, so its numbers are no longer blind; the first-run result is published beside the current one. The *held-out* tier (gzip, MIDI, QOI, ICO) was never examined before its published run. A held-out format consulted while developing a change moves to the validation tier. The tier membership is fixed in the benchmark harness, and `corpus/README.md` describes every entry.
 
 Protocols (v1.x):
 
@@ -328,11 +344,11 @@ Protocols (v1.x):
 
 **Targets (adopted; starting bars, tracked by `sextant bench` and tuned upward over time).**
 
-- Statistics-only MVP: field-boundary F1 at least 0.85 and perfection at least 0.5 on the file-format corpus.
+- Statistics-only MVP: field-boundary F1 at least 0.85 and perfection at least 0.5 on the file-format corpus, reported per tier.
 - Parser validity: 100% on the corpus. Acceptance requires the chosen IR to fully parse every sample and the exported Kaitai to parse every sample in the optional cross-check.
 - With the model pass: field role accuracy at least 0.8 on a held-out subset and a measurable improvement over statistics-only, with no regression in the verified parse score.
 
-The benchmark is run by `sextant bench` and its numbers are published in the README. The framing positions Sextant against the academic baselines (Netzob, BinaryInferno, and similar) on comparable metrics.
+The benchmark is run by `sextant bench` and its numbers are published in the README, generated by the harness. CI enforces regression floors below the current results; the targets above are reported whether met or not. The metrics are chosen to be comparable with the academic baselines (Netzob, BinaryInferno, and similar), but no comparison is claimed until those baselines are run on the same corpus.
 
 ## 16. Security, safety, and privacy
 
@@ -380,13 +396,17 @@ Aligned with the README roadmap and expanded in the checklist.
 ## 20. Decisions (resolved)
 
 1. **Crate split:** adopt the multi-crate workspace (`sextant-ir`, `sextant-engine`, `sextant-llm`, `sextant-export`, `sextant-cli`, plus a `bench` or `xtask` harness).
-2. **LLM providers:** Anthropic and OpenAI are both first-class, feature-gated reference providers; Ollama is optional for local use. The active provider is auto-detected from available credentials, and `--provider` disambiguates when more than one is present.
+2. **LLM providers:** Anthropic and OpenAI are both first-class, feature-gated reference providers; Ollama is optional for local use. The model pass is opt-in: it runs only when `--provider` names a provider, never because a credential happens to be present (revised 2026-09-26).
 3. **Ground-truth corpus:** finalized in Section 15. PNG is the file-format showcase, Modbus/TCP is the protocol showcase, and DNS is a stretch probe.
 4. **Accuracy targets:** finalized in Section 15 (field-boundary F1 at least 0.85 and perfection at least 0.5 for the statistics-only MVP; parser validity 100%; field role accuracy at least 0.8 with the model pass).
 5. **Exit codes:** adopted in Section 14.
 6. **Toolchain:** Rust 2024 edition, MSRV 1.85.0, pinned in `rust-toolchain.toml` and raisable as needed.
 7. **License:** dual MIT or Apache-2.0.
 8. **Build agents:** the project is built by interchangeable AI coding agents (Claude Code and Codex). Every checklist step is self-contained and provider-agnostic so either agent can execute any step. Steps remain order-dependent.
+9. **Network code is a build feature:** the CLI's model providers are behind the `llm` Cargo feature, off by default. Release binaries enable it; a default source build links no network crate at all (decided 2026-09-26).
+10. **Sized structs:** a struct may carry a size rule, which makes it a bounded region: its fields are read inside the region and any unread tail is skipped. This expresses chunk bodies such as RIFF and PNG chunks whose layout is only partly known (decided 2026-09-26).
+11. **Benchmark tiers:** accuracy is reported in development, validation, and held-out tiers, as described in Section 15 (decided 2026-09-26).
+12. **Contribution channels:** issues are the single public channel; GitHub Discussions stays disabled. Vulnerabilities are reported privately as described in `SECURITY.md` (decided 2026-09-26).
 
 ## 21. Glossary
 

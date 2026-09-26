@@ -8,9 +8,9 @@ Security is a first-class concern for the project itself and for how it is used.
 Please report security vulnerabilities privately. Do not open a public issue for
 a security problem.
 
-- Preferred: use GitHub's private vulnerability reporting for this repository
-  (the "Report a vulnerability" button under the Security tab).
-- Alternative: email the maintainer at tgraves38@protonmail.com.
+- Use GitHub's private vulnerability reporting for this repository (the
+  "Report a vulnerability" button under the Security tab), or
+- email the maintainer at tgraves38@protonmail.com.
 
 Please include enough detail to reproduce the issue: the affected version or
 commit, the input or command that triggers it, and the observed behavior. We
@@ -32,9 +32,11 @@ such as malware configuration blobs and command-and-control captures.
   network access.
 - Sextant never executes input; it only parses it. The parsing core is written
   in safe Rust with enforced resource limits to bound memory and time.
-- Run with `--no-llm` for fully offline analysis with zero network egress. When
-  the language-model pass is enabled, review what is transmitted and use the
-  per-sample byte caps to limit it.
+- Sextant sends nothing off the machine unless you pass `--provider` to
+  `infer`; `--no-llm` states that explicitly, and a CLI built without the `llm`
+  feature contains no network code at all. When you do enable the model pass,
+  review what is transmitted (the candidate field layout and at most 256 bytes
+  from each of the first four samples).
 - Treat generated parsers as you would any generated code: read them before
   running them against data you care about. Sextant sanitizes identifiers and
   escapes string literals derived from samples and from model output so a
@@ -50,12 +52,13 @@ is in [docs/threat-model.md](docs/threat-model.md).
 Sextant runs fully offline by default. The native statistical engine, executor,
 and scorer never touch the network, and `inspect`, `export`, and `bench` never
 do either. The only component that can transmit data is the optional
-language-model pass, and only when you opt into it.
+language-model pass, and only when you opt into it with `--provider`.
 
 - [Privacy and the `--no-llm` story](docs/privacy.md) explains what is and is
   not transmitted, and how to guarantee a fully offline run.
 - [Model data handling](docs/model-data-handling.md) is the detailed note on
-  exactly what the model pass sends, the byte-preview and call limits and the limitations of spend accounting, and how to turn it off. API keys are read
+  exactly what the model pass sends, the byte-preview and call limits, the
+  limitations of spend accounting, and how to turn it off. API keys are read
   only from the environment or a config file, never from a command-line flag.
 
 The verification property is independent of mode: a hypothesis is accepted only
