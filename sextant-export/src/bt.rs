@@ -14,7 +14,8 @@
 //! and a typedef, enum, or enum constant that would spell a global 010 name
 //! (such as `DWORD` or the `FileSize` function the template calls), gets a
 //! trailing underscore, and every reference uses the same spelling (see
-//! [`crate::reserved`]). IR text in comments passes through [`comment_text`].
+//! [`crate::reserved`]). IR text in comments passes through
+//! [`comment_text`](crate::naming::comment_text).
 
 use std::fmt::Write as _;
 
@@ -24,7 +25,7 @@ use sextant_ir::{
 };
 
 use crate::ExportFormat;
-use crate::naming::{Allocator, comment_text, member_id, type_id};
+use crate::naming::{Allocator, covered_range_text, member_id, type_id};
 
 /// The target whose reserved words these identifiers avoid.
 const TARGET: ExportFormat = ExportFormat::Bt;
@@ -317,10 +318,9 @@ fn checksum_comment(field: &Field) -> Option<String> {
         .iter()
         .find_map(|constraint| match constraint {
             Constraint::Checksum { spec } => Some(format!(
-                "// checksum: {} over [{}, {})",
+                "// checksum: {} {}",
                 spec.algorithm,
-                comment_text(spec.covered.from.field().as_str()),
-                comment_text(spec.covered.to.field().as_str())
+                covered_range_text(&spec.covered)
             )),
             _ => None,
         })

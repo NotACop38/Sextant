@@ -35,7 +35,9 @@ use sextant_ir::{
     SizeRule, StringEncoding, Structure,
 };
 
-use crate::naming::{Allocator, comment_text, kaitai_field_id, kaitai_type_id, kaitai_variant_id};
+use crate::naming::{
+    Allocator, comment_text, covered_range_text, kaitai_field_id, kaitai_type_id, kaitai_variant_id,
+};
 use crate::{const_as_u64, sign_letter};
 
 /// The top-level `doc` emitted when the spec decodes text that the native
@@ -471,10 +473,9 @@ impl Ctx {
         for constraint in &field.constraints {
             if let Constraint::Checksum { spec } = constraint {
                 notes.push(format!(
-                    "checksum: {} over [{}, {})",
+                    "checksum: {} {}",
                     spec.algorithm,
-                    comment_text(spec.covered.from.field().as_str()),
-                    comment_text(spec.covered.to.field().as_str())
+                    covered_range_text(&spec.covered)
                 ));
             }
         }

@@ -10,6 +10,8 @@
 
 use std::collections::BTreeSet;
 
+use sextant_ir::{CoveredRange, RangeAnchor};
+
 use crate::ExportFormat;
 use crate::reserved::{self, KaitaiRole};
 
@@ -191,9 +193,52 @@ impl Allocator {
     }
 }
 
+/// Describe a checksum's covered range for a generated comment, saying whether
+/// each bound is the start or the end of its anchor field, for example `from
+/// the end of length to the end of data`. The anchor names are IR text, so they
+/// pass through [`comment_text`].
+#[must_use]
+pub(crate) fn covered_range_text(covered: &CoveredRange) -> String {
+    let bound = |anchor: &RangeAnchor| match anchor {
+        RangeAnchor::FieldStart { field } => format!("start of {}", comment_text(field.as_str())),
+        RangeAnchor::FieldEnd { field } => format!("end of {}", comment_text(field.as_str())),
+    };
+    format!(
+        "from the {} to the {}",
+        bound(&covered.from),
+        bound(&covered.to)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn covered_ranges_name_the_side_of_each_anchor() {
+        let png = CoveredRange {
+            from: RangeAnchor::FieldEnd {
+                field: "length".into(),
+            },
+            to: RangeAnchor::FieldEnd {
+                field: "data".into(),
+            },
+        };
+        assert_eq!(
+            covered_range_text(&png),
+            "from the end of length to the end of data"
+        );
+        let hostile = CoveredRange {
+            from: RangeAnchor::FieldStart {
+                field: "a*/b".into(),
+            },
+            to: RangeAnchor::FieldStart { field: "c".into() },
+        };
+        assert_eq!(
+            covered_range_text(&hostile),
+            "from the start of a__b to the start of c"
+        );
+    }
 
     #[test]
     fn snake_sanitizes_and_falls_back() {

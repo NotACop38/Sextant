@@ -408,7 +408,7 @@ fn hostile_names_cannot_escape_comments_or_docs_in_any_exporter() {
             match target {
                 // The compiler copies these notes into doc comments.
                 ExportFormat::Kaitai => assert!(
-                    line.starts_with("doc: 'checksum: additive byte sum over [")
+                    line.starts_with("doc: 'checksum: additive byte sum from the ")
                         || line.starts_with("title: '"),
                     "{target}: active source: {line}"
                 ),
