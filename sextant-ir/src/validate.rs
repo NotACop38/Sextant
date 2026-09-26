@@ -30,10 +30,15 @@ pub const MAX_FIXED_FIELD_BYTES: u64 = 1 << 24;
 /// `max_array_elements` default (FR-24).
 pub const MAX_ARRAY_COUNT: u64 = 1 << 24;
 
-/// The deepest nesting of structures and arrays a format may declare. Matches
-/// the executor's default depth cap so validation rejects IR the executor would
-/// stop on for depth alone (FR-24).
-pub const MAX_NESTING_DEPTH: usize = 64;
+/// The deepest nesting of structures and arrays a format may declare (FR-24).
+///
+/// Every format that validates can also be saved and read back: JSON parsing
+/// is recursion-limited (128 levels, which bounds the stack on hostile input),
+/// each nested struct costs four JSON levels, and a report embeds the format two
+/// levels deep, so 24 leaves room for the deepest field's own constraints. The
+/// executor's default depth cap is looser, so validated IR never stops on depth
+/// alone.
+pub const MAX_NESTING_DEPTH: usize = 24;
 
 /// The most field nodes a format may contain (counting every nested field and
 /// array element descriptor). Bounds IR size independently of sample bytes.

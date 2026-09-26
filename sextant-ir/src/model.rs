@@ -59,7 +59,11 @@ impl Format {
     /// Deserialize a format from JSON (FR-19).
     ///
     /// This is structural only and does not check semantic validity; call
-    /// [`Format::validate`](crate::Format::validate) afterward.
+    /// [`Format::validate`](crate::Format::validate) afterward. Parsing is
+    /// recursion-limited, so hostile nesting fails cleanly instead of
+    /// exhausting the stack, and every format that validates parses. Memory use
+    /// grows with the input, so a caller reading untrusted files should cap how
+    /// many bytes it reads first, as the CLI does for reports.
     ///
     /// # Errors
     ///

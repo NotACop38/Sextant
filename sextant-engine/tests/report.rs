@@ -335,3 +335,73 @@ fn type_name(instance: &Value) -> &'static str {
         Value::Object(_) => "object",
     }
 }
+
+#[test]
+fn the_deepest_valid_format_round_trips_through_a_report() {
+    use sextant_ir::{
+        ChecksumAlgorithm, ChecksumSpec, Confidence, Constraint, CoveredRange, Field, FieldRef,
+        Kind, MAX_NESTING_DEPTH, RangeAnchor, Signedness, SizeRule, Structure,
+    };
+    // The innermost structure carries the most deeply nested JSON an IR field
+    // can hold: a derived size and a checksum over a covered range.
+    let byte = |name: &str| {
+        Field::new(
+            Kind::Integer {
+                width: 1,
+                signed: Signedness::Unsigned,
+                endianness: None,
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name(name)
+    };
+    let mut sum = byte("sum");
+    sum.constraints.push(Constraint::Checksum {
+        spec: ChecksumSpec {
+            algorithm: ChecksumAlgorithm::Additive,
+            covered: CoveredRange {
+                from: RangeAnchor::FieldStart {
+                    field: FieldRef::new("body"),
+                },
+                to: RangeAnchor::FieldEnd {
+                    field: FieldRef::new("body"),
+                },
+            },
+        },
+    });
+    let mut structure = Structure::new(vec![
+        byte("len"),
+        Field::new(Kind::Bytes, Confidence::CERTAIN)
+            .with_name("body")
+            .with_size(SizeRule::Derived {
+                length_field: FieldRef::new("len"),
+            }),
+        sum,
+    ]);
+    for level in 0..MAX_NESTING_DEPTH {
+        structure = Structure::new(vec![
+            Field::new(Kind::Struct { structure }, Confidence::CERTAIN)
+                .with_name(format!("level_{level}"))
+                .with_size(SizeRule::ToEnd),
+        ]);
+    }
+    let mut format = sextant_ir::fixtures::tlv_ground_truth();
+    format.root = structure;
+    format
+        .validate()
+        .expect("the deepest format the validator accepts");
+
+    let sample = [2u8, 1, 2, 3];
+    let score = score(&format, &[&sample[..]]);
+    assert!(score.fully_verified(), "{:?}", score.samples[0]);
+    let metadata = RunMetadata {
+        tool_version: "0.0.0".to_owned(),
+        sample_count: 1,
+        total_bytes: sample.len(),
+        no_llm: true,
+    };
+    let report = Report::build(format, score, Vec::new(), metadata);
+    let json = serde_json::to_string_pretty(&report).expect("serialize the report");
+    let read_back = Report::from_json(&json).expect("a saved report can be read back");
+    assert_eq!(read_back.format, report.format);
+}

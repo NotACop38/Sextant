@@ -120,6 +120,11 @@ impl Report {
 
     /// Deserialize a report from JSON (FR-19, FR-34).
     ///
+    /// Parsing is recursion-limited and reads any report whose format
+    /// validates. Memory use grows with the input, so a caller reading an
+    /// untrusted file should cap the bytes it reads first (the CLI reads at
+    /// most [`DEFAULT_MAX_REPORT_BYTES`]).
+    ///
     /// # Errors
     ///
     /// Returns the underlying [`serde_json::Error`] if the text is not a valid
