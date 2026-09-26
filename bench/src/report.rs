@@ -55,27 +55,64 @@ pub struct Floor {
     pub floor: f64,
 }
 
-/// The configured regression floors.
+/// The configured regression floors: the values measured when each tier was
+/// last published, less a margin of about 0.02, so a real regression trips the
+/// guard while floating-point noise does not.
 pub const FLOORS: &[Floor] = &[
     Floor {
         tier: Tier::Development,
         metric: "field-boundary F1",
-        floor: 0.0,
+        floor: 0.93,
     },
     Floor {
         tier: Tier::Development,
         metric: "role accuracy",
-        floor: 0.0,
+        floor: 0.69,
     },
     Floor {
         tier: Tier::Development,
         metric: "type accuracy",
-        floor: 0.0,
+        floor: 0.86,
     },
     Floor {
         tier: Tier::Development,
         metric: "native validity",
         floor: 1.0,
+    },
+    Floor {
+        tier: Tier::Validation,
+        metric: "field-boundary F1",
+        floor: 0.57,
+    },
+    Floor {
+        tier: Tier::Validation,
+        metric: "role accuracy",
+        floor: 0.14,
+    },
+    Floor {
+        tier: Tier::Validation,
+        metric: "type accuracy",
+        floor: 0.31,
+    },
+    Floor {
+        tier: Tier::Validation,
+        metric: "native validity",
+        floor: 1.0,
+    },
+    Floor {
+        tier: Tier::HeldOut,
+        metric: "field-boundary F1",
+        floor: 0.76,
+    },
+    Floor {
+        tier: Tier::HeldOut,
+        metric: "role accuracy",
+        floor: 0.45,
+    },
+    Floor {
+        tier: Tier::HeldOut,
+        metric: "type accuracy",
+        floor: 0.56,
     },
     Floor {
         tier: Tier::HeldOut,

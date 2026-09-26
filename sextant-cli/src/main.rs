@@ -17,7 +17,7 @@
 //! (FR-36, FR-37), with an optional Kaitai cross-check (FR-38). The `bench`
 //! subcommand runs the accuracy benchmark over the ground-truth corpus and
 //! prints the PRD Section 15 metrics table (Step 12), exiting non-zero if any
-//! configured target is missed so it doubles as the CI regression guard.
+//! metric falls below its regression floor so it doubles as a regression guard.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -306,9 +306,10 @@ fn escape_untrusted(text: &str) -> Cow<'_, str> {
 /// table (PRD Section 15). With `--out` it also writes the machine-readable JSON
 /// results. The benchmark is statistics-only and fully offline: it runs the
 /// verified core over the corpus and reports field-boundary precision, recall,
-/// and F1, the perfection rate, role and type accuracy, and parser validity.
-/// It exits non-zero if any configured target is missed, so the same command CI
-/// runs as a regression guard fails the build on an accuracy drop.
+/// and F1, the perfection rate, role and type accuracy, and native validity.
+/// It exits non-zero when any metric falls below its regression floor, so the
+/// same command doubles as a regression guard. The PRD Section 15 targets are
+/// reported, met or not, but do not decide the exit status.
 fn run_bench(corpus: Option<&str>, out: Option<&str>, force: bool) -> ExitCode {
     let mut options = bench::BenchOptions::default();
     if let Some(dir) = corpus {
@@ -357,7 +358,7 @@ fn run_bench(corpus: Option<&str>, out: Option<&str>, force: bool) -> ExitCode {
     if failures.is_empty() {
         ExitCode::SUCCESS
     } else {
-        eprintln!("\nsextant bench: metrics below configured thresholds:");
+        eprintln!("\nsextant bench: metrics below their regression floors:");
         for failure in &failures {
             eprintln!("  {failure}");
         }
@@ -365,11 +366,12 @@ fn run_bench(corpus: Option<&str>, out: Option<&str>, force: bool) -> ExitCode {
     }
 }
 
-/// Ingest the inputs, run statistics-only inference, and print a scored field
-/// map (Step 6). Every run is fully offline today, with or without `--no-llm`
-/// (NFR-4); the flag is accepted so scripts can pin the guarantee. When a
-/// transport and port are given, the inputs are read as packet captures and
-/// protocol inference runs instead (Step 11, FR-2).
+/// Ingest the inputs, run inference, and print a scored field map (Step 6).
+/// Without `--provider` the run is statistics-only and fully offline (NFR-4);
+/// with it, the model pass runs after statistical inference and every
+/// proposal it keeps was verified by the executor (FR-26). When a transport
+/// and port are given, the inputs are read as packet captures and protocol
+/// inference runs instead (Step 11, FR-2).
 #[allow(clippy::too_many_arguments)]
 fn run_infer(
     inputs: &[String],
