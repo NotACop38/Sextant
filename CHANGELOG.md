@@ -96,8 +96,10 @@ No version has been tagged or published yet. The first release is planned as
 ### Distribution
 
 - CI on Linux, macOS, and Windows, with pinned action versions, supply-chain
-  checks (`cargo deny`, `cargo audit` for both lockfiles), fuzz smoke runs,
-  and external runtime tests for the Kaitai and Lua exporters.
+  checks (`cargo deny`, `cargo audit` for both lockfiles), an API
+  documentation build with warnings as errors, fuzz smoke runs, runs of the
+  documented examples, and external runtime tests for the Kaitai and Lua
+  exporters.
 - A tag-driven release workflow that builds the CLI with the model providers
   for x86_64 Linux (glibc 2.34 or newer, and a static musl build), macOS on
   Intel and Apple silicon, and Windows, publishes SHA-256 checksums, and marks
