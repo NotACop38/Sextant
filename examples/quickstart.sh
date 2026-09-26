@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Quick start example: infer, inspect, and export a verified parser end to end,
+# Quick start example: infer, inspect, and export a parser spec end to end,
 # fully offline, against the bundled TLV corpus.
 #
 # Run it from the repository root:
@@ -57,7 +57,7 @@ echo "== 2. inspect ${FIRST_SAMPLE#"${REPO_ROOT}/"} =="
 "${SEXTANT}" inspect "${REPORT}" --sample "${FIRST_SAMPLE}"
 
 echo
-echo "== 3. export a Kaitai Struct parser =="
+echo "== 3. export a Kaitai Struct spec =="
 "${SEXTANT}" export "${REPORT}" --format kaitai --out "${FORMAT}.ksy"
 echo "Wrote ${WORK_DIR}/${FORMAT}.ksy:"
 echo "---"
@@ -65,4 +65,4 @@ head -n 20 "${FORMAT}.ksy"
 echo "---"
 
 echo
-echo "Done. The exported parser was generated from a structure verified against every sample."
+echo "Done. The spec was translated from a hypothesis that fully verified against every sample."

@@ -21,7 +21,7 @@ non-zero and leaves ``docs/demo.cast`` unchanged, so an error message is never
 recorded as the demo.
 
 The story is the project's one-line pitch: an unknown blob goes in, a field map
-and a working parser come out, fully offline.
+and a parser spec come out, fully offline.
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ def main() -> int:
         cast = CastWriter()
         banner = (
             "# Sextant demo: an unknown binary blob in, "
-            "a field map and a working parser out.\r\n"
+            "a field map and a parser spec out.\r\n"
         )
         cast.emit(banner)
         cast.wait(1.0)

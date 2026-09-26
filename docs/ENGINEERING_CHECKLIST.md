@@ -4,14 +4,16 @@
 |---|---|
 | Project | Sextant |
 | Document | Engineering Checklist (build plan) |
-| Status | Implementation and qualification checklist |
+| Status | Build plan complete; open boxes are qualification gaps |
 | Owner | Repository maintainers |
-| Last updated | 2026-09-12 |
+| Last updated | 2026-09-26 |
 | Related documents | `docs/PRD.md`, `README.md` |
 
 ## How to use this checklist with a coding agent
 
-This checklist is written to be executed by interchangeable AI coding agents (for example Claude Code or Codex), one step at a time. Every step is self-contained and provider-agnostic, so either agent can pick up any step given the repository and these documents. Steps are order-dependent, so run them in sequence.
+Steps 1 to 16 below produced the current version and are implemented. The boxes left open are qualification gaps (a published release, runtime evidence for two export targets, and PRD accuracy targets outside the development tier); they are closed here when met. New work is tracked as issues and follows the Global Definition of Done in `AGENTS.md`.
+
+The plan was written to be executed by interchangeable AI coding agents (for example Claude Code or Codex), one step at a time. Every step is self-contained and provider-agnostic, so either agent can pick up any step given the repository and these documents. Steps are order-dependent, so run them in sequence.
 
 1. **Work step by step.** Do not start a step until the previous step's acceptance criteria all pass. Each step is sized to be a coherent unit of work with a clear definition of done.
 2. **Treat acceptance criteria as the definition of done.** A step is complete only when every box under "Acceptance criteria" is checked and verifiable, not when the code merely compiles.
@@ -22,10 +24,7 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ## Global Definition of Done (applies to every step)
 
-- [ ] `cargo build` and `cargo build --release` succeed.
-- [ ] `cargo test` passes.
-- [ ] `cargo clippy --all-targets --all-features` is clean (warnings treated as errors in CI).
-- [ ] `cargo fmt --all --check` passes.
+- [ ] The full local gate in `AGENTS.md` passes: formatting, debug and release builds, all-feature tests, Clippy with warnings as errors, supply-chain checks, and the benchmark regression guard.
 - [ ] No new `unsafe` without a written justification comment and a covering test (NFR-1).
 - [ ] Public items have doc comments; user-facing behavior changes update the relevant docs.
 - [ ] CI is green on the change.
@@ -164,7 +163,7 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 - [x] `sextant infer <dir> --no-llm` produces a scored field map for the corpus formats.
 - [x] No network egress occurs in `--no-llm` mode (assert in a test or document the verification method) (NFR-4).
-- [ ] The statistics-only pipeline meets the accuracy targets in PRD Section 15 on the full file-format corpus. The five-format development subset passes its regression thresholds; the remaining PRD formats are not evaluated.
+- [ ] The statistics-only pipeline meets the accuracy targets in PRD Section 15 on the full file-format corpus. The benchmark covers 16 formats in three tiers: the development tier meets every target (field-boundary F1 0.957, perfection 0.75, native validity 100 percent), while the validation tier (F1 0.596) and the blind held-out tier (F1 0.786, perfection 0.25) fall short of the F1 and perfection targets.
 
 ---
 
@@ -239,7 +238,7 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 - [x] Implement the Kaitai `.ksy` exporter (primary).
 - [x] Implement the ImHex `.hexpat`, Wireshark `.lua`, and 010 `.bt` exporters.
 - [x] Implement optional Kaitai cross-validation: compile the generated spec with the Kaitai compiler and parse all samples, reported separately and never required by the core (FR-38, NFR-5).
-- [ ] Add runtime round-trip tests for every target and corpus format. Source-generation assertions alone do not qualify parser behavior.
+- [ ] Add runtime round-trip tests for every target and corpus format. Kaitai (compiler 0.11 and the Python runtime) and Lua runtime tests run in CI; ImHex and 010 Editor have no runtime tests.
 
 ### Acceptance criteria
 
@@ -283,7 +282,7 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 ### Acceptance criteria
 
 - [x] `sextant bench` runs over the corpus and prints a metrics table.
-- [ ] Metrics meet the targets in PRD Section 15 on the full required corpus, including held-out semantic evaluation. Current results cover only the development subset.
+- [ ] Metrics meet the targets in PRD Section 15 on the full required corpus, including held-out semantic evaluation. A blind held-out tier is now evaluated (field-boundary F1 0.786, role accuracy 0.472); it does not yet meet the F1 and perfection targets.
 - [x] A metrics regression below threshold fails CI.
 - [x] README benchmark numbers are generated from this harness, not hand-written.
 
@@ -344,7 +343,7 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 
 ### Acceptance criteria
 
-- [ ] A tagged release produces working binaries for Linux, macOS, and Windows. The workflow and local dry run are preparatory evidence; no release was published as of 2026-09-12.
+- [ ] A tagged release produces working binaries for Linux, macOS, and Windows. The workflow and local dry run are preparatory evidence; no release has been published.
 - [ ] A clean registry installation of `sextant-re` installs a working `sextant` binary after publication. Packaging dry runs do not establish this acceptance criterion.
 - [x] The changelog is updated for the release and the version is consistent across crates.
 
@@ -359,14 +358,14 @@ This checklist is written to be executed by interchangeable AI coding agents (fo
 - [x] Final review of README, docs, license headers, and the security and responsible-use notes. (README status note, roadmap, contributing, and license sections updated for v0.1.0; SECURITY.md, the responsible-use disclaimer, and the data-handling notes confirmed current. License is declared in `Cargo.toml` plus both LICENSE files; the codebase uses no per-file SPDX headers, uniformly.)
 - [x] Configure badges for CI and licensing. Registry badges remain omitted until publication is verified.
 - [x] The repository is public. Confirmed with the GitHub API on 2026-09-12.
-- [ ] Enable Discussions. GitHub reports it disabled as of 2026-09-12. Label definitions, issue templates, and the triage process are implemented separately.
-- [ ] Cut and publish the first tagged release. (Pipeline, version, and dated changelog section are ready; the tag push and crates.io publish are maintainer actions with exact commands in `docs/LAUNCH.md` Steps 4 and 5 and `docs/RELEASING.md`.)
-- [x] Optional: prepare a short write-up of the IR and the verification loop for sharing. (`docs/ANNOUNCEMENT.md`.)
+- [x] Choose the public contribution channels. Issues are the single channel and Discussions stays disabled (decided 2026-09-26); label definitions, issue templates, and the triage process are in place.
+- [ ] Cut and publish the first tagged release. (The pipeline and version are ready; the repository settings, tag push, and crates.io publish are maintainer actions described in `docs/RELEASING.md`.)
+- [x] Optional: prepare a short write-up of the IR and the verification loop for sharing. (`docs/how-it-works.md`.)
 
 ### Acceptance criteria
 
 - [x] The repository is public with badges for CI and licensing. Merge remains conditional on successful CI for the reviewed revision.
-- [ ] A versioned release is published with downloadable binaries. Release automation is implemented, but no versioned release is published as of 2026-09-12.
+- [ ] A versioned release is published with downloadable binaries. Release automation is implemented, but no versioned release has been published.
 - [x] Issue labels and a contribution and triage flow are in place. (`.github/labels.yml`, `scripts/setup-labels.sh`, `docs/TRIAGE.md`, `CONTRIBUTING.md`, and the issue templates.)
 
 ---

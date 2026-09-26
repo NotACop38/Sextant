@@ -8,12 +8,10 @@ are defined in [`.github/labels.yml`](../.github/labels.yml) and applied with
 
 ## Where things go
 
-- **Questions, format ideas, and open-ended discussion** belong in
-  [GitHub Discussions](https://github.com/NotACop38/Sextant/discussions). If a
-  question turns out to be a concrete defect or a scoped piece of work, it is
-  promoted to an issue.
-- **Defects and scoped work** belong in [issues](https://github.com/NotACop38/Sextant/issues),
-  opened from the bug-report or feature-request template.
+- **Defects, scoped work, questions, and format ideas** belong in
+  [issues](https://github.com/NotACop38/Sextant/issues), opened from the
+  bug-report or feature-request template, or as a blank issue for a question.
+  GitHub Discussions is not enabled for this repository.
 - **Security vulnerabilities** are reported privately, never as a public issue.
   See [`SECURITY.md`](../SECURITY.md).
 
@@ -48,12 +46,11 @@ but waiting on something else; note what it is blocked on.
 
 ## Pull requests
 
-A pull request is ready to review when its checklist step's acceptance criteria
-and the Global Definition of Done in [`AGENTS.md`](../AGENTS.md) are met and CI
-is green. Reviewers check, above everything else, that the change respects the
-**verification invariant**: no model or heuristic change may lower the verified
-parse score on the full sample set. The model proposes; the native executor
-disposes.
+A pull request is ready to review when the Global Definition of Done in
+[`AGENTS.md`](../AGENTS.md) is met and CI is green. Reviewers check, above
+everything else, that the change respects the **verification invariant**: no
+model or heuristic change may lower the verified parse score on the full sample
+set. The model proposes; the native executor disposes.
 
 See [`CONTRIBUTING.md`](../CONTRIBUTING.md) for the local check suite to run
 before opening a pull request.

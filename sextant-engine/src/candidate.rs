@@ -29,11 +29,13 @@
 //!
 //! Every proposal is validated against the IR rules and scored by the native
 //! executor and scorer. Candidates are ranked by full verification, then fit,
-//! then the number of relationships they encode (each one re-checked by the
-//! executor), then [structure](crate::scorer::Score::structure): among
-//! hypotheses that all parse every sample, the one that verifies the most and
-//! then explains the most of the samples' content wins, and an opaque blob,
-//! which explains nothing, comes last (FR-12, FR-26).
+//! then the number of checksum checks that pass, then the number of
+//! relationships they encode (each one re-checked by the executor), then
+//! [structure](crate::scorer::Score::structure), with the name as a final
+//! deterministic tie-break: among hypotheses that all parse every sample, the
+//! one that verifies the most and then explains the most of the samples'
+//! content wins, and an opaque blob, which explains nothing, comes last (FR-12,
+//! FR-26).
 
 use std::collections::{HashMap, HashSet};
 
