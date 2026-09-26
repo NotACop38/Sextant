@@ -20,19 +20,31 @@ use serde::{Deserialize, Serialize};
 pub mod accuracy;
 pub mod report;
 
-pub use accuracy::{CorpusMetrics, FormatMetrics, SampleMetrics, evaluate_corpus, evaluate_format};
+pub use accuracy::{FormatMetrics, SampleMetrics, evaluate_format, evaluate_format_in};
 pub use report::{
-    Baseline, BenchOptions, BenchReport, FormatReport, Summary, TargetCheck, Targets,
+    BenchOptions, BenchReport, FLOORS, Floor, FormatReport, Summary, TargetCheck, Tier, TierReport,
     render_readme_section, render_table, run_benchmark,
 };
 
-/// The file-format corpus the statistics-only MVP is measured against (PRD
-/// Section 15). These are the formats present under `corpus/` with the
-/// header-and-record ground-truth schema this harness evaluates. The protocol
+/// The file-format formats the engine is developed and tuned against: four
+/// controlled formats authored for this project plus real PNG, BMP, WAV, and ZIP
+/// files. Results on these formats are in-sample and measure fit to known data.
+pub const DEVELOPMENT_CORPUS: [&str; 8] =
+    ["tlv", "scma", "stot", "sdlp", "png", "bmp", "wav", "zip"];
+
+/// Real file formats held out from tuning (PRD Section 15). They are evaluated
+/// with the same harness but are not consulted while developing heuristics, so
+/// their numbers estimate accuracy on formats the engine was not fitted to.
+/// A format moves to [`DEVELOPMENT_CORPUS`] once it has been used for tuning.
+pub const HELD_OUT_CORPUS: [&str; 4] = ["gif", "elf", "tar", "pcapfile"];
+
+/// Every file-format corpus entry, development formats first. The protocol
 /// track (Modbus/TCP and the toy protocol) is captured-packet input with its own
-/// ground-truth schema and is exercised by the Step 11 protocol tests and the
-/// Wireshark dissector round-trip, not by these file-format metrics.
-pub const FILE_FORMAT_CORPUS: [&str; 5] = ["tlv", "scma", "stot", "sdlp", "png"];
+/// ground-truth schema and is exercised by the protocol tests and the Wireshark
+/// dissector round trip, not by these file-format metrics.
+pub const FILE_FORMAT_CORPUS: [&str; 12] = [
+    "tlv", "scma", "stot", "sdlp", "png", "bmp", "wav", "zip", "gif", "elf", "tar", "pcapfile",
+];
 
 /// A hand-verified description of a single corpus format.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -66,13 +78,26 @@ pub struct Provenance {
     pub notes: String,
 }
 
-/// The structural template of a format: a fixed header and a repeating record.
+/// The structural template of a format: a header, a repeating record, and a
+/// trailer, laid out in that order.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Structure {
     /// Fields at the start of every sample, in order.
     pub header: Vec<Field>,
-    /// Fields of one repeating record, in order.
+    /// Fields of one repeating record, in order. Each sample declares how many
+    /// records it holds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub record: Vec<Field>,
+    /// Fields after the last record, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trailer: Vec<Field>,
+}
+
+impl Structure {
+    /// Every field in layout order: header, one record, then trailer.
+    pub fn fields(&self) -> impl Iterator<Item = &Field> {
+        self.header.iter().chain(&self.record).chain(&self.trailer)
+    }
 }
 
 /// One field in a ground-truth structure.
@@ -96,6 +121,9 @@ pub struct Field {
 }
 
 /// How the size of a field is determined.
+///
+/// In JSON a fixed size is a number, a derived size is the name of the length
+/// field, and a rule is an object such as `{"rule": "to_end"}`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum SizeRule {
@@ -103,6 +131,20 @@ pub enum SizeRule {
     Fixed(u64),
     /// Derived from another field, named here (for example `length`).
     Derived(String),
+    /// A size given by a named rule rather than a number or a field.
+    Rule {
+        /// The rule.
+        rule: SizeRuleKind,
+    },
+}
+
+/// A size rule that is neither a fixed number nor a length field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SizeRuleKind {
+    /// The field runs to the end of the sample. Only the final field of a
+    /// structure may use it.
+    ToEnd,
 }
 
 /// One sample file belonging to a format.
@@ -240,14 +282,32 @@ fn validate_ground_truth(gt: &GroundTruth) -> std::io::Result<()> {
     if gt.samples.is_empty() || gt.samples.len() > MAX_SAMPLES {
         return Err(invalid_corpus("invalid corpus sample count"));
     }
-    let fields = gt.structure.header.iter().chain(&gt.structure.record);
-    for field in fields {
+    let fields: Vec<&Field> = gt.structure.fields().collect();
+    for field in &fields {
         if [&field.name, &field.ty, &field.role]
             .iter()
             .any(|value| value.len() > 256)
             || matches!(&field.size, SizeRule::Derived(name) if name.len() > 256)
         {
             return Err(invalid_corpus("ground-truth field labels exceed 256 bytes"));
+        }
+    }
+    // A to-end field consumes the rest of the sample, so it must be the last
+    // field laid out, and it cannot sit inside a repeating record.
+    let last = fields.len().saturating_sub(1);
+    for (index, field) in fields.iter().enumerate() {
+        if matches!(
+            field.size,
+            SizeRule::Rule {
+                rule: SizeRuleKind::ToEnd
+            }
+        ) {
+            let in_record = gt.structure.record.iter().any(|f| std::ptr::eq(f, *field));
+            if index != last || in_record {
+                return Err(invalid_corpus(
+                    "only the final ground-truth field may run to the end",
+                ));
+            }
         }
     }
     let mut bytes = 0u64;
@@ -277,9 +337,10 @@ fn expanded_field_count(gt: &GroundTruth, records: u64) -> std::io::Result<u64> 
     if records > MAX_TRUTH_FIELDS || (records > 0 && gt.structure.record.is_empty()) {
         return Err(invalid_corpus("invalid ground-truth record count"));
     }
+    let fixed = (gt.structure.header.len() + gt.structure.trailer.len()) as u64;
     let count = records
         .checked_mul(gt.structure.record.len() as u64)
-        .and_then(|count| count.checked_add(gt.structure.header.len() as u64))
+        .and_then(|count| count.checked_add(fixed))
         .filter(|&count| count <= MAX_TRUTH_FIELDS)
         .ok_or_else(|| invalid_corpus("ground truth exceeds its expanded field limit"))?;
     Ok(count)

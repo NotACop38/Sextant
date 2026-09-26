@@ -23,7 +23,7 @@ use crate::scorer::Score;
 /// It is written into every report as `schema_version` and matches the `$id`
 /// version of the committed JSON Schema. Bump it when the structure changes in a
 /// way that is not backward compatible.
-pub const REPORT_SCHEMA_VERSION: &str = "1.0";
+pub const REPORT_SCHEMA_VERSION: &str = "1.1";
 
 /// Cap on report JSON size when loading from disk for `inspect` / `export`.
 /// Bounds memory before serde parses the document (FR-24).

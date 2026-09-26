@@ -12,17 +12,15 @@
   "structure": {
     "header": [
       { "name": "magic", "offset": 0, "size": 4, "type": "bytes", "role": "magic", "constant": "STOT" },
-      { "name": "total_len", "offset": 4, "size": 4, "type": "u32le", "role": "length" }
-    ],
-    "record": [
-      { "name": "payload", "size": "total_len", "type": "bytes", "role": "payload" }
+      { "name": "total_len", "offset": 4, "size": 4, "type": "u32le", "role": "length" },
+      { "name": "payload", "offset": 8, "size": {"rule": "to_end"}, "type": "bytes", "role": "payload" }
     ]
   },
   "samples": [
-    { "path": "samples/sample_01.stot", "size": 11, "record_count": 1 },
-    { "path": "samples/sample_02.stot", "size": 18, "record_count": 1 },
-    { "path": "samples/sample_03.stot", "size": 9, "record_count": 1 },
-    { "path": "samples/sample_04.stot", "size": 24, "record_count": 1 },
-    { "path": "samples/sample_05.stot", "size": 15, "record_count": 1 }
+    { "path": "samples/sample_01.stot", "size": 11, "record_count": 0 },
+    { "path": "samples/sample_02.stot", "size": 18, "record_count": 0 },
+    { "path": "samples/sample_03.stot", "size": 9, "record_count": 0 },
+    { "path": "samples/sample_04.stot", "size": 24, "record_count": 0 },
+    { "path": "samples/sample_05.stot", "size": 15, "record_count": 0 }
   ]
 }

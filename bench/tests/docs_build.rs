@@ -16,7 +16,11 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Collect every Markdown file under `dir`, recursively, skipping `target`.
+/// Collect every Markdown file under `dir`, recursively. Build output
+/// (`target`) and hidden directories other than `.github` (`.git`, local tool
+/// state such as agent worktrees) are skipped, since they are not part of the
+/// documentation. Only real directories are followed, so a symlink cycle cannot
+/// recurse forever.
 fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -24,8 +28,14 @@ fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            if path.file_name().is_some_and(|name| name == "target") {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            let skip = path.file_name().is_some_and(|name| {
+                name == "target" || (name != ".github" && name.to_string_lossy().starts_with('.'))
+            });
+            if skip {
                 continue;
             }
             markdown_files(&path, out);

@@ -37,10 +37,7 @@ const MAX_RECORD_SIZE: u64 = 1024;
 /// The deepest header offset the integer and offset detectors scan to. Header
 /// length, count, and offset fields sit near the start; bounding the scan keeps
 /// detection cheap and avoids reaching into payload bytes.
-const MAX_HEADER_SCAN: usize = 64;
-/// The trailing-byte amounts a derived-length relationship may leave for a
-/// suffix (for example a four-byte CRC), tried in this order.
-const TRAILING_CANDIDATES: [usize; 4] = [0, 4, 2, 1];
+pub const MAX_HEADER_SCAN: usize = 128;
 
 /// Decode an unsigned integer of `width` bytes at `offset` in `data`.
 ///
@@ -111,41 +108,18 @@ pub fn detect_magic<S: AsRef<[u8]>>(samples: &[S], alignment: &Alignment) -> Opt
     })
 }
 
-/// The relationship an integer field satisfies across the sample set (FR-9).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IntRelation {
-    /// The field's value equals the whole sample length (a total-size field).
-    TotalLength,
-    /// The field's value is the byte length of the payload that immediately
-    /// follows it, leaving `trailing` bytes for a suffix such as a checksum.
-    DerivedLength {
-        /// How many bytes follow the payload before the sample ends.
-        trailing: usize,
-    },
-    /// The field's value is a count of fixed-size records that fill the rest of
-    /// the sample, each `record_size` bytes long.
-    Count {
-        /// The size of one record in bytes.
-        record_size: u64,
-    },
-}
-
-/// A detected integer field and the relationship it satisfies (FR-9).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IntField {
-    /// The field's byte offset from the start of the sample.
+/// An integer reading: where a field sits and how it is decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Reading {
+    /// The field's byte offset from the start of the structure.
     pub offset: usize,
     /// The field width in bytes (1, 2, 4, or 8).
     pub width: u8,
     /// Whether the field is big-endian.
     pub big_endian: bool,
-    /// The relationship the field's value satisfies in every sample.
-    pub relation: IntRelation,
-    /// The field's decoded value in each sample, in sample order.
-    pub values: Vec<u64>,
 }
 
-impl IntField {
+impl Reading {
     /// The offset just past the field's last byte.
     #[must_use]
     pub fn end(&self) -> usize {
@@ -153,68 +127,116 @@ impl IntField {
     }
 }
 
-/// Detect header integer fields whose value tracks the sample length, the
-/// payload length, or a record count, across width and endianness hypotheses
-/// (FR-9).
+/// A size relationship an integer field satisfies in every sample (FR-9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntRelation {
+    /// The value equals the whole sample length.
+    TotalLength,
+    /// The value is the number of bytes from `start` to `trailing` bytes before
+    /// the end of the sample: a size field that governs the region after a
+    /// header (`start` at or after the field itself), optionally followed by a
+    /// fixed trailer such as a checksum.
+    Remaining {
+        /// Where the governed region begins.
+        start: usize,
+        /// How many bytes follow the governed region.
+        trailing: usize,
+    },
+    /// The value is the number of fixed-size records that fill the sample from
+    /// `start` to its end.
+    Count {
+        /// The size of one record in bytes.
+        record_size: u64,
+        /// Where the records begin.
+        start: usize,
+    },
+}
+
+/// A detected integer field and the relationship it satisfies (FR-9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntField {
+    /// Where the field sits and how it is read.
+    pub reading: Reading,
+    /// The relationship the field's value satisfies in every sample.
+    pub relation: IntRelation,
+    /// The field's decoded value in each sample, in sample order.
+    pub values: Vec<u64>,
+}
+
+/// The trailer lengths a size field may leave after the region it governs when
+/// that region starts right after the field.
+const TRAILERS: [usize; 4] = [1, 2, 4, 8];
+
+/// Detect header integer fields whose value measures the sample: its total
+/// length, the bytes remaining after a header, or a count of fixed-size
+/// records, across width and endianness hypotheses (FR-9).
 ///
-/// Every candidate offset up to [`MAX_HEADER_SCAN`], each width in
-/// [`INT_WIDTHS`], and both byte orders are tried. A relationship is reported
-/// only when it holds for all samples and the field's value is not constant, so
-/// an invariant header constant is never mistaken for a length or count.
+/// Every offset up to [`MAX_HEADER_SCAN`], each width, and both byte orders are
+/// tried. A relationship is reported only when it holds in every sample and
+/// the value varies across samples, so an invariant header constant is never
+/// mistaken for a length or count. Each hypothesis costs time proportional to
+/// the number of samples: the implied region start (or record size) is solved
+/// from the samples rather than searched.
 #[must_use]
 pub fn detect_int_fields<S: AsRef<[u8]>>(samples: &[S]) -> Vec<IntField> {
-    let lens: Vec<usize> = samples.iter().map(|s| s.as_ref().len()).collect();
+    let lens: Vec<u128> = samples.iter().map(|s| s.as_ref().len() as u128).collect();
     let mut findings = Vec::new();
     if samples.len() < 2 {
         return findings;
     }
-    let common_len = lens.iter().copied().min().unwrap_or(0);
-    let lens_vary = lens.iter().min() != lens.iter().max();
+    let common_len = lens.iter().copied().min().unwrap_or(0) as usize;
     let scan_end = common_len.min(MAX_HEADER_SCAN);
 
     for width in INT_WIDTHS {
-        if width > common_len {
+        if width > scan_end {
             continue;
         }
-        for offset in 0..=scan_end.saturating_sub(width) {
+        for offset in 0..=scan_end - width {
             for big in [false, true] {
-                // Width-one fields are endianness-free; emit them once.
                 if width == 1 && big {
                     continue;
                 }
                 let Some(values) = decode_column(samples, offset, width, big) else {
                     continue;
                 };
-                let values_vary = values.iter().min() != values.iter().max();
-                let field_end = offset + width;
-
-                if lens_vary && values_vary && values_match_lengths(&values, &lens) {
-                    findings.push(make_field(
-                        offset,
-                        width,
-                        big,
-                        IntRelation::TotalLength,
-                        &values,
-                    ));
+                if values.iter().min() == values.iter().max() {
+                    continue;
                 }
-                if values_vary {
-                    if let Some(trailing) = derived_length_trailing(&values, &lens, field_end) {
-                        findings.push(make_field(
-                            offset,
-                            width,
-                            big,
-                            IntRelation::DerivedLength { trailing },
-                            &values,
-                        ));
+                let reading = Reading {
+                    offset,
+                    width: width as u8,
+                    big_endian: big,
+                };
+                let mut push = |relation| {
+                    findings.push(IntField {
+                        reading,
+                        relation,
+                        values: values.clone(),
+                    });
+                };
+                let wide: Vec<u128> = values.iter().map(|&v| u128::from(v)).collect();
+                if wide == lens {
+                    push(IntRelation::TotalLength);
+                }
+                if let Some(start) = constant_difference(&lens, &wide, 1) {
+                    let field_end = reading.end() as u128;
+                    if (field_end..=common_len as u128).contains(&start) {
+                        push(IntRelation::Remaining {
+                            start: start as usize,
+                            trailing: 0,
+                        });
+                        let trailing = (start - field_end) as usize;
+                        if TRAILERS.contains(&trailing) {
+                            push(IntRelation::Remaining {
+                                start: reading.end(),
+                                trailing,
+                            });
+                        }
                     }
-                    if let Some(record_size) = count_record_size(&values, &lens, field_end) {
-                        findings.push(make_field(
-                            offset,
-                            width,
-                            big,
-                            IntRelation::Count { record_size },
-                            &values,
-                        ));
+                }
+                if let Some((record_size, start)) = count_relation(&lens, &wide, reading.end()) {
+                    if start <= common_len {
+                        push(IntRelation::Count { record_size, start });
                     }
                 }
             }
@@ -223,20 +245,44 @@ pub fn detect_int_fields<S: AsRef<[u8]>>(samples: &[S]) -> Vec<IntField> {
     findings
 }
 
-fn make_field(
-    offset: usize,
-    width: usize,
-    big: bool,
-    relation: IntRelation,
-    values: &[u64],
-) -> IntField {
-    IntField {
-        offset,
-        width: width as u8,
-        big_endian: big,
-        relation,
-        values: values.to_vec(),
+/// The constant `len - value * scale` across every sample, if it exists and no
+/// value exceeds its sample.
+fn constant_difference(lens: &[u128], values: &[u128], scale: u128) -> Option<u128> {
+    let first = lens[0].checked_sub(values[0].checked_mul(scale)?)?;
+    lens.iter()
+        .zip(values)
+        .all(|(&len, &value)| {
+            value
+                .checked_mul(scale)
+                .and_then(|product| len.checked_sub(product))
+                == Some(first)
+        })
+        .then_some(first)
+}
+
+/// A record size of at least two bytes and a start at or after `field_end` for
+/// which `value * record_size + start == len` in every sample. The record size
+/// is solved from two samples whose values differ, then checked on all.
+fn count_relation(lens: &[u128], values: &[u128], field_end: usize) -> Option<(u64, usize)> {
+    let (a, b) = (0..values.len())
+        .flat_map(|a| (a + 1..values.len()).map(move |b| (a, b)))
+        .find(|&(a, b)| values[a] != values[b])?;
+    let (len_delta, value_delta) = if values[b] > values[a] {
+        (lens[b].checked_sub(lens[a])?, values[b] - values[a])
+    } else {
+        (lens[a].checked_sub(lens[b])?, values[a] - values[b])
+    };
+    if len_delta % value_delta != 0 {
+        return None;
     }
+    let record_size = len_delta / value_delta;
+    // One-byte records are a plain byte count, which the remaining-length
+    // relationship already describes without an array of single bytes.
+    if record_size < 2 || record_size > u128::from(MAX_RECORD_SIZE) {
+        return None;
+    }
+    let start = constant_difference(lens, values, record_size)?;
+    (start >= field_end as u128).then_some((record_size as u64, start as usize))
 }
 
 /// Decode the same field in every sample, or `None` if it does not fit one.
@@ -250,39 +296,6 @@ fn decode_column<S: AsRef<[u8]>>(
         .iter()
         .map(|sample| read_uint(sample.as_ref(), offset, width, big))
         .collect()
-}
-
-fn values_match_lengths(values: &[u64], lens: &[usize]) -> bool {
-    values
-        .iter()
-        .zip(lens)
-        .all(|(&value, &len)| value == len as u64)
-}
-
-/// The trailing-byte count for which `value + field_end + trailing == len` holds
-/// in every sample, if any.
-fn derived_length_trailing(values: &[u64], lens: &[usize], field_end: usize) -> Option<usize> {
-    TRAILING_CANDIDATES.into_iter().find(|&trailing| {
-        values.iter().zip(lens).all(|(&value, &len)| {
-            (value as u128) + field_end as u128 + trailing as u128 == len as u128
-        })
-    })
-}
-
-/// The smallest fixed record size for which `value * record_size == len -
-/// field_end` holds in every sample, if any.
-fn count_record_size(values: &[u64], lens: &[usize], field_end: usize) -> Option<u64> {
-    // At least one sample must hold a non-zero count, otherwise every record
-    // size trivially "fits" zero records and the relationship is meaningless.
-    if values.iter().all(|&value| value == 0) {
-        return None;
-    }
-    (1..=MAX_RECORD_SIZE).find(|&record_size| {
-        values.iter().zip(lens).all(|(&value, &len)| {
-            let remainder = (len as u128).saturating_sub(field_end as u128);
-            (value as u128) * (record_size as u128) == remainder
-        })
-    })
 }
 
 /// A header field that points at an invariant marker further into the sample
@@ -359,17 +372,18 @@ pub fn detect_offsets<S: AsRef<[u8]>>(samples: &[S]) -> Vec<OffsetField> {
 }
 
 /// The byte every sample holds at its own pointer position, if they agree.
+/// Zero and `0xFF` bytes are padding far too often to count as a marker.
 fn invariant_marker<S: AsRef<[u8]>>(samples: &[S], values: &[u64]) -> Option<u8> {
     let mut marker = None;
     for (sample, &value) in samples.iter().zip(values) {
-        let byte = *sample.as_ref().get(value as usize)?;
+        let byte = *sample.as_ref().get(usize::try_from(value).ok()?)?;
         match marker {
             None => marker = Some(byte),
             Some(existing) if existing == byte => {}
             Some(_) => return None,
         }
     }
-    marker
+    marker.filter(|&byte| byte != 0x00 && byte != 0xFF)
 }
 
 /// Where a checksum's covered range begins (FR-10).
@@ -635,9 +649,12 @@ mod tests {
         let samples = [a, b];
         let fields = detect_int_fields(&samples);
         assert!(fields.iter().any(|field| {
-            field.offset == 4
-                && field.width == 4
-                && !field.big_endian
+            field.reading
+                == Reading {
+                    offset: 4,
+                    width: 4,
+                    big_endian: false,
+                }
                 && field.relation == IntRelation::TotalLength
         }));
     }
@@ -656,9 +673,35 @@ mod tests {
         let samples = [make(1), make(3), make(2)];
         let fields = detect_int_fields(&samples);
         let found = fields.iter().find(|field| {
-            matches!(field.relation, IntRelation::Count { record_size: 4 }) && field.offset == 4
+            field.relation
+                == IntRelation::Count {
+                    record_size: 4,
+                    start: 5,
+                }
+                && field.reading.offset == 4
         });
         assert!(found.is_some(), "count field not detected: {fields:?}");
+    }
+
+    #[test]
+    fn detects_a_size_field_that_governs_a_region_after_the_header() {
+        // A BMP-like header: a u32 image size at offset 4 that measures the
+        // bytes from offset 16 to the end, with other header bytes between.
+        let make = |pixels: usize, fill: u8| {
+            let mut data = b"IMGS".to_vec();
+            data.extend_from_slice(&(pixels as u32).to_le_bytes());
+            data.extend_from_slice(&[7, 7, 7, 7, 9, 9, 9, 9]);
+            data.extend(std::iter::repeat_n(fill, pixels));
+            data
+        };
+        let samples = [make(3, 1), make(9, 2), make(5, 3)];
+        let fields = detect_int_fields(&samples);
+        assert!(fields.iter().any(|field| field.reading.offset == 4
+            && field.relation
+                == IntRelation::Remaining {
+                    start: 16,
+                    trailing: 0
+                }));
     }
 
     #[test]
@@ -674,7 +717,12 @@ mod tests {
         let samples = [make(&[1, 2, 3]), make(&[9; 7]), make(&[4])];
         let fields = detect_int_fields(&samples);
         assert!(fields.iter().any(|field| {
-            field.offset == 4 && field.relation == IntRelation::DerivedLength { trailing: 4 }
+            field.reading.offset == 4
+                && field.relation
+                    == IntRelation::Remaining {
+                        start: 6,
+                        trailing: 4,
+                    }
         }));
     }
 

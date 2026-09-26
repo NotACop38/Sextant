@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/NotACop38/Sextant/schemas/report.schema.json/1.0",
+  "$id": "https://github.com/NotACop38/Sextant/schemas/report.schema.json/1.1",
   "title": "Sextant inference report",
   "description": "The machine-readable report produced by a Sextant inference run (FR-34): the chosen Format Hypothesis IR, the verified fit score and its breakdown, a flattened field map, the refinement history, and run metadata.",
   "type": "object",
@@ -16,7 +16,7 @@
   "properties": {
     "schema_version": {
       "description": "The version of this report structure.",
-      "const": "1.0"
+      "const": "1.1"
     },
     "metadata": { "$ref": "#/$defs/run_metadata" },
     "format": { "$ref": "#/$defs/format" },
@@ -347,6 +347,7 @@
         "coverage",
         "consistency",
         "generality",
+        "structure",
         "weights",
         "samples"
       ],
@@ -355,6 +356,10 @@
         "coverage": { "$ref": "#/$defs/unit_interval" },
         "consistency": { "$ref": "#/$defs/unit_interval" },
         "generality": { "$ref": "#/$defs/unit_interval" },
+        "structure": {
+          "description": "How much of the sample content the hypothesis explains: one minus described bits over raw bits. Zero for an opaque hypothesis. Not part of overall.",
+          "$ref": "#/$defs/unit_interval"
+        },
         "weights": {
           "type": "object",
           "additionalProperties": false,
@@ -386,6 +391,7 @@
         "parsed",
         "constraints_total",
         "constraints_passed",
+        "checksums_passed",
         "failure"
       ],
       "properties": {
@@ -400,6 +406,7 @@
         "parsed": { "type": "boolean" },
         "constraints_total": { "type": "integer", "minimum": 0 },
         "constraints_passed": { "type": "integer", "minimum": 0 },
+        "checksums_passed": { "type": "integer", "minimum": 0 },
         "failure": { "type": ["object", "null"] }
       }
     },

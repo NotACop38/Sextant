@@ -1,0 +1,41 @@
+{
+  "format": "tar",
+  "display_name": "POSIX ustar archive (TAR)",
+  "description": "A real file format: one 512-byte header of fixed-width, NUL-padded ASCII fields (numbers are written in octal), one zero-padded data block, and the two zero blocks that end an archive. Exercises text fields, octal numbers the IR cannot decode as integers, large zero regions, and field boundaries hidden inside padding.",
+  "endianness": "little",
+  "provenance": {
+    "source": "synthetic",
+    "origin": "Single-file archives built by corpus/tar/generate.py with tarfile.TarInfo.tobuf and pinned metadata.",
+    "license": "CC0-1.0",
+    "notes": "Not derived from any third-party archive. Safe to redistribute."
+  },
+  "structure": {
+    "header": [
+      { "name": "name", "offset": 0, "size": 100, "type": "string", "role": "unknown" },
+      { "name": "mode", "offset": 100, "size": 8, "type": "string", "role": "flags" },
+      { "name": "uid", "offset": 108, "size": 8, "type": "string", "role": "unknown", "constant": "0001750\u0000" },
+      { "name": "gid", "offset": 116, "size": 8, "type": "string", "role": "unknown", "constant": "0001750\u0000" },
+      { "name": "size", "offset": 124, "size": 12, "type": "string", "role": "length" },
+      { "name": "mtime", "offset": 136, "size": 12, "type": "string", "role": "timestamp" },
+      { "name": "checksum", "offset": 148, "size": 8, "type": "string", "role": "checksum" },
+      { "name": "typeflag", "offset": 156, "size": 1, "type": "string", "role": "enum", "constant": "0" },
+      { "name": "linkname", "offset": 157, "size": 100, "type": "string", "role": "unknown" },
+      { "name": "magic", "offset": 257, "size": 6, "type": "bytes", "role": "magic", "constant": "hex:757374617200" },
+      { "name": "version", "offset": 263, "size": 2, "type": "string", "role": "version", "constant": "00" },
+      { "name": "uname", "offset": 265, "size": 32, "type": "string", "role": "unknown" },
+      { "name": "gname", "offset": 297, "size": 32, "type": "string", "role": "unknown" },
+      { "name": "devmajor", "offset": 329, "size": 8, "type": "string", "role": "unknown" },
+      { "name": "devminor", "offset": 337, "size": 8, "type": "string", "role": "unknown" },
+      { "name": "prefix", "offset": 345, "size": 155, "type": "string", "role": "unknown" },
+      { "name": "header_padding", "offset": 500, "size": 12, "type": "bytes", "role": "reserved" },
+      { "name": "data", "offset": 512, "size": 512, "type": "bytes", "role": "payload" },
+      { "name": "end_of_archive", "offset": 1024, "size": 1024, "type": "bytes", "role": "reserved" }
+    ]
+  },
+  "samples": [
+    { "path": "samples/sample_01.tar", "size": 2048, "record_count": 0 },
+    { "path": "samples/sample_02.tar", "size": 2048, "record_count": 0 },
+    { "path": "samples/sample_03.tar", "size": 2048, "record_count": 0 },
+    { "path": "samples/sample_04.tar", "size": 2048, "record_count": 0 }
+  ]
+}

@@ -72,12 +72,15 @@ pub mod protocol;
 pub mod refine;
 pub mod report;
 pub mod scorer;
+pub mod segment;
 pub mod semantic;
 pub mod stats;
 
 pub use align::{Alignment, Column, Region, align};
 pub use candidate::{Candidate, infer_candidates};
-pub use chunk::{ChunkChecksum, ChunkChecksumStart, ChunkLayout, detect_chunks};
+pub use chunk::{
+    ChunkChecksum, ChunkChecksumStart, ChunkLayout, detect_chunk_layouts, detect_chunks,
+};
 pub use detect::{
     Bitfield, ChecksumField, ChecksumStart, IntField, IntRelation, Magic, OffsetField,
     detect_bitfields, detect_int_fields, detect_magic, detect_offsets, detect_trailing_checksum,
