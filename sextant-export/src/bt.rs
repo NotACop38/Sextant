@@ -317,7 +317,7 @@ fn checksum_comment(field: &Field) -> Option<String> {
         .iter()
         .find_map(|constraint| match constraint {
             Constraint::Checksum { spec } => Some(format!(
-                "// checksum: {:?} over [{}, {})",
+                "// checksum: {} over [{}, {})",
                 spec.algorithm,
                 comment_text(spec.covered.from.field().as_str()),
                 comment_text(spec.covered.to.field().as_str())
@@ -363,7 +363,7 @@ mod tests {
         assert!(bt.contains("BigEndian();"));
         assert!(bt.contains("while(!FEof()) {"));
         assert!(bt.contains("char chunk_type[4];"));
-        assert!(bt.contains("// checksum: Crc32"));
+        assert!(bt.contains("// checksum: CRC-32 (ISO-HDLC)"));
     }
 
     #[test]

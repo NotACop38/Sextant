@@ -471,7 +471,7 @@ impl Ctx {
         for constraint in &field.constraints {
             if let Constraint::Checksum { spec } = constraint {
                 notes.push(format!(
-                    "checksum: {:?} over [{}, {})",
+                    "checksum: {} over [{}, {})",
                     spec.algorithm,
                     comment_text(spec.covered.from.field().as_str()),
                     comment_text(spec.covered.to.field().as_str())
@@ -689,7 +689,7 @@ mod tests {
         assert!(ksy.contains("type: str"));
         assert!(ksy.contains("encoding: ASCII"));
         // The CRC field cannot be verified in Kaitai, so it is a note.
-        assert!(ksy.contains("checksum: Crc32"));
+        assert!(ksy.contains("checksum: CRC-32 (ISO-HDLC)"));
     }
 
     #[test]
@@ -736,7 +736,7 @@ mod tests {
         let ksy = export(&sextant_ir::fixtures::png_ground_truth());
         // The crc field has both a role and a checksum note; they share one doc.
         assert!(
-            ksy.contains("doc: 'role: checksum; checksum: Crc32"),
+            ksy.contains("doc: 'role: checksum; checksum: CRC-32 (ISO-HDLC)"),
             "got:\n{ksy}"
         );
     }
@@ -846,7 +846,7 @@ mod tests {
         let ksy = export(&format_of(vec![payload, sum]));
         let doc = ksy
             .lines()
-            .find(|line| line.contains("checksum: Additive"))
+            .find(|line| line.contains("checksum: additive byte sum"))
             .expect("checksum note");
         for forbidden in ["*/", "/*", "]##", "\"", "-->", "\\", "'x'"] {
             assert!(!doc.contains(forbidden), "{forbidden} in {doc}");

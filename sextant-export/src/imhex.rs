@@ -324,7 +324,7 @@ fn checksum_comment(field: &Field) -> Option<String> {
         .iter()
         .find_map(|constraint| match constraint {
             Constraint::Checksum { spec } => Some(format!(
-                "// checksum: {:?} over [{}, {})",
+                "// checksum: {} over [{}, {})",
                 spec.algorithm,
                 comment_text(spec.covered.from.field().as_str()),
                 comment_text(spec.covered.to.field().as_str())
@@ -385,7 +385,7 @@ mod tests {
         assert!(pat.contains("import std.mem;"));
         assert!(pat.contains("Chunk chunks[while(!std::mem::eof())];"));
         assert!(pat.contains("char chunk_type[4];"));
-        assert!(pat.contains("// checksum: Crc32"));
+        assert!(pat.contains("// checksum: CRC-32 (ISO-HDLC)"));
     }
 
     #[test]

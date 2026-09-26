@@ -442,6 +442,7 @@
       "enum": ["ascii", "utf8", "utf16_le", "utf16_be", "latin1"]
     },
     "checksum_algorithm": {
+      "description": "crc32 is CRC-32/ISO-HDLC (PNG, zlib); crc16 is CRC-16/ARC (reflected polynomial 0xA001, initial value 0, no final XOR); additive is the byte sum modulo the field width; xor folds the bytes with XOR.",
       "enum": ["crc32", "crc16", "additive", "xor"]
     },
     "role": {

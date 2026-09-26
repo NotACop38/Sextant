@@ -1164,7 +1164,7 @@ impl<'a> Ctx<'a> {
                 if !self.charge((to - from) as u64, from) {
                     (
                         false,
-                        format!("{:?} not evaluated: resource limit reached", item.algorithm),
+                        format!("{} not evaluated: resource limit reached", item.algorithm),
                     )
                 } else {
                     let data = &self.sample[from..to];
@@ -1172,10 +1172,10 @@ impl<'a> Ctx<'a> {
                     let stored = mask_to_width(item.stored, item.width);
                     let passed = computed == stored;
                     let detail = if passed {
-                        format!("{:?} verified over [{from}, {to})", item.algorithm)
+                        format!("{} verified over [{from}, {to})", item.algorithm)
                     } else {
                         format!(
-                            "{:?} over [{from}, {to}) expected {computed:#x}, stored {stored:#x}",
+                            "{} over [{from}, {to}) expected {computed:#x}, stored {stored:#x}",
                             item.algorithm
                         )
                     };
@@ -1185,7 +1185,7 @@ impl<'a> Ctx<'a> {
             _ => (
                 false,
                 format!(
-                    "{:?} covered range did not resolve to valid bytes",
+                    "{} covered range did not resolve to valid bytes",
                     item.algorithm
                 ),
             ),
