@@ -5,9 +5,11 @@
 //! sample set (Step 4), generates and scores candidate hypotheses, selects the
 //! best, refines it under the non-regression invariant, and prints a scored field
 //! map. With `--out` it also writes the machine-readable JSON report (FR-34).
-//! With `--no-llm` (and today in every CLI mode, since provider flags are not
-//! exposed yet) the run is fully offline and performs zero network egress
-//! (NFR-4).
+//! A run is statistics-only and fully offline, with zero network egress, unless
+//! `--provider` opts in to the model pass (NFR-4); `--no-llm` states that
+//! intent explicitly and conflicts with `--provider`. The model pass needs a
+//! build with the `llm` feature, and its proposals are kept only when the
+//! native executor verifies they do not lower the fit (FR-26).
 //!
 //! The `inspect` subcommand reads a sample through a report and renders an
 //! annotated hex view (FR-35). The `export` subcommand reads a report and emits
@@ -33,6 +35,8 @@ use sextant_engine::{
     ingest, render,
 };
 use sextant_export::{ExportFormat, export};
+
+mod model;
 
 /// The PRD exit code for a usage error (Section 14): an unknown flag, a missing
 /// required argument, or a malformed flag value.
@@ -107,11 +111,24 @@ enum Command {
         #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_TOTAL_BYTES)]
         max_total_bytes: usize,
         /// Run statistics-only with no language model and no network egress.
-        /// The CLI does not expose provider flags yet, so this is the default
-        /// behavior today; the flag documents intent and guarantees the offline
-        /// path.
+        /// This is already the behavior without --provider; the flag states the
+        /// intent and refuses to combine with --provider.
         #[arg(long)]
         no_llm: bool,
+        /// Opt in to the model pass with this provider (anthropic, openai, or
+        /// ollama). The model proposes names, roles, and refinements; each is
+        /// kept only if the native executor verifies it does not lower the fit.
+        /// The credential comes from the environment or the Sextant config
+        /// file, never from a flag. The request holds the candidate field
+        /// layout and at most 256 bytes from each of the first four samples.
+        #[arg(long, value_name = "NAME", conflicts_with = "no_llm")]
+        provider: Option<String>,
+        /// The model to ask (default: the provider's default model).
+        #[arg(long, value_name = "ID", requires = "provider")]
+        model: Option<String>,
+        /// Cap the model calls this run may make.
+        #[arg(long, value_name = "N", requires = "provider", default_value_t = 8)]
+        max_llm_calls: u32,
         /// Wall-clock cap, in seconds, for executing the IR against each sample.
         /// When omitted, the default five-second executor timeout is kept.
         #[arg(long, value_name = "SECONDS")]
@@ -200,24 +217,35 @@ fn main() -> ExitCode {
             max_bytes_per_sample,
             max_total_bytes,
             no_llm: _,
+            provider,
+            model,
+            max_llm_calls,
             timeout,
             max_messages,
             transport,
             port,
             out,
             force,
-        } => run_infer(
-            &inputs,
-            recursive,
-            max_bytes_per_sample,
-            max_total_bytes,
-            timeout,
-            max_messages,
-            transport.as_deref(),
-            port,
-            out.as_deref(),
-            force,
-        ),
+        } => {
+            let request = provider.as_deref().map(|provider| model::ModelRequest {
+                provider,
+                model: model.as_deref(),
+                max_calls: max_llm_calls,
+            });
+            run_infer(
+                &inputs,
+                recursive,
+                max_bytes_per_sample,
+                max_total_bytes,
+                timeout,
+                max_messages,
+                transport.as_deref(),
+                port,
+                out.as_deref(),
+                force,
+                request.as_ref(),
+            )
+        }
         Command::Inspect {
             report,
             sample,
@@ -354,7 +382,24 @@ fn run_infer(
     port: Option<u16>,
     out: Option<&str>,
     force: bool,
+    model_request: Option<&model::ModelRequest<'_>>,
 ) -> ExitCode {
+    if model_request.is_some() && (transport.is_some() || port.is_some()) {
+        eprintln!(
+            "sextant infer: --provider applies to file-format inference; protocol inference \
+             from captures is statistics-only."
+        );
+        return ExitCode::from(EXIT_USAGE_ERROR);
+    }
+    // Build the provider before reading any input, so a missing credential or
+    // an unknown provider fails fast and nothing is sent.
+    let model = match model_request.map(model::Model::prepare).transpose() {
+        Ok(model) => model,
+        Err(message) => {
+            eprintln!("sextant infer: {}", escape_untrusted(&message));
+            return ExitCode::from(EXIT_USAGE_ERROR);
+        }
+    };
     match (transport, port) {
         (Some(transport), Some(port)) => {
             return run_infer_protocol(
@@ -391,14 +436,27 @@ fn run_infer(
 
     let inference = InferenceOptions {
         limits: limits_with_optional_timeout(timeout),
-        // CLI provider flags are not yet wired in, so every run is
-        // statistics-only and offline whether or not --no-llm was given
-        // (NFR-4). The field map states the mode, so a default run is not
-        // warned at as if it were degraded.
-        no_llm: true,
+        // Without --provider no model exists, so the run is statistics-only
+        // and offline (NFR-4).
+        no_llm: model.is_none(),
     };
-    let report = infer(&set, &inference);
+    let report = match &model {
+        Some(model) => model.infer(&set, &inference),
+        None => infer(&set, &inference),
+    };
     print_report(&report);
+    if let Some(error) = report
+        .metadata
+        .model
+        .as_ref()
+        .and_then(|usage| usage.error.as_deref())
+    {
+        eprintln!(
+            "sextant infer: the model contributed nothing ({}); the verified statistics-only \
+             result stands",
+            escape_untrusted(error)
+        );
+    }
 
     if let Some(path) = out {
         let shown = escape_untrusted(path);
@@ -905,8 +963,24 @@ fn print_report(report: &Report) {
         score.samples.len(),
         score.checksums_passed()
     );
-    if report.metadata.no_llm {
-        outln!("  mode: statistics-only (no language model, no network egress)");
+    match &report.metadata.model {
+        None => outln!("  mode: statistics-only (no language model, no network egress)"),
+        Some(usage) => {
+            outln!(
+                "  mode: model-assisted; every accepted proposal was verified by the native executor"
+            );
+            outln!(
+                "  model: {} {}, {} call(s), {} input and {} output token(s); {} proposal(s) \
+                 accepted, {} rejected",
+                escape_untrusted(&usage.provider),
+                escape_untrusted(&usage.model),
+                usage.calls,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.accepted,
+                usage.rejected
+            );
+        }
     }
 
     outln!("Field map:");

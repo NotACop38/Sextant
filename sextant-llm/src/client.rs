@@ -163,6 +163,7 @@ pub struct LlmClient<P: LlmProvider> {
     backoff: Backoff,
     calls_made: Cell<u32>,
     spent: Cell<f64>,
+    usage: Cell<Usage>,
 }
 
 impl<P: LlmProvider> LlmClient<P> {
@@ -177,6 +178,7 @@ impl<P: LlmProvider> LlmClient<P> {
             backoff: Backoff::default(),
             calls_made: Cell::new(0),
             spent: Cell::new(0.0),
+            usage: Cell::new(Usage::default()),
         }
     }
 
@@ -217,6 +219,17 @@ impl<P: LlmProvider> LlmClient<P> {
     /// rejected (a refusal, a truncated answer, or unparseable JSON).
     pub fn spent(&self) -> f64 {
         self.spent.get()
+    }
+
+    /// The tokens reported so far across every provider response, including
+    /// responses that were then rejected. Cache hits add nothing.
+    pub fn usage(&self) -> Usage {
+        self.usage.get()
+    }
+
+    /// The wrapped provider.
+    pub fn provider(&self) -> &P {
+        &self.provider
     }
 
     /// Run a plain-text completion, consulting the cache first (NFR-6). Only a
@@ -297,10 +310,15 @@ impl<P: LlmProvider> LlmClient<P> {
         Ok(())
     }
 
-    /// Add the estimated cost of a call to the running spend.
+    /// Add a call's reported tokens and estimated cost to the running totals.
     fn account(&self, usage: &Usage) {
         self.spent
             .set(self.spent.get() + self.pricing.estimate(usage));
+        let total = self.usage.get();
+        self.usage.set(Usage {
+            input_tokens: total.input_tokens.saturating_add(usage.input_tokens),
+            output_tokens: total.output_tokens.saturating_add(usage.output_tokens),
+        });
     }
 
     /// Call the provider, retrying transient failures with bounded, jittered

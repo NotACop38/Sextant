@@ -60,6 +60,7 @@ fn fixture_report() -> Report {
         sample_count: slices.len(),
         total_bytes: slices.iter().map(|sample| sample.len()).sum(),
         no_llm: true,
+        model: None,
     };
     Report::build(format, score, Vec::new(), metadata)
 }
@@ -399,6 +400,7 @@ fn the_deepest_valid_format_round_trips_through_a_report() {
         sample_count: 1,
         total_bytes: sample.len(),
         no_llm: true,
+        model: None,
     };
     let report = Report::build(format, score, Vec::new(), metadata);
     let json = serde_json::to_string_pretty(&report).expect("serialize the report");

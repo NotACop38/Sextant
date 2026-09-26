@@ -10,6 +10,14 @@ use crate::error::LlmError;
 use crate::mock::MockProvider;
 use crate::provider::LlmProvider;
 
+/// Setting that points the Anthropic provider at another endpoint (the same
+/// variable the official SDKs read).
+pub const ANTHROPIC_BASE_URL_ENV: &str = "ANTHROPIC_BASE_URL";
+
+/// Setting that points the OpenAI provider at another endpoint (the same
+/// variable the official SDKs read).
+pub const OPENAI_BASE_URL_ENV: &str = "OPENAI_BASE_URL";
+
 /// Build a provider for `kind`, reading any required credential and settings
 /// from `env` (FR-40).
 ///
@@ -21,10 +29,15 @@ use crate::provider::LlmProvider;
 /// Provider settings read from `env`:
 ///
 /// - Anthropic: `ANTHROPIC_API_KEY` (required), plus
-///   [`crate::ANTHROPIC_EFFORT_ENV`] (default `low`) and
-///   [`crate::ANTHROPIC_FALLBACKS_ENV`] (default `on`).
-/// - OpenAI: `OPENAI_API_KEY` (required).
+///   [`crate::ANTHROPIC_EFFORT_ENV`] (default: unset, the model's own effort),
+///   [`crate::ANTHROPIC_FALLBACKS_ENV`] (default `on`), and
+///   [`ANTHROPIC_BASE_URL_ENV`] to send requests to another endpoint, such as
+///   a gateway.
+/// - OpenAI: `OPENAI_API_KEY` (required), plus [`OPENAI_BASE_URL_ENV`].
 /// - Ollama: `OLLAMA_HOST`, defaulting to `http://127.0.0.1:11434`.
+///
+/// A base URL override is validated like any endpoint: a provider that sends an
+/// API key refuses plain `http` unless the host is loopback.
 ///
 /// # Errors
 ///
@@ -65,9 +78,12 @@ fn build_anthropic(model: &str, env: &dyn EnvSource) -> Result<Box<dyn LlmProvid
         None => true,
         Some(value) => parse_switch(ANTHROPIC_FALLBACKS_ENV, &value)?,
     };
-    let provider = AnthropicProvider::new(key, model)?
+    let mut provider = AnthropicProvider::new(key, model)?
         .with_effort(effort)
         .with_fallbacks(fallbacks);
+    if let Some(base_url) = setting(env, ANTHROPIC_BASE_URL_ENV) {
+        provider = provider.with_base_url(base_url)?;
+    }
     Ok(Box::new(provider))
 }
 
@@ -79,7 +95,10 @@ fn build_anthropic(_model: &str, _env: &dyn EnvSource) -> Result<Box<dyn LlmProv
 #[cfg(feature = "openai")]
 fn build_openai(model: &str, env: &dyn EnvSource) -> Result<Box<dyn LlmProvider>, LlmError> {
     let key = crate::config::require_credential(ProviderKind::OpenAi, env)?;
-    let provider = crate::providers::openai::OpenAiProvider::new(key, model)?;
+    let mut provider = crate::providers::openai::OpenAiProvider::new(key, model)?;
+    if let Some(base_url) = crate::config::setting(env, OPENAI_BASE_URL_ENV) {
+        provider = provider.with_base_url(base_url)?;
+    }
     Ok(Box::new(provider))
 }
 

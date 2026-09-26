@@ -128,7 +128,10 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y musl-tools
       - name: Build the release binary
-        run: cargo build --release --locked -p ${{ env.CLI_PACKAGE }} --target ${{ matrix.target }}
+        # Release binaries include the model providers (the `llm` feature), so
+        # `infer --provider` works out of the box. Without `--provider` no
+        # provider is constructed and nothing is sent.
+        run: cargo build --release --locked -p ${{ env.CLI_PACKAGE }} --features llm --target ${{ matrix.target }}
 
       - name: Smoke test the release binary
         shell: bash
@@ -141,6 +144,17 @@ jobs:
           exe="target/${{ matrix.target }}/release/$bin"
           "$exe" --version
           "$exe" --help
+          # The model providers must be compiled in: with no key configured,
+          # --provider must ask for the key, not for a rebuild with the feature.
+          if env -u ANTHROPIC_API_KEY "$exe" infer corpus/tlv/samples --provider anthropic 2> provider.err; then
+            echo "::error::--provider ran without a credential" >&2
+            exit 1
+          fi
+          if ! grep -q ANTHROPIC_API_KEY provider.err; then
+            echo "::error::the model providers are not compiled in" >&2
+            cat provider.err >&2
+            exit 1
+          fi
           # The musl build exists to be one static binary with no libc
           # dependency (NFR-5), so refuse to ship it dynamically linked.
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then

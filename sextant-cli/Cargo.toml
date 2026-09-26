@@ -29,6 +29,26 @@ sextant-export.workspace = true
 # numbers and the command-line benchmark share one implementation (PRD
 # Section 15).
 sextant-bench.workspace = true
+# The model layer, with its network providers. Optional: only the `llm`
+# feature links it, so a default build contains no network code at all and
+# `infer` cannot send anything whatever the flags (NFR-4).
+sextant-llm = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Reads the reports the model-path tests write.
+serde_json.workspace = true
+
+[features]
+default = []
+# Compile the Anthropic, OpenAI, and Ollama providers so `infer --provider`
+# can consult a model. Release builds enable it; without `--provider` no
+# provider is ever constructed.
+llm = [
+    "dep:sextant-llm",
+    "sextant-llm/anthropic",
+    "sextant-llm/openai",
+    "sextant-llm/ollama",
+]
 
 [lints]
 workspace = true

@@ -207,6 +207,7 @@ fn report_names(format: &Format, samples: &[&[u8]]) -> Vec<String> {
         sample_count: samples.len(),
         total_bytes: samples.iter().map(|sample| sample.len()).sum(),
         no_llm: false,
+        model: None,
     };
     Report::build(format.clone(), score(format, samples), Vec::new(), metadata)
         .field_map
@@ -659,8 +660,20 @@ fn enabling_the_model_never_drops_below_the_statistics_baseline_on_the_corpus() 
         report.score.overall,
         baseline.score.overall
     );
-    // The report records that the model pass ran.
+    // The report records that the model pass ran, and what it cost.
     assert!(!report.metadata.no_llm);
+    let usage = report
+        .metadata
+        .model
+        .as_ref()
+        .expect("model usage recorded");
+    assert_eq!(usage.provider, "mock");
+    assert_eq!(usage.calls, 1);
+    assert!(usage.error.is_none(), "{usage:?}");
+    assert_eq!(
+        usage.accepted,
+        report.refinement.len() - baseline.refinement.len()
+    );
 }
 
 #[test]
@@ -680,6 +693,15 @@ fn a_failing_model_call_degrades_to_the_statistics_result() {
     let report = infer_with_llm(&set, &llm_enabled(), &client, &SemanticOptions::default());
 
     assert!((report.score.overall - baseline.score.overall).abs() < 1e-9);
+    // The failure is recorded rather than silently dropped.
+    let usage = report
+        .metadata
+        .model
+        .as_ref()
+        .expect("model usage recorded");
+    assert_eq!(usage.calls, 1);
+    assert_eq!(usage.accepted, 0);
+    assert!(usage.error.is_some(), "{usage:?}");
 }
 
 #[test]

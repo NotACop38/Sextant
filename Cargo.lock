@@ -1048,9 +1048,11 @@ name = "sextant-re"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "serde_json",
  "sextant-bench",
  "sextant-engine",
  "sextant-export",
+ "sextant-llm",
 ]
 
 [[package]]

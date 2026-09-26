@@ -139,8 +139,9 @@ impl FromStr for ProviderKind {
             "openai" => Ok(ProviderKind::OpenAi),
             "ollama" => Ok(ProviderKind::Ollama),
             "mock" => Ok(ProviderKind::Mock),
-            other => Err(LlmError::InvalidResponse(format!(
-                "unknown provider `{other}`: expected anthropic, openai, or ollama"
+            other => Err(LlmError::Config(format!(
+                "unknown provider `{}`: expected anthropic, openai, or ollama",
+                crate::sanitize::for_display(other)
             ))),
         }
     }

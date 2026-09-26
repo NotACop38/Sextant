@@ -42,6 +42,37 @@ pub struct RunMetadata {
     /// Whether the run was statistics-only with the language model disabled. In
     /// this mode no bytes leave the machine (NFR-4).
     pub no_llm: bool,
+    /// How the language model was used, when the run consulted one. Absent in
+    /// a statistics-only run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelUsage>,
+}
+
+/// What a run asked of the language model and what came of it (PRD Section
+/// 13: model usage), so a report shows whether a model contributed and at what
+/// cost, including when the call failed and the run fell back to the verified
+/// statistics-only result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelUsage {
+    /// The provider consulted, such as `anthropic`.
+    pub provider: String,
+    /// The model identifier requested.
+    pub model: String,
+    /// How many provider calls were made (a cached answer makes none).
+    pub calls: u32,
+    /// Input tokens the provider reported, including for rejected responses.
+    pub input_tokens: u64,
+    /// Output tokens the provider reported, including thinking and rejected
+    /// responses.
+    pub output_tokens: u64,
+    /// How many model proposals the executor verified and accepted.
+    pub accepted: usize,
+    /// How many model proposals were considered and rejected.
+    pub rejected: usize,
+    /// Why the model contributed nothing, when the call failed or its result
+    /// was discarded. The report then holds the statistics-only result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// One row of the flattened field map: a single field rendered for display, with

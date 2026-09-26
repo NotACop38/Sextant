@@ -52,7 +52,7 @@ pub use config::{
     detect_available, resolve_provider,
 };
 pub use error::LlmError;
-pub use factory::build_provider;
+pub use factory::{ANTHROPIC_BASE_URL_ENV, OPENAI_BASE_URL_ENV, build_provider};
 pub use mock::MockProvider;
 pub use provider::{
     CompletionRequest, CompletionResponse, DEFAULT_MAX_TOKENS, JsonRequest, JsonResponse,

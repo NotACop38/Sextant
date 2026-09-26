@@ -107,7 +107,7 @@ pub use protocol::{
 };
 pub use refine::{RefineOutcome, RefineStep, Refinement, refine};
 pub use report::{
-    DEFAULT_MAX_REPORT_BYTES, FieldMapEntry, REPORT_SCHEMA_VERSION, Report, RunMetadata,
+    DEFAULT_MAX_REPORT_BYTES, FieldMapEntry, ModelUsage, REPORT_SCHEMA_VERSION, Report, RunMetadata,
 };
 pub use scorer::{SampleScore, Score, ScoreWeights, score, score_with};
 pub use semantic::{

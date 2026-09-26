@@ -445,6 +445,7 @@ pub fn infer_protocol(
         sample_count: messages.len(),
         total_bytes,
         no_llm: true,
+        model: None,
     };
     let report = Report::build(format, score, Vec::new(), metadata);
 
