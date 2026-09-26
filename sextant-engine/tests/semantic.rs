@@ -19,7 +19,7 @@ use sextant_engine::{
 };
 use sextant_ir::{
     ChecksumAlgorithm, ChecksumSpec, Confidence, Constraint, CountRule, CoveredRange, Endianness,
-    Field, FieldOffset, Format, Kind, RangeAnchor, Role, Signedness, SizeRule, Structure,
+    Field, Format, Kind, RangeAnchor, Role, Signedness, SizeRule, Structure,
 };
 use sextant_llm::{
     CompletionRequest, CompletionResponse, JsonRequest, JsonResponse, LlmClient, LlmError,
@@ -957,11 +957,9 @@ fn a_rename_rewrites_only_the_references_bound_to_the_renamed_field() {
 #[test]
 fn a_rename_rewrites_references_held_by_array_elements() {
     // Every reference to `len` is held by an array element: the element's own
-    // size and offset, and the checksum anchors of another array's element.
-    let mut item = derived_bytes("item", "len");
-    item.offset = Some(FieldOffset::Derived {
-        offset_field: "len".into(),
-    });
+    // size, and the checksum anchors of another array's element. (An element
+    // cannot be positioned, so it holds no offset reference.)
+    let item = derived_bytes("item", "len");
     let mut sum = u8_field("sum");
     sum.constraints.push(Constraint::Checksum {
         spec: ChecksumSpec {
@@ -1014,10 +1012,6 @@ fn a_rename_rewrites_references_held_by_array_elements() {
     assert_eq!(count_ref(&fields[1]), Some("n"));
     let item = element(&fields[1]);
     assert_eq!(size_ref(item), Some("n"));
-    assert!(matches!(
-        &item.offset,
-        Some(FieldOffset::Derived { offset_field }) if offset_field.as_str() == "n"
-    ));
     let Constraint::Checksum { spec } = &element(&fields[2]).constraints[0] else {
         panic!("the checksum constraint is kept");
     };

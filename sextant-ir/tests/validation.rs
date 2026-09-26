@@ -338,25 +338,120 @@ fn out_of_range_confidence_is_rejected() {
     );
 }
 
-#[test]
-fn size_rule_on_struct_is_rejected() {
-    let format = format_of(vec![Field {
-        name: Some("nested".to_owned()),
-        kind: Kind::Struct {
-            structure: Structure::new(vec![integer("inner", 1)]),
+/// A struct field with the given size rule and fields.
+fn sized_struct(name: &str, size: SizeRule, fields: Vec<Field>) -> Field {
+    Field::new(
+        Kind::Struct {
+            structure: Structure::new(fields),
         },
-        size: Some(SizeRule::Fixed { bytes: 1 }),
-        offset: None,
-        role: None,
-        constraints: Vec::new(),
-        confidence: Confidence::CERTAIN,
-        evidence: Default::default(),
-    }]);
+        Confidence::CERTAIN,
+    )
+    .with_name(name)
+    .with_size(size)
+}
+
+#[test]
+fn sized_structs_are_valid() {
+    // A struct may be bounded by a fixed, derived, or to_end size rule. Its
+    // fields need not fill the region.
+    let format = format_of(vec![
+        integer("length", 2),
+        sized_struct("fixed", SizeRule::Fixed { bytes: 4 }, vec![integer("a", 2)]),
+        sized_struct(
+            "derived",
+            SizeRule::Derived {
+                length_field: FieldRef::new("length"),
+            },
+            vec![integer("b", 1)],
+        ),
+        sized_struct("rest", SizeRule::ToEnd, vec![integer("c", 1)]),
+    ]);
+    assert!(format.validate().is_ok(), "{:?}", format.validate());
+}
+
+#[test]
+fn delimited_struct_is_rejected() {
+    let format = format_of(vec![sized_struct(
+        "nested",
+        SizeRule::Delimited {
+            terminator: Bytes::new(vec![0]),
+            include_terminator: false,
+        },
+        vec![integer("inner", 1)],
+    )]);
     assert!(
         error_kinds(&format)
             .iter()
             .any(|kind| matches!(kind, ValidationErrorKind::SizeKindMismatch { .. }))
     );
+}
+
+#[test]
+fn struct_fields_overflowing_a_fixed_size_are_rejected() {
+    let format = format_of(vec![sized_struct(
+        "nested",
+        SizeRule::Fixed { bytes: 3 },
+        vec![integer("a", 2), integer("b", 2)],
+    )]);
+    assert!(has_kind(
+        &error_kinds(&format),
+        &ValidationErrorKind::StructOverflow { size: 3, needed: 4 }
+    ));
+}
+
+#[test]
+fn zero_sized_struct_is_rejected() {
+    let format = format_of(vec![sized_struct(
+        "nested",
+        SizeRule::Fixed { bytes: 0 },
+        Vec::new(),
+    )]);
+    assert!(has_kind(
+        &error_kinds(&format),
+        &ValidationErrorKind::ZeroSizedField
+    ));
+}
+
+#[test]
+fn size_rule_on_array_is_rejected() {
+    let format = format_of(vec![
+        Field::new(
+            Kind::Array {
+                element: Box::new(integer("item", 1)),
+                count: CountRule::Fixed { count: 2 },
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name("items")
+        .with_size(SizeRule::Fixed { bytes: 2 }),
+    ]);
+    assert!(
+        error_kinds(&format)
+            .iter()
+            .any(|kind| matches!(kind, ValidationErrorKind::SizeKindMismatch { .. }))
+    );
+}
+
+#[test]
+fn positioned_array_element_is_rejected() {
+    // The executor lays elements out one after another, so an element offset
+    // could never be honored.
+    let mut element = integer("item", 1);
+    element.offset = Some(FieldOffset::Absolute { bytes: 4 });
+    let format = format_of(vec![
+        Field::new(
+            Kind::Array {
+                element: Box::new(element),
+                count: CountRule::Fixed { count: 2 },
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name("items"),
+    ]);
+    assert!(has_kind(
+        &error_kinds(&format),
+        &ValidationErrorKind::PositionedArrayElement
+    ));
 }
 
 #[test]

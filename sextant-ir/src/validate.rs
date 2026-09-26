@@ -195,6 +195,18 @@ pub enum ValidationErrorKind {
         /// The field the range ends at.
         to: String,
     },
+    /// A struct with a fixed size rule holds fields that statically need more
+    /// bytes than that size, so no sample could parse it.
+    StructOverflow {
+        /// The size the struct's size rule declares.
+        size: u64,
+        /// The bytes its fields need.
+        needed: u64,
+    },
+    /// An array element declares an explicit offset. Elements are laid out one
+    /// after another from the array's start, so an element cannot be
+    /// positioned.
+    PositionedArrayElement,
 }
 
 impl fmt::Display for ValidationErrorKind {
@@ -289,6 +301,14 @@ impl fmt::Display for ValidationErrorKind {
             ValidationErrorKind::InvertedChecksumRange { from, to } => write!(
                 f,
                 "checksum covered range runs backward, from field {from:?} to field {to:?}"
+            ),
+            ValidationErrorKind::StructOverflow { size, needed } => write!(
+                f,
+                "struct is sized to {size} bytes but its fields need {needed} bytes"
+            ),
+            ValidationErrorKind::PositionedArrayElement => write!(
+                f,
+                "an array element cannot declare an offset; elements follow one another"
             ),
         }
     }
@@ -399,7 +419,11 @@ fn fixed_len(field: &Field) -> Option<u64> {
             Some(SizeRule::Fixed { bytes }) => Some(*bytes),
             _ => None,
         },
-        Kind::Struct { structure } => struct_fixed_len(structure),
+        Kind::Struct { structure } => match &field.size {
+            None => struct_fixed_len(structure),
+            Some(SizeRule::Fixed { bytes }) => Some(*bytes),
+            Some(_) => None,
+        },
         Kind::Array { element, count } => match count {
             CountRule::Fixed { count } => {
                 fixed_len(element).and_then(|len| len.checked_mul(*count))
@@ -410,10 +434,11 @@ fn fixed_len(field: &Field) -> Option<u64> {
 }
 
 fn struct_fixed_len(structure: &Structure) -> Option<u64> {
-    // The struct's byte extent is the furthest end reached by any field. This
-    // handles both sequential layouts (the running cursor) and absolute
-    // positioned fields, so a positioned but statically sized child struct
-    // still reports a known extent and is overlap-checked in its parent.
+    // The struct's byte extent is the furthest end reached by any field, as the
+    // executor measures it. This handles both sequential layouts (the running
+    // cursor) and absolute positioned fields, so a positioned but statically
+    // sized child struct still reports a known extent and is overlap-checked in
+    // its parent.
     let mut cursor: u64 = 0;
     let mut extent: u64 = 0;
     for field in &structure.fields {
@@ -761,6 +786,12 @@ impl<'a> Validator<'a> {
             }
             Kind::Array { element, count } => {
                 self.validate_count(count, ancestors, current, index, path);
+                if element.offset.is_some() {
+                    self.push(
+                        format!("{path}.kind.element.offset"),
+                        ValidationErrorKind::PositionedArrayElement,
+                    );
+                }
                 let child = push_frame(ancestors, current, index);
                 let element_slice = std::slice::from_ref(element.as_ref());
                 let element_scope = Rc::new(Scope::new(element_slice));
@@ -832,13 +863,40 @@ impl<'a> Validator<'a> {
                     },
                 ),
             },
-            Kind::Struct { .. } | Kind::Array { .. } => {
+            Kind::Struct { structure } => match &field.size {
+                None => {}
+                Some(SizeRule::Delimited { .. }) => self.push(
+                    format!("{path}.size"),
+                    ValidationErrorKind::SizeKindMismatch {
+                        detail: "a struct can be sized by a fixed, derived, or to_end rule, \
+                                 not by a terminator"
+                            .to_owned(),
+                    },
+                ),
+                Some(rule) => {
+                    self.validate_size_sanity(rule, path);
+                    if let (SizeRule::Fixed { bytes }, Some(needed)) =
+                        (rule, struct_fixed_len(structure))
+                    {
+                        if needed > *bytes {
+                            self.push(
+                                format!("{path}.size"),
+                                ValidationErrorKind::StructOverflow {
+                                    size: *bytes,
+                                    needed,
+                                },
+                            );
+                        }
+                    }
+                }
+            },
+            Kind::Array { .. } => {
                 if field.size.is_some() {
                     self.push(
                         format!("{path}.size"),
                         ValidationErrorKind::SizeKindMismatch {
-                            detail: "structs and arrays size themselves from their contents; \
-                                     omit the size rule"
+                            detail: "arrays size themselves from their count rule; omit the \
+                                     size rule and use a bounded_by count for a byte length"
                                 .to_owned(),
                         },
                     );

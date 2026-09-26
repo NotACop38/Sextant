@@ -51,7 +51,9 @@ pub struct Execution {
     /// The parsed field tree, in order. On failure this holds the top-level
     /// fields that completed before the parse stopped.
     pub fields: Vec<FieldInstance>,
-    /// The total number of bytes consumed sequentially from offset zero.
+    /// How far into the sample the root structure reached: the furthest end of
+    /// any of its fields, including explicitly positioned ones. Bytes after it
+    /// are trailing bytes. On failure, how far the parse got before stopping.
     pub consumed: usize,
     /// The length of the sample that was executed.
     pub sample_len: usize,
@@ -486,8 +488,11 @@ impl<'a> Ctx<'a> {
     }
 
     /// Parse a structure starting at `base`, bounded above by `limit`, at the
-    /// given recursion `depth`. Returns the parsed fields and the cursor after
-    /// the last field.
+    /// given recursion `depth`. Returns the parsed fields and the structure's
+    /// extent: the furthest end any field reached. Fields follow one another
+    /// from `base`; after an explicitly positioned field, the next field
+    /// continues from that field's end, so the cursor can move backward while
+    /// the extent never does.
     fn parse_structure(
         &mut self,
         structure: &'a sextant_ir::Structure,
@@ -497,8 +502,9 @@ impl<'a> Ctx<'a> {
     ) -> (Vec<FieldInstance>, usize) {
         let mut fields = Vec::new();
         let mut cursor = base;
+        let mut extent = base;
         if !self.retain(4 * std::mem::size_of::<Vec<Binding<'a>>>(), base) {
-            return (fields, cursor);
+            return (fields, extent);
         }
         self.scopes.push(Vec::new());
         let mut pending: Vec<PendingChecksum<'a>> = Vec::new();
@@ -512,7 +518,7 @@ impl<'a> Ctx<'a> {
                 None => break,
             };
             let Some(parsed) = self.parse_field(field, start, limit, depth) else {
-                cursor = cursor.max(start);
+                extent = extent.max(start);
                 break;
             };
             self.note_pending_checksum(field, &parsed, &mut pending);
@@ -533,12 +539,13 @@ impl<'a> Ctx<'a> {
                 }
             }
             cursor = parsed.end;
+            extent = extent.max(cursor);
             fields.push(parsed.instance);
         }
 
         self.evaluate_pending_checksums(pending);
         self.scopes.pop();
-        (fields, cursor)
+        (fields, extent)
     }
 
     /// Determine where a field begins, honoring an explicit absolute or derived
@@ -618,13 +625,33 @@ impl<'a> Ctx<'a> {
                     );
                     return None;
                 }
-                let (inner, end) = self.parse_structure(structure, start, limit, depth + 1);
+                // A sized struct is a bounded region: its fields parse inside
+                // it, and the struct ends where the region ends however much of
+                // it they read. An unsized struct ends at its extent.
+                let region = match &field.size {
+                    None => None,
+                    Some(rule) => Some(self.sized_extent(rule, start, limit)?),
+                };
+                let inner_limit = region.map_or(limit, |(value_end, _)| value_end);
+                let (inner, extent) =
+                    self.parse_structure(structure, start, inner_limit, depth + 1);
                 if self.failed() {
                     // The nested structure stopped at a localized failure. Drop
                     // the partial struct so the returned tree holds only fields
                     // that completed (the leaf ranges already captured coverage).
                     return None;
                 }
+                let end = match region {
+                    None => extent,
+                    Some((value_end, consumed_end)) => {
+                        // Only an unvalidated IR can delimit a struct. Its
+                        // terminator is explained like a delimited field's.
+                        if consumed_end > value_end {
+                            self.leaf_ranges.push((value_end, consumed_end));
+                        }
+                        consumed_end
+                    }
+                };
                 Some(Parsed {
                     instance: FieldInstance {
                         name: field.name.clone(),
@@ -764,39 +791,28 @@ impl<'a> Ctx<'a> {
             // zero-length field rather than panicking.
             return self.finish_sized(field, start, start, start, shape);
         };
-        match size {
-            SizeRule::Fixed { bytes } => {
-                let len = self.value_as_len(i128::from(*bytes), start)?;
-                let end = start.saturating_add(len);
-                if end > limit {
-                    self.fail(
-                        start,
-                        FailureReason::UnexpectedEndOfInput {
-                            needed: len,
-                            available: limit.saturating_sub(start),
-                        },
-                    );
-                    return None;
-                }
-                self.finish_sized(field, start, end, end, shape)
-            }
+        let (value_end, consumed_end) = self.sized_extent(size, start, limit)?;
+        self.finish_sized(field, start, value_end, consumed_end, shape)
+    }
+
+    /// Resolve a size rule for a field starting at `start`, bounded above by
+    /// `limit`. Returns where the field's value ends and where the field ends,
+    /// which differ only for a delimiter the value excludes. A fixed or derived
+    /// size that runs past `limit` fails rather than being shortened, so a
+    /// truncated sample never passes as parsed.
+    fn sized_extent(
+        &mut self,
+        size: &'a SizeRule,
+        start: usize,
+        limit: usize,
+    ) -> Option<(usize, usize)> {
+        let len = match size {
+            SizeRule::Fixed { bytes } => self.value_as_len(i128::from(*bytes), start)?,
             SizeRule::Derived { length_field } => {
                 let value = self.resolve_value(length_field.as_str(), start)?;
-                let len = self.value_as_len(value, start)?;
-                let end = start.saturating_add(len);
-                if end > limit {
-                    self.fail(
-                        start,
-                        FailureReason::UnexpectedEndOfInput {
-                            needed: len,
-                            available: limit.saturating_sub(start),
-                        },
-                    );
-                    return None;
-                }
-                self.finish_sized(field, start, end, end, shape)
+                self.value_as_len(value, start)?
             }
-            SizeRule::ToEnd => self.finish_sized(field, start, limit, limit, shape),
+            SizeRule::ToEnd => return Some((limit, limit)),
             SizeRule::Delimited {
                 terminator,
                 include_terminator,
@@ -806,23 +822,31 @@ impl<'a> Ctx<'a> {
                     self.fail(start, FailureReason::EmptyTerminator);
                     return None;
                 }
-                match self.find_terminator(start, limit, term) {
-                    Some(found) => {
-                        let consumed_end = found + term.len();
-                        let value_end = if *include_terminator {
-                            consumed_end
-                        } else {
-                            found
-                        };
-                        self.finish_sized(field, start, value_end, consumed_end, shape)
-                    }
-                    None => {
-                        self.fail(start, FailureReason::TerminatorNotFound);
-                        None
-                    }
-                }
+                let Some(found) = self.find_terminator(start, limit, term) else {
+                    self.fail(start, FailureReason::TerminatorNotFound);
+                    return None;
+                };
+                let consumed_end = found + term.len();
+                let value_end = if *include_terminator {
+                    consumed_end
+                } else {
+                    found
+                };
+                return Some((value_end, consumed_end));
             }
+        };
+        let end = start.saturating_add(len);
+        if end > limit {
+            self.fail(
+                start,
+                FailureReason::UnexpectedEndOfInput {
+                    needed: len,
+                    available: limit.saturating_sub(start),
+                },
+            );
+            return None;
         }
+        Some((end, end))
     }
 
     /// Scan for `term` in `sample[start..limit]`, charging one work unit per
@@ -975,6 +999,8 @@ impl<'a> Ctx<'a> {
             }
 
             let before = cursor;
+            // Elements follow one another, so an element's own offset (which
+            // validation rejects) is never consulted.
             let Some(parsed) = self.parse_field(element, cursor, element_limit, depth + 1) else {
                 break;
             };

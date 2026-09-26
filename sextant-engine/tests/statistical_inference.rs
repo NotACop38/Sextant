@@ -251,7 +251,12 @@ fn inference_is_deterministic_across_runs() {
     // the last bit of every score (NFR-6). Repeated runs in one process see
     // different hash seeds and allocation addresses, so any ranking or score
     // that depends on hash-map iteration order shows up here.
-    for (format, extension) in [("tlv", "tlv"), ("png", "png"), ("bmp", "bmp"), ("zip", "zip")] {
+    for (format, extension) in [
+        ("tlv", "tlv"),
+        ("png", "png"),
+        ("bmp", "bmp"),
+        ("zip", "zip"),
+    ] {
         let samples = read_samples(format, extension);
         let slices: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
         let render = || {
@@ -269,7 +274,11 @@ fn inference_is_deterministic_across_runs() {
         };
         let first = render();
         for _ in 0..3 {
-            assert_eq!(render(), first, "inference on {format} is not deterministic");
+            assert_eq!(
+                render(),
+                first,
+                "inference on {format} is not deterministic"
+            );
         }
     }
 }

@@ -474,8 +474,15 @@ fn magnitude_bits(value: i128) -> f64 {
 /// Build the per-sample score from one execution.
 fn score_sample(index: usize, execution: &Execution) -> SampleScore {
     let sample_len = execution.sample_len;
-    let (explained, overlap, gap) = coverage_stats(&execution.leaf_ranges, sample_len);
-    let trailing = sample_len.saturating_sub(execution.consumed);
+    let (explained, overlap, max_end) = coverage_stats(&execution.leaf_ranges, sample_len);
+    // The parsed region runs to the root's extent, or to the furthest explained
+    // byte when a failed parse explained bytes past where it stopped. Inside it,
+    // unexplained bytes are gaps (including the unread tail of a sized struct);
+    // after it, they are trailing. Explained, gap, and trailing bytes therefore
+    // partition the sample.
+    let region_end = execution.consumed.min(sample_len).max(max_end);
+    let gap = region_end - explained;
+    let trailing = sample_len - region_end;
 
     let coverage = if sample_len == 0 {
         if execution.succeeded() { 1.0 } else { 0.0 }
@@ -518,8 +525,8 @@ fn score_sample(index: usize, execution: &Execution) -> SampleScore {
     }
 }
 
-/// Compute explained, overlapped, and gap byte counts from the leaf ranges,
-/// clipped to the sample length.
+/// Compute the explained and overlapped byte counts from the leaf ranges,
+/// clipped to the sample length, and the end of the furthest explained byte.
 ///
 /// This merges sorted intervals rather than materializing one boolean per
 /// sample byte, so its memory is proportional to the number of leaf fields
@@ -560,9 +567,7 @@ fn coverage_stats(ranges: &[(usize, usize)], sample_len: usize) -> (usize, usize
     // is the furthest explained byte.
     let max_end = run_end;
     let overlap = total_leaf - explained;
-    // Gaps are unexplained bytes that fall before the furthest explained byte.
-    let gap = max_end - explained;
-    (explained, overlap, gap)
+    (explained, overlap, max_end)
 }
 
 /// The arithmetic mean of an iterator of values, or 0 for an empty iterator.
@@ -610,18 +615,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn coverage_stats_counts_overlap_and_gaps() {
-        // [0,4) and [2,6) overlap on [2,4): explained 6, overlap 2, no gaps.
-        let (explained, overlap, gap) = coverage_stats(&[(0, 4), (2, 6)], 8);
+    fn coverage_stats_counts_overlap_and_the_furthest_byte() {
+        // [0,4) and [2,6) overlap on [2,4): explained 6, overlap 2.
+        let (explained, overlap, max_end) = coverage_stats(&[(0, 4), (2, 6)], 8);
         assert_eq!(explained, 6);
         assert_eq!(overlap, 2);
-        assert_eq!(gap, 0);
+        assert_eq!(max_end, 6);
 
-        // [0,2) and [4,6): a two-byte gap at [2,4) inside the parsed region.
-        let (explained, overlap, gap) = coverage_stats(&[(0, 2), (4, 6)], 8);
+        // [0,2) and [4,6): two bytes at [2,4) are left unexplained.
+        let (explained, overlap, max_end) = coverage_stats(&[(0, 2), (4, 6)], 8);
         assert_eq!(explained, 4);
         assert_eq!(overlap, 0);
-        assert_eq!(gap, 2);
+        assert_eq!(max_end, 6);
     }
 
     #[test]
