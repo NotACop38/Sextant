@@ -11,6 +11,19 @@
 //! Checksums are rendered as `doc` notes. The public entry point rejects layouts
 //! this emitter cannot preserve, including explicit offsets and multi-byte
 //! delimiters. Byte-bounded arrays use a nested substream.
+//!
+//! Every IR-derived fragment of a `doc` or `title` passes through
+//! [`comment_text`], because the Kaitai compiler copies `doc` text into comments
+//! of the generated code. Identifiers that Kaitai, YAML, or a common target
+//! language reserves carry the [`crate::reserved::KAITAI_SUFFIX`] suffix, so a
+//! struct named `f4` becomes the user type `f4_x` instead of a float read.
+//!
+//! Two native rules have no direct Kaitai equivalent and are made explicit. A
+//! count taken from a signed field is guarded by a zero-size attribute whose
+//! `valid` expression rejects a negative count exactly where the native
+//! executor would, instead of Kaitai silently reading zero elements. Text is
+//! decoded leniently by the native executor but strictly by some Kaitai
+//! runtimes, which the spec states in a top-level `doc`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -20,8 +33,24 @@ use sextant_ir::{
     SizeRule, StringEncoding, Structure,
 };
 
-use crate::naming::{Allocator, snake};
+use crate::naming::{Allocator, comment_text, kaitai_field_id, kaitai_type_id, kaitai_variant_id};
 use crate::{const_as_u64, sign_letter};
+
+/// The top-level `doc` emitted when the spec decodes text that the native
+/// executor decodes leniently. It contains no comment terminators, since the
+/// compiler copies it into generated code comments and Python docstrings.
+const STRICT_TEXT_NOTE: &str = "Sextant verified this layout natively with lenient text decoding: invalid ASCII, UTF-8, or UTF-16 bytes become U+FFFD and never fail a parse. Kaitai runtimes that decode strictly, such as Python, raise an error on those bytes, so a sample the native executor accepts can fail to parse here.";
+
+/// The `doc` of a generated guard for a count taken from a signed field.
+const COUNT_GUARD_NOTE: &str = "Sextant guard: the native executor rejects a negative array count, while Kaitai would read zero elements. This zero-size attribute fails the parse at the same point.";
+
+/// The Kaitai `meta/id` for a format, which also names the generated module and
+/// root class. The root id is the first identifier allocated, so it is always
+/// this value unchanged.
+#[must_use]
+pub(crate) fn root_id(format: &Format) -> String {
+    kaitai_type_id(&format.name, "format")
+}
 
 /// Render `format` as a complete Kaitai `.ksy` document.
 #[must_use]
@@ -31,9 +60,10 @@ pub(crate) fn export(format: &Format) -> String {
         alloc: Allocator::new(),
         endianness: format.endianness,
         scopes: Vec::new(),
+        strict_text: false,
     };
     // Reserve the root id so a nested type never collides with it.
-    let root_id = ctx.alloc.allocate(&snake(&format.name, "format"));
+    let root_id = ctx.alloc.allocate(&root_id(format));
 
     let root_seq = ctx.render_seq(&format.root, 1);
 
@@ -43,7 +73,10 @@ pub(crate) fn export(format: &Format) -> String {
     let _ = writeln!(out, "  id: {root_id}");
     let _ = writeln!(out, "  endian: {}", endian_word(format.endianness));
     if let Some(description) = &format.metadata.description {
-        let _ = writeln!(out, "  title: {}", yaml_scalar(description));
+        let _ = writeln!(out, "  title: {}", yaml_scalar(&comment_text(description)));
+    }
+    if ctx.strict_text {
+        let _ = writeln!(out, "doc: {}", yaml_scalar(STRICT_TEXT_NOTE));
     }
     out.push_str("seq:\n");
     out.push_str(&root_seq);
@@ -67,14 +100,24 @@ pub(crate) fn export(format: &Format) -> String {
 }
 
 /// Mutable state threaded through the recursive render: the collected named
-/// types, the type-name allocator, the format default endianness, and a stack
-/// of per-structure name maps so a length, count, or offset reference resolves
-/// to the same de-duplicated id the referenced field was emitted with.
+/// types, the type-name allocator, the format default endianness, a stack of
+/// per-structure name maps so a length, count, or offset reference resolves to
+/// the same de-duplicated id the referenced field was emitted with, and whether
+/// any strictly decoded text was emitted.
 struct Ctx {
     types: BTreeMap<String, String>,
     alloc: Allocator,
     endianness: Endianness,
-    scopes: Vec<BTreeMap<String, String>>,
+    scopes: Vec<BTreeMap<String, Binding>>,
+    strict_text: bool,
+}
+
+/// How a field name in scope was emitted.
+struct Binding {
+    /// The de-duplicated Kaitai id.
+    id: String,
+    /// Whether the field is a signed integer, whose value can be negative.
+    signed: bool,
 }
 
 impl Ctx {
@@ -92,36 +135,87 @@ impl Ctx {
             .iter()
             .enumerate()
             .map(|(index, field)| {
+                let fallback = format!("field_{index}");
                 let base = match &field.name {
-                    Some(name) => snake(name, &format!("field_{index}")),
-                    None => format!("field_{index}"),
+                    Some(name) => kaitai_field_id(name, &fallback),
+                    None => fallback,
                 };
                 let id = ids.allocate(&base);
                 if let Some(name) = &field.name {
-                    names.entry(name.clone()).or_insert_with(|| id.clone());
+                    names.entry(name.clone()).or_insert_with(|| Binding {
+                        id: id.clone(),
+                        signed: matches!(
+                            field.kind,
+                            Kind::Integer {
+                                signed: Signedness::Signed,
+                                ..
+                            }
+                        ),
+                    });
                 }
                 id
             })
             .collect();
 
         self.scopes.push(names);
+        // Guard ids are allocated after every field id, so a guard can never
+        // take the id of a real field.
+        let guards: Vec<Option<String>> = structure
+            .fields
+            .iter()
+            .zip(&field_ids)
+            .map(|(field, id)| {
+                self.signed_count(field)
+                    .is_some()
+                    .then(|| ids.allocate(&format!("{id}_count_check")))
+            })
+            .collect();
         let mut out = String::new();
-        for (field, id) in structure.fields.iter().zip(&field_ids) {
+        for ((field, id), guard) in structure.fields.iter().zip(&field_ids).zip(&guards) {
+            if let (Some(guard), Some(count)) = (guard, self.signed_count(field)) {
+                let count = self.resolve_ref(count);
+                write_count_guard(&mut out, &"  ".repeat(indent), guard, &count);
+            }
             self.render_field(field, id, indent, &mut out);
         }
         self.scopes.pop();
         out
     }
 
+    /// The count field name when `field` is an array whose count comes from a
+    /// signed integer field, which Kaitai would accept as a negative count.
+    fn signed_count<'f>(&self, field: &'f Field) -> Option<&'f str> {
+        let Kind::Array {
+            count: CountRule::FromField { count_field },
+            ..
+        } = &field.kind
+        else {
+            return None;
+        };
+        let name = count_field.as_str();
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+            .is_some_and(|binding| binding.signed)
+            .then_some(name)
+    }
+
     /// Resolve a referenced field name to the id it was emitted with, searching
     /// the enclosing scopes outward and falling back to a plain sanitization.
     fn resolve_ref(&self, name: &str) -> String {
         for (parents, scope) in self.scopes.iter().rev().enumerate() {
-            if let Some(id) = scope.get(name) {
-                return format!("{}{id}", "_parent.".repeat(parents));
+            if let Some(binding) = scope.get(name) {
+                return format!("{}{}", "_parent.".repeat(parents), binding.id);
             }
         }
-        snake(name, "ref")
+        kaitai_field_id(name, "ref")
+    }
+
+    /// Record that a strictly decoded `type: str` attribute was emitted.
+    fn note_encoding(&mut self, encoding: StringEncoding) {
+        // ISO-8859-1 maps every byte, so only the other encodings can fail.
+        self.strict_text |= encoding != StringEncoding::Latin1;
     }
 
     /// Render one field as a `seq` attribute (a `- id:` entry plus its keys).
@@ -162,7 +256,7 @@ impl Ctx {
                     "type".to_owned(),
                     int_type(*width, sextant_ir::Signedness::Unsigned, *endianness),
                 ));
-                attrs.push(("enum".to_owned(), snake(enum_ref, "values")));
+                attrs.push(("enum".to_owned(), kaitai_type_id(enum_ref, "values")));
             }
             Kind::Bytes => self.bytes_attrs(field, &mut attrs),
             Kind::Opaque => self.bytes_attrs(field, &mut attrs),
@@ -173,6 +267,7 @@ impl Ctx {
                     attrs.push(("type".to_owned(), "str".to_owned()));
                     self.size_attrs(field.size.as_ref(), &mut attrs);
                     attrs.push(("encoding".to_owned(), encoding_name(*encoding).to_owned()));
+                    self.note_encoding(*encoding);
                 }
             }
             Kind::Struct { structure } => {
@@ -235,7 +330,7 @@ impl Ctx {
                         "doc".to_owned(),
                         yaml_scalar(&format!(
                             "delimited by terminator 0x{}; adjust by hand",
-                            terminator.to_hex()
+                            comment_text(&terminator.to_hex())
                         )),
                     ));
                 }
@@ -290,12 +385,13 @@ impl Ctx {
                     "type".to_owned(),
                     int_type(*width, sextant_ir::Signedness::Unsigned, *endianness),
                 ));
-                attrs.push(("enum".to_owned(), snake(enum_ref, "values")));
+                attrs.push(("enum".to_owned(), kaitai_type_id(enum_ref, "values")));
             }
             Kind::String { encoding } => {
                 attrs.push(("type".to_owned(), "str".to_owned()));
                 self.size_attrs(element.size.as_ref(), attrs);
                 attrs.push(("encoding".to_owned(), encoding_name(*encoding).to_owned()));
+                self.note_encoding(*encoding);
             }
             Kind::Bytes | Kind::Opaque => {
                 self.size_attrs(element.size.as_ref(), attrs);
@@ -333,10 +429,7 @@ impl Ctx {
 
     /// Define a named Kaitai type for a struct kind and return its name.
     fn define_type(&mut self, field: &Field, structure: &Structure) -> String {
-        let base = field
-            .name
-            .as_deref()
-            .map_or_else(|| "type".to_owned(), |name| snake(name, "type"));
+        let base = kaitai_type_id(field.name.as_deref().unwrap_or(""), "type");
         let type_name = self.alloc.allocate(&base);
         // Reserve the name before rendering the body so a recursive or repeated
         // nested type does not reuse it.
@@ -349,10 +442,7 @@ impl Ctx {
     /// Wrap an array-of-array element in a generated single-field type so Kaitai
     /// can carry the inner repeat.
     fn wrap_element(&mut self, element: &Field) -> String {
-        let base = element
-            .name
-            .as_deref()
-            .map_or_else(|| "inner".to_owned(), |name| snake(name, "inner"));
+        let base = kaitai_type_id(element.name.as_deref().unwrap_or(""), "inner");
         let type_name = self.alloc.allocate(&base);
         self.types.insert(type_name.clone(), String::new());
         let wrapper = Structure::new(vec![element.clone()]);
@@ -362,7 +452,9 @@ impl Ctx {
     }
 
     /// Human-readable notes that do not change parsing: the role, and any
-    /// constraint Kaitai does not enforce.
+    /// constraint Kaitai does not enforce. Anchor field names are IR text and
+    /// the compiler copies notes into generated comments, so they are
+    /// sanitized.
     fn field_notes(&self, field: &Field) -> Vec<String> {
         let mut notes = Vec::new();
         if let Some(role) = field.role {
@@ -373,8 +465,8 @@ impl Ctx {
                 notes.push(format!(
                     "checksum: {:?} over [{}, {})",
                     spec.algorithm,
-                    spec.covered.from.field(),
-                    spec.covered.to.field()
+                    comment_text(spec.covered.from.field().as_str()),
+                    comment_text(spec.covered.to.field().as_str())
                 ));
             }
         }
@@ -386,13 +478,13 @@ impl Ctx {
 fn render_enums(enums: &BTreeMap<String, EnumDef>) -> String {
     let mut out = String::new();
     for (name, def) in enums {
-        let _ = writeln!(out, "  {}:", snake(name, "values"));
+        let _ = writeln!(out, "  {}:", kaitai_type_id(name, "values"));
         for variant in &def.variants {
             let _ = writeln!(
                 out,
                 "    {}: {}",
                 variant.value,
-                snake(&variant.name, "value")
+                kaitai_variant_id(&variant.name)
             );
         }
     }
@@ -405,6 +497,17 @@ fn write_attrs(out: &mut String, pad: &str, id: &str, attrs: &[(String, String)]
     for (key, value) in attrs {
         let _ = writeln!(out, "{pad}  {key}: {value}");
     }
+}
+
+/// Write the zero-size attribute that fails the parse when a signed `count`
+/// expression is negative, placed immediately before the array that repeats by
+/// it so it runs exactly when the native executor checks the count.
+fn write_count_guard(out: &mut String, pad: &str, id: &str, count: &str) {
+    let _ = writeln!(out, "{pad}- id: {id}");
+    let _ = writeln!(out, "{pad}  size: 0");
+    let _ = writeln!(out, "{pad}  valid:");
+    let _ = writeln!(out, "{pad}    expr: {count} >= 0");
+    let _ = writeln!(out, "{pad}  doc: {}", yaml_scalar(COUNT_GUARD_NOTE));
 }
 
 /// The Kaitai type string for an integer, for example `u4`, `s2le`, `u1`.
@@ -662,23 +765,204 @@ mod tests {
 
     #[test]
     fn yaml_scalar_escapes_newlines_and_controls() {
+        assert_eq!(
+            yaml_scalar("it's\na\r\t\u{1}b\\"),
+            "'it''s\\na\\r\\t\\u0001b\\\\'"
+        );
         // A description carrying a newline or YAML breakout must not split the
         // scalar across lines or inject a sibling key (same class of injection
-        // the Wireshark exporter guards against for Lua string literals).
+        // the Wireshark exporter guards against for Lua string literals). The
+        // title is also sanitized like every other doc text.
         let mut format = format_of(vec![
             Field::new(Kind::Bytes, Confidence::CERTAIN)
                 .with_name("x")
                 .with_size(SizeRule::Fixed { bytes: 1 }),
         ]);
-        format.metadata.description = Some("safe\ntitle: injected\r\n\u{0001}done".to_owned());
+        format.metadata.description = Some("safe\ntitle: injected\r\n\u{0001}done */ x".to_owned());
         let ksy = export(&format);
         assert!(
-            ksy.contains("title: 'safe\\ntitle: injected\\r\\n\\u0001done'"),
-            "controls not escaped:\n{ksy}"
+            ksy.contains("title: 'safe_title: injected___done __ x'"),
+            "title not sanitized:\n{ksy}"
         );
         assert!(
             !ksy.contains("\ntitle: injected"),
             "newline injection in ksy:\n{ksy}"
         );
+    }
+
+    fn integer(name: &str, signed: Signedness) -> Field {
+        Field::new(
+            Kind::Integer {
+                width: 1,
+                signed,
+                endianness: None,
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name(name)
+    }
+
+    fn counted(count: &str) -> Field {
+        Field::new(
+            Kind::Array {
+                element: Box::new(integer("item", Signedness::Unsigned)),
+                count: CountRule::FromField {
+                    count_field: sextant_ir::FieldRef::new(count),
+                },
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name("items")
+    }
+
+    #[test]
+    fn checksum_anchor_names_cannot_close_the_generated_doc_comment() {
+        let name = "p */ throw new Error('x'); /* q\n]## quit ##[ \"\"\" --> \\u002a/";
+        let mut sum = integer("sum", Signedness::Unsigned);
+        sum.constraints.push(Constraint::Checksum {
+            spec: sextant_ir::ChecksumSpec {
+                algorithm: sextant_ir::ChecksumAlgorithm::Additive,
+                covered: sextant_ir::CoveredRange {
+                    from: sextant_ir::RangeAnchor::FieldStart {
+                        field: sextant_ir::FieldRef::new(name),
+                    },
+                    to: sextant_ir::RangeAnchor::FieldEnd {
+                        field: sextant_ir::FieldRef::new(name),
+                    },
+                },
+            },
+        });
+        let payload = Field::new(Kind::Bytes, Confidence::CERTAIN)
+            .with_name(name)
+            .with_size(SizeRule::Fixed { bytes: 1 });
+        let ksy = export(&format_of(vec![payload, sum]));
+        let doc = ksy
+            .lines()
+            .find(|line| line.contains("checksum: Additive"))
+            .expect("checksum note");
+        for forbidden in ["*/", "/*", "]##", "\"", "-->", "\\", "'x'"] {
+            assert!(!doc.contains(forbidden), "{forbidden} in {doc}");
+        }
+        assert!(doc.contains("throw new Error(_x_); __ q_"), "{doc}");
+    }
+
+    #[test]
+    fn reserved_identifiers_get_a_suffix_that_survives_camel_case() {
+        let mut enums = BTreeMap::new();
+        enums.insert(
+            "none".to_owned(),
+            EnumDef {
+                width: Some(1),
+                variants: vec![
+                    sextant_ir::EnumVariant {
+                        value: 1,
+                        name: "def".to_owned(),
+                        description: None,
+                    },
+                    sextant_ir::EnumVariant {
+                        value: 2,
+                        name: "mro".to_owned(),
+                        description: None,
+                    },
+                ],
+            },
+        );
+        let mut format = format_of(vec![
+            integer("class", Signedness::Unsigned),
+            Field::new(Kind::Bytes, Confidence::CERTAIN)
+                .with_name("body")
+                .with_size(SizeRule::Derived {
+                    length_field: sextant_ir::FieldRef::new("class"),
+                }),
+            Field::new(
+                Kind::Struct {
+                    structure: Structure::new(vec![integer("x", Signedness::Unsigned)]),
+                },
+                Confidence::CERTAIN,
+            )
+            .with_name("f4"),
+            Field::new(
+                Kind::Enum {
+                    enum_ref: "none".to_owned(),
+                    width: 1,
+                    endianness: None,
+                },
+                Confidence::CERTAIN,
+            )
+            .with_name("yes"),
+        ]);
+        format.enums = enums;
+        format.name = "true".to_owned();
+        let ksy = export(&format);
+        for expected in [
+            "  id: true_x\n",
+            "- id: class_x\n",
+            "size: class_x\n",
+            // A field may keep a built-in type name; only the type is renamed.
+            "- id: f4\n    type: f4_x\n",
+            "  f4_x:\n    seq:\n",
+            "- id: yes_x\n",
+            "enum: none_x\n",
+            "  none_x:\n    1: def_x\n    2: mro_x\n",
+        ] {
+            assert!(ksy.contains(expected), "missing {expected:?}:\n{ksy}");
+        }
+        assert!(!ksy.contains("type: f4\n"), "{ksy}");
+    }
+
+    #[test]
+    fn signed_counts_get_an_exact_guard_and_unsigned_counts_none() {
+        let ksy = export(&format_of(vec![
+            integer("count", Signedness::Signed),
+            counted("count"),
+        ]));
+        assert!(
+            ksy.contains(
+                "  - id: items_count_check\n    size: 0\n    valid:\n      expr: count >= 0\n"
+            ),
+            "{ksy}"
+        );
+        assert!(
+            ksy.find("items_count_check") < ksy.find("- id: items\n"),
+            "{ksy}"
+        );
+        let ksy = export(&format_of(vec![
+            integer("count", Signedness::Unsigned),
+            counted("count"),
+        ]));
+        assert!(!ksy.contains("count_check"), "{ksy}");
+        // A guard for an ancestor count sits in the nested type, next to the
+        // array, and references the count through the parent chain.
+        let record = Field::new(
+            Kind::Struct {
+                structure: Structure::new(vec![counted("count")]),
+            },
+            Confidence::CERTAIN,
+        )
+        .with_name("record");
+        let ksy = export(&format_of(vec![
+            integer("count", Signedness::Signed),
+            record,
+        ]));
+        assert!(ksy.contains("expr: _parent.count >= 0"), "{ksy}");
+    }
+
+    #[test]
+    fn strictly_decoded_text_is_documented_at_the_top_level() {
+        let text = |encoding| {
+            Field::new(Kind::String { encoding }, Confidence::CERTAIN)
+                .with_name("label")
+                .with_size(SizeRule::Fixed { bytes: 2 })
+        };
+        let ksy = export(&format_of(vec![text(StringEncoding::Utf8)]));
+        assert!(
+            ksy.contains(&format!("\ndoc: '{STRICT_TEXT_NOTE}'\nseq:\n")),
+            "{ksy}"
+        );
+        assert_eq!(comment_text(STRICT_TEXT_NOTE), STRICT_TEXT_NOTE);
+        assert_eq!(comment_text(COUNT_GUARD_NOTE), COUNT_GUARD_NOTE);
+        // Latin-1 maps every byte, so it cannot diverge.
+        let ksy = export(&format_of(vec![text(StringEncoding::Latin1)]));
+        assert!(!ksy.contains("\ndoc:"), "{ksy}");
     }
 }

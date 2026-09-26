@@ -36,6 +36,7 @@ pub mod crossval;
 mod imhex;
 mod kaitai;
 mod naming;
+mod reserved;
 mod wireshark;
 
 use std::fmt;
@@ -161,7 +162,22 @@ impl std::error::Error for ExportError {}
 /// including array element descriptors used in generated wrapper types.
 /// Non-Lua targets reject enum and type identifier collisions. Numeric enum
 /// dependencies in Kaitai and non-Kaitai dependencies without a stable sanitized
-/// identifier are also rejected.
+/// identifier are also rejected. Kaitai rejects enum values outside the signed
+/// 64-bit range, which its compiler cannot represent.
+///
+/// # Generated names and comments
+///
+/// IR text placed in a comment or doc string is reduced to a safe character set
+/// in every target, so no name can close the comment. Identifiers that are
+/// reserved by the target are renamed rather than emitted verbatim: Kaitai
+/// built-in types (such as `f4` or `str`), Kaitai expression keywords, YAML 1.1
+/// words such as `yes` or `null`, keywords of Python, Java, and C++, and names
+/// that clash with runtime classes or generated methods (such as Go's `Read`)
+/// get an `_x` suffix in Kaitai output, and ImHex or 010
+/// keywords and built-in names get a trailing `_`. A Kaitai array counted by a
+/// signed field is preceded by a zero-size guard that fails on a negative
+/// count, as the native executor does, and a spec that decodes ASCII, UTF-8, or
+/// UTF-16 text documents that Kaitai runtimes may decode it more strictly.
 pub fn export(format: &Format, target: ExportFormat) -> Result<String, ExportError> {
     format
         .validate()

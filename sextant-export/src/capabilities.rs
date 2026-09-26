@@ -1,6 +1,12 @@
 //! Conservative preflight for layouts and resource use of generated source.
+//!
+//! Identifier checks call the same naming functions as the renderers (including
+//! the reserved-word suffixes of [`crate::reserved`]), so a collision is judged
+//! on the exact identifiers that would be emitted.
 
-use crate::naming::{Allocator, pascal, snake};
+use crate::naming::{
+    Allocator, kaitai_type_id, kaitai_variant_id, member_id, pascal, snake, type_id,
+};
 use crate::{ExportError, ExportFormat};
 use sextant_ir::{
     Constraint, CountRule, Field, FieldOffset, Format, Kind, SizeRule, StringEncoding, Structure,
@@ -30,6 +36,19 @@ pub(crate) fn check(format: &Format, target: ExportFormat) -> Result<(), ExportE
             text = text
                 .saturating_add(variant.name.len())
                 .saturating_add(variant.description.as_ref().map_or(0, String::len));
+            // The Kaitai compiler reads enum keys as signed 64-bit integers and
+            // rejects anything larger, including an 8-byte unsigned value above
+            // i64::MAX. No other spelling (hex, or a negative two's complement
+            // alias, which Python would never match) is equivalent.
+            if target == ExportFormat::Kaitai && i64::try_from(variant.value).is_err() {
+                return Err(ExportError::Unsupported {
+                    format: target,
+                    detail: format!(
+                        "enum value {} does not fit the signed 64-bit range of Kaitai enum keys",
+                        variant.value
+                    ),
+                });
+            }
         }
     }
     if text > MAX_TEXT_BYTES {
@@ -126,10 +145,16 @@ impl<'a> Check<'a> {
             {
                 return Err(self.error("field name exceeds the source-data budget"));
             }
-            let id = field.name.as_deref().map_or_else(
-                || format!("field_{index}"),
-                |name| snake(name, &format!("field_{index}")),
-            );
+            let fallback = format!("field_{index}");
+            let id = match (field.name.as_deref(), self.target) {
+                (None, _) => fallback,
+                // Template members carry their reserved-word suffix, exactly
+                // as the ImHex and 010 renderers emit them.
+                (Some(name), ExportFormat::ImHex | ExportFormat::Bt) => {
+                    member_id(self.target, name, &fallback)
+                }
+                (Some(name), _) => snake(name, &fallback),
+            };
             if !ids.insert(id.clone()) && self.target != ExportFormat::Kaitai {
                 return Err(self.error("field names collide after identifier sanitization"));
             }
@@ -358,8 +383,8 @@ fn check_type_names(format: &Format, target: ExportFormat) -> Result<(), ExportE
     let mut global_variants = BTreeSet::new();
     for (name, def) in &format.enums {
         let id = match target {
-            ExportFormat::Kaitai => pascal(&snake(name, "values"), "Values"),
-            _ => pascal(name, "Enum"),
+            ExportFormat::Kaitai => pascal(&kaitai_type_id(name, "values"), "Values"),
+            _ => type_id(target, name, "Enum"),
         };
         if !reserved.insert(id) {
             return Err(error());
@@ -367,8 +392,8 @@ fn check_type_names(format: &Format, target: ExportFormat) -> Result<(), ExportE
         let mut variants = BTreeSet::new();
         for variant in &def.variants {
             let id = match target {
-                ExportFormat::Kaitai => snake(&variant.name, "value"),
-                _ => pascal(&variant.name, "VALUE"),
+                ExportFormat::Kaitai => kaitai_variant_id(&variant.name),
+                _ => type_id(target, &variant.name, "VALUE"),
             };
             if !variants.insert(id.clone())
                 || (target == ExportFormat::Bt && !global_variants.insert(id))
@@ -405,10 +430,12 @@ struct TypeNames {
 
 impl TypeNames {
     fn reserve(&mut self, name: &str, fallback: &str) -> Result<(), ExportError> {
+        // Built-in type names and keywords receive the same suffix here as in
+        // the renderers, before the allocator adds any numeric suffix.
         let base = if self.target == ExportFormat::Kaitai {
-            snake(name, fallback)
+            kaitai_type_id(name, fallback)
         } else {
-            pascal(name, fallback)
+            type_id(self.target, name, fallback)
         };
         let id = self.alloc.allocate(&base);
         // Kaitai types and enums share the generated class namespace.

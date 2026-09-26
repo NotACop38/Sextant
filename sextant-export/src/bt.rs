@@ -9,6 +9,12 @@
 //!
 //! Constructs 010 does not enforce (a constant, a checksum) are recorded as
 //! comments; the structure still parses.
+//!
+//! A member or root variable named like a C or 010 keyword or a built-in type,
+//! and a typedef, enum, or enum constant that would spell a global 010 name
+//! (such as `DWORD` or the `FileSize` function the template calls), gets a
+//! trailing underscore, and every reference uses the same spelling (see
+//! [`crate::reserved`]). IR text in comments passes through [`comment_text`].
 
 use std::fmt::Write as _;
 
@@ -17,7 +23,11 @@ use sextant_ir::{
     Structure,
 };
 
-use crate::naming::{Allocator, comment_text, pascal, snake};
+use crate::ExportFormat;
+use crate::naming::{Allocator, comment_text, member_id, type_id};
+
+/// The target whose reserved words these identifiers avoid.
+const TARGET: ExportFormat = ExportFormat::Bt;
 
 /// Render `format` as a complete 010 Editor `.bt` template.
 #[must_use]
@@ -31,14 +41,14 @@ pub(crate) fn export(format: &Format) -> String {
     // Enums first; they are referenced by member type.
     let mut enum_defs = String::new();
     for (name, def) in &format.enums {
-        let type_name = pascal(name, "Enum");
+        let type_name = type_id(TARGET, name, "Enum");
         let underlying = bt_int(def.width.unwrap_or(4), Signedness::Unsigned);
         let _ = writeln!(enum_defs, "typedef enum <{underlying}> {{");
         let mut variants = Vec::new();
         for variant in &def.variants {
             variants.push(format!(
                 "    {} = {}",
-                pascal(&variant.name, "VALUE"),
+                type_id(TARGET, &variant.name, "VALUE"),
                 variant.value
             ));
         }
@@ -48,7 +58,7 @@ pub(crate) fn export(format: &Format) -> String {
 
     // Render the root body, which appends any dependency typedefs to `defs`.
     let root_body = ctx.render_body(&format.root, 1);
-    let root_var = snake(&format.name, "file");
+    let root_var = member_id(TARGET, &format.name, "file");
 
     let mut out = String::new();
     out.push_str("//------------------------------------------------\n");
@@ -79,7 +89,7 @@ impl Ctx {
     /// Define a `typedef struct` for `structure`, emitting dependency typedefs
     /// first, and return its name.
     fn define_struct(&mut self, name_hint: &str, fallback: &str, structure: &Structure) -> String {
-        let type_name = self.alloc.allocate(&pascal(name_hint, fallback));
+        let type_name = self.alloc.allocate(&type_id(TARGET, name_hint, fallback));
         let body = self.render_body(structure, 1);
         let block = format!("typedef struct {{\n{body}}} {type_name};\n");
         self.defs.push(block);
@@ -124,7 +134,7 @@ impl Ctx {
                 lines.push(format!("{} {name};", bt_int(*width, *signed)));
             }
             Kind::Enum { enum_ref, .. } => {
-                lines.push(format!("{} {name};", pascal(enum_ref, "Enum")));
+                lines.push(format!("{} {name};", type_id(TARGET, enum_ref, "Enum")));
             }
             Kind::Bytes | Kind::Opaque => {
                 lines.push(format!(
@@ -172,7 +182,7 @@ impl Ctx {
                 structure,
             ),
             Kind::Integer { width, signed, .. } => bt_int(*width, *signed),
-            Kind::Enum { enum_ref, .. } => pascal(enum_ref, "Enum"),
+            Kind::Enum { enum_ref, .. } => type_id(TARGET, enum_ref, "Enum"),
             Kind::Bytes | Kind::Opaque | Kind::String { .. } | Kind::Array { .. } => {
                 let wrapper = Structure::new(vec![element.clone()]);
                 self.define_struct(
@@ -187,7 +197,7 @@ impl Ctx {
             CountRule::Fixed { count } => vec![format!("{element_type} {name}[{count}];")],
             CountRule::FromField { count_field } => vec![format!(
                 "{element_type} {name}[{}];",
-                snake(count_field.as_str(), "count")
+                member_id(TARGET, count_field.as_str(), "count")
             )],
             CountRule::ToEnd => vec![
                 "while(!FEof()) {".to_owned(),
@@ -197,7 +207,7 @@ impl Ctx {
             CountRule::BoundedBy { length_field } => vec![
                 format!(
                     "local int64 _{name}_end = FTell() + {};",
-                    snake(length_field.as_str(), "len")
+                    member_id(TARGET, length_field.as_str(), "len")
                 ),
                 format!("while(FTell() < _{name}_end) {{"),
                 format!("    {element_type} {name};"),
@@ -224,7 +234,7 @@ impl Ctx {
         match size {
             Some(SizeRule::Fixed { bytes }) => format!("[{bytes}]"),
             Some(SizeRule::Derived { length_field }) => {
-                format!("[{}]", snake(length_field.as_str(), "len"))
+                format!("[{}]", member_id(TARGET, length_field.as_str(), "len"))
             }
             Some(SizeRule::ToEnd) | None => "[FileSize() - FTell()]".to_owned(),
             Some(SizeRule::Delimited { terminator, .. }) => {
@@ -241,9 +251,12 @@ impl Ctx {
             Some(SizeRule::Fixed { bytes }) => format!("[{}]", bytes / divisor.max(1)),
             Some(SizeRule::Derived { length_field }) => {
                 if divisor <= 1 {
-                    format!("[{}]", snake(length_field.as_str(), "len"))
+                    format!("[{}]", member_id(TARGET, length_field.as_str(), "len"))
                 } else {
-                    format!("[{} / {divisor}]", snake(length_field.as_str(), "len"))
+                    format!(
+                        "[{} / {divisor}]",
+                        member_id(TARGET, length_field.as_str(), "len")
+                    )
                 }
             }
             Some(SizeRule::ToEnd) | None | Some(SizeRule::Delimited { .. }) => {
@@ -316,7 +329,7 @@ fn checksum_comment(field: &Field) -> Option<String> {
 /// The member identifier for a field, synthesizing one when unnamed.
 fn member_name(field: &Field, index: usize) -> String {
     match &field.name {
-        Some(name) => snake(name, &format!("field_{index}")),
+        Some(name) => member_id(TARGET, name, &format!("field_{index}")),
         None => format!("field_{index}"),
     }
 }
