@@ -8,7 +8,9 @@
 //!   typed fixed layout;
 //! - **remaining**: a size field measures the bytes from a header boundary to
 //!   the end (a RIFF or BMP size), optionally followed by a fixed trailer that
-//!   may verify as a checksum (FR-9, FR-10);
+//!   may verify as a checksum (FR-9, FR-10). The governed region is proposed
+//!   as an opaque payload and, when a nested section inferred over it
+//!   verifies, as a sized struct holding that nested structure;
 //! - **counted**: a count field gives the number of fixed-size records that
 //!   fill the sample, and the records are typed from every record pooled
 //!   together;
@@ -56,8 +58,12 @@ use crate::stats::shannon_entropy;
 /// structured. Compressed or encrypted data sits near eight; plain records sit
 /// well below.
 const OPAQUE_ENTROPY: f64 = 6.5;
-/// The deepest nesting of sections the sequential family infers recursively.
+/// The deepest nesting of sections inferred recursively (a sequential
+/// family's following section, or a governed body).
 const MAX_SECTION_DEPTH: usize = 3;
+/// How many governed bodies one section types by nested inference, which
+/// bounds the extra inference work a section can cause.
+const MAX_TYPED_BODIES: usize = 2;
 /// The most chunk layouts turned into candidates.
 const MAX_CHUNK_CANDIDATES: usize = 12;
 /// The most sequential layouts turned into candidates per section.
@@ -291,7 +297,7 @@ impl<'a> Section<'a> {
         if self.rows.len() >= 2 && self.min_len > 0 {
             let relations = detect_int_fields(&self.rows);
             out.extend(self.fixed());
-            out.extend(self.remaining(&relations));
+            out.extend(self.remaining(&relations, limits));
             out.extend(self.counted(&relations));
             out.extend(self.sequential(&relations, limits));
             out.extend(self.chunked(&relations, limits));
@@ -366,8 +372,14 @@ impl<'a> Section<'a> {
     }
 
     /// A size field measures the region from a header boundary to the end.
-    fn remaining(&self, relations: &[IntField]) -> Vec<Proposal> {
+    ///
+    /// The region is proposed as an opaque payload and, when a nested section
+    /// inferred over the regions verifies, also as a sized struct holding that
+    /// nested structure, so a container's body (a RIFF form, a bitmap's pixel
+    /// header) is typed rather than left opaque whenever that verifies.
+    fn remaining(&self, relations: &[IntField], limits: &Limits) -> Vec<Proposal> {
         let mut out = Vec::new();
+        let mut typed = 0;
         for found in self.distinct_relations(relations) {
             let IntRelation::Remaining { start, trailing } = found.relation else {
                 continue;
@@ -388,11 +400,13 @@ impl<'a> Section<'a> {
                 .map(|row| &row[start..row.len() - trailing])
                 .collect();
             let payload_name = namer.name("payload");
+            let size = SizeRule::Derived {
+                length_field: FieldRef::new(size_name),
+            };
+            let payload_index = fields.len();
             fields.push(region_field(
                 &payload_name,
-                SizeRule::Derived {
-                    length_field: FieldRef::new(size_name),
-                },
+                size.clone(),
                 &regions,
                 self.total(),
                 "region sized by the length field",
@@ -407,6 +421,21 @@ impl<'a> Section<'a> {
                     &payload_name,
                     &mut namer,
                 ));
+            }
+
+            // The typed body replaces the opaque payload in place. It keeps the
+            // payload's name and extent, so a trailer checksum anchored to the
+            // payload covers the same bytes.
+            let body = (typed < MAX_TYPED_BODIES)
+                .then(|| self.best_nested(&regions, limits))
+                .flatten()
+                .filter(|nested| nested.family != "opaque");
+            if let Some(nested) = body {
+                typed += 1;
+                let mut typed_fields = fields.clone();
+                typed_fields[payload_index] =
+                    body_field(&payload_name, size, nested.fields, self.total());
+                out.push(proposal("remaining-typed", typed_fields, header.big_endian));
             }
             out.push(proposal("remaining", fields, header.big_endian));
         }
@@ -654,29 +683,8 @@ impl<'a> Section<'a> {
     /// Infer the section that follows a marker and return its best fully
     /// verified hypothesis's fields, or an opaque tail when none verifies.
     fn infer_tail(&self, tails: &[&[u8]], limits: &Limits) -> Vec<Field> {
-        let tail_bytes: usize = tails.iter().map(|tail| tail.len()).sum();
-        if self.depth + 1 < MAX_SECTION_DEPTH && tail_bytes <= MAX_TAIL_BYTES {
-            let section = Section::new(tails, self.depth + 1);
-            let mut best: Option<(Score, Proposal)> = None;
-            for proposal in section.propose(limits) {
-                let format = proposal.clone().into_format();
-                if format.validate().is_err() {
-                    continue;
-                }
-                let score = score_with(&format, tails, limits, ScoreWeights::default());
-                if !score.fully_verified() {
-                    continue;
-                }
-                let better = best.as_ref().is_none_or(|(current, _)| {
-                    total_order(score.structure, current.structure).is_gt()
-                });
-                if better {
-                    best = Some((score, proposal));
-                }
-            }
-            if let Some((_, proposal)) = best {
-                return proposal.fields;
-            }
+        if let Some(nested) = self.best_nested(tails, limits) {
+            return nested.fields;
         }
         let name = format!("{}tail", self.prefix);
         vec![region_field(
@@ -686,6 +694,35 @@ impl<'a> Section<'a> {
             self.total(),
             "section after the governed regions",
         )]
+    }
+
+    /// Infer `regions` (one slice per row) as a nested section and return its
+    /// best fully verified hypothesis by structure, or `None` when nothing
+    /// verifies or the nesting depth or byte budget is spent.
+    fn best_nested(&self, regions: &[&[u8]], limits: &Limits) -> Option<Proposal> {
+        let bytes: usize = regions.iter().map(|region| region.len()).sum();
+        if self.depth + 1 >= MAX_SECTION_DEPTH || bytes > MAX_TAIL_BYTES {
+            return None;
+        }
+        let section = Section::new(regions, self.depth + 1);
+        let mut best: Option<(Score, Proposal)> = None;
+        for proposal in section.propose(limits) {
+            let format = proposal.clone().into_format();
+            if format.validate().is_err() {
+                continue;
+            }
+            let score = score_with(&format, regions, limits, ScoreWeights::default());
+            if !score.fully_verified() {
+                continue;
+            }
+            let better = best
+                .as_ref()
+                .is_none_or(|(current, _)| total_order(score.structure, current.structure).is_gt());
+            if better {
+                best = Some((score, proposal));
+            }
+        }
+        best.map(|(_, proposal)| proposal)
     }
 
     /// A repeating length-prefixed record array. Layouts with more records
@@ -1210,10 +1247,11 @@ fn invariant_prefix(rows: &[&[u8]]) -> usize {
 }
 
 /// The length of the leading signature: an invariant printable prefix of at
-/// least three characters, up to where the text ends; else the whole invariant
-/// prefix when it is two to eight bytes; else four bytes of a longer invariant
-/// run, since a signature is rarely longer and the rest is usually constant
-/// header fields.
+/// least three characters, up to where the text ends (at most eight), or only
+/// its first four-character code when the text is a run of such codes, as the
+/// header segmentation splits them; else the whole invariant prefix when it is
+/// two to eight bytes; else four bytes of a longer invariant run, since a
+/// signature is rarely longer and the rest is usually constant header fields.
 fn magic_len(rows: &[&[u8]], invariant: usize) -> usize {
     if invariant < 2 {
         return 0;
@@ -1222,7 +1260,9 @@ fn magic_len(rows: &[&[u8]], invariant: usize) -> usize {
         .iter()
         .take_while(|&&byte| (0x20..0x7f).contains(&byte))
         .count();
-    if text >= 3 {
+    if text >= 8 && text % 4 == 0 {
+        4
+    } else if text >= 3 {
         text.min(8)
     } else if invariant <= 8 {
         invariant
@@ -1858,6 +1898,29 @@ fn region_field(name: &str, size: SizeRule, rows: &[&[u8]], total: usize, note: 
     }
 }
 
+/// A governed body typed by nested inference: a struct holding the nested
+/// hypothesis's fields, bounded to the region its size rule gives.
+fn body_field(name: &str, size: SizeRule, fields: Vec<Field>, total: usize) -> Field {
+    Field {
+        name: Some(name.to_owned()),
+        kind: Kind::Struct {
+            structure: Structure::new(fields),
+        },
+        size: Some(size),
+        offset: None,
+        role: Some(Role::Payload),
+        constraints: Vec::new(),
+        confidence: Confidence::clamped(0.6),
+        evidence: evidence(
+            total,
+            &[
+                "region sized by the length field",
+                "typed by inferring the region as a nested section",
+            ],
+        ),
+    }
+}
+
 fn entropy_of(rows: &[&[u8]]) -> f64 {
     let bytes: Vec<u8> = rows.iter().flat_map(|row| row.iter().copied()).collect();
     shannon_entropy(&bytes)
@@ -2066,16 +2129,32 @@ mod tests {
         let candidates = infer_candidates(&samples, &limits());
         let best = &candidates[0];
         assert!(best.score.fully_verified());
-        let size = best
-            .format
-            .root
-            .fields
+        assert_eq!(best.format.name, "candidate-remaining-typed");
+        let fields = &best.format.root.fields;
+        let size = fields
             .iter()
             .find(|field| field.role == Some(Role::Length))
             .expect("the size field is recognized as a length");
         assert!(matches!(size.kind, Kind::Integer { width: 4, .. }));
-        // The layout that encodes the size as a verified relationship is
-        // always proposed, with the size governing the rest of the sample.
+        // The size governs a body typed as a sized struct: the second tag is a
+        // verified constant inside it, not part of an opaque payload.
+        let body = fields.last().expect("a body");
+        assert!(
+            matches!(&body.size, Some(SizeRule::Derived { length_field }) if Some(length_field.as_str()) == size.name.as_deref())
+        );
+        let Kind::Struct { structure } = &body.kind else {
+            panic!("the body is a sized struct: {body:#?}");
+        };
+        assert!(
+            structure.fields[0]
+                .constraints
+                .iter()
+                .any(|constraint| matches!(
+                    constraint,
+                    Constraint::Constant { value } if value.as_slice() == b"WAVE"
+                ))
+        );
+        // The layout with an opaque payload is still proposed.
         let governed = candidates
             .iter()
             .find(|candidate| candidate.format.name == "candidate-remaining")
