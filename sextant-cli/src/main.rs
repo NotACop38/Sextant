@@ -279,9 +279,7 @@ fn report_parse_outcome(error: &clap::Error) -> ExitCode {
     if error.use_stderr() {
         // The message can quote the offending argument, so it is rendered as
         // plain text and escaped line by line before it reaches the terminal.
-        let text = error.to_string();
-        let lines: Vec<Cow<'_, str>> = text.split('\n').map(escape_untrusted).collect();
-        eprint!("{}", lines.join("\n"));
+        eprint!("{}", escape_lines(&error.to_string()));
         ExitCode::from(EXIT_USAGE_ERROR)
     } else {
         // Help and version text is Sextant's own; a closed stream is not an
@@ -300,6 +298,16 @@ fn report_parse_outcome(error: &clap::Error) -> ExitCode {
 /// non-ASCII text, is kept as is.
 fn escape_untrusted(text: &str) -> Cow<'_, str> {
     sextant_engine::text::escape_for_display(text)
+}
+
+/// Escape a multi-line message line by line, so it keeps its layout while
+/// every line is safe to display. Error messages can quote file names, report
+/// contents, and external tool output, all of which are untrusted.
+fn escape_lines(text: &str) -> String {
+    text.split('\n')
+        .map(escape_untrusted)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Run the accuracy benchmark over the ground-truth corpus and print the results
@@ -331,7 +339,10 @@ fn run_bench(corpus: Option<&str>, out: Option<&str>, force: bool) -> ExitCode {
     let report = match bench::run_benchmark(&options) {
         Ok(report) => report,
         Err(error) => {
-            eprintln!("sextant bench: could not evaluate the corpus: {error}");
+            eprintln!(
+                "sextant bench: could not evaluate the corpus: {}",
+                escape_lines(&error.to_string())
+            );
             return ExitCode::from(EXIT_INPUT_ERROR);
         }
     };
@@ -341,11 +352,15 @@ fn run_bench(corpus: Option<&str>, out: Option<&str>, force: bool) -> ExitCode {
     if let Some(path) = out {
         match report.to_json() {
             Ok(json) => {
+                let shown = escape_untrusted(path);
                 if let Err(error) = write_output_file(path, format!("{json}\n").as_bytes(), force) {
-                    eprintln!("sextant bench: could not write results to {path}: {error}");
+                    eprintln!(
+                        "sextant bench: could not write results to {shown}: {}",
+                        escape_untrusted(&error.to_string())
+                    );
                     return ExitCode::from(EXIT_INPUT_ERROR);
                 }
-                outln!("\nWrote machine-readable results to {path}");
+                outln!("\nWrote machine-readable results to {shown}");
             }
             Err(error) => {
                 eprintln!("sextant bench: could not serialize results: {error}");
@@ -802,14 +817,18 @@ fn run_inspect(
     let report = match load_report(report_path) {
         Ok(report) => report,
         Err(error) => {
-            eprintln!("sextant inspect: {error}");
+            eprintln!("sextant inspect: {}", escape_lines(&error));
             return ExitCode::from(EXIT_INPUT_ERROR);
         }
     };
     let sample = match read_capped(sample_path, max_bytes_per_sample) {
         Ok(bytes) => bytes,
         Err(error) => {
-            eprintln!("sextant inspect: could not read sample {sample_path}: {error}");
+            eprintln!(
+                "sextant inspect: could not read sample {}: {}",
+                escape_untrusted(sample_path),
+                escape_untrusted(&error.to_string())
+            );
             return ExitCode::from(EXIT_INPUT_ERROR);
         }
     };
@@ -842,7 +861,8 @@ fn run_export(
 ) -> ExitCode {
     let Some(target) = ExportFormat::parse(format_name) else {
         eprintln!(
-            "sextant export: unknown format `{format_name}`. Use one of: kaitai, imhex, wireshark, 010."
+            "sextant export: unknown format `{}`. Use one of: kaitai, imhex, wireshark, 010.",
+            escape_untrusted(format_name)
         );
         return ExitCode::from(EXIT_EXPORT_ERROR);
     };
@@ -850,7 +870,7 @@ fn run_export(
     let report = match load_report(report_path) {
         Ok(report) => report,
         Err(error) => {
-            eprintln!("sextant export: {error}");
+            eprintln!("sextant export: {}", escape_lines(&error));
             return ExitCode::from(EXIT_INPUT_ERROR);
         }
     };
@@ -858,18 +878,22 @@ fn run_export(
     let parser = match export(&report.format, target) {
         Ok(parser) => parser,
         Err(error) => {
-            eprintln!("sextant export: {error}");
+            eprintln!("sextant export: {}", escape_lines(&error.to_string()));
             return ExitCode::from(EXIT_EXPORT_ERROR);
         }
     };
 
     match out {
         Some(path) => {
+            let shown = escape_untrusted(path);
             if let Err(error) = write_output_file(path, parser.as_bytes(), force) {
-                eprintln!("sextant export: could not write {path}: {error}");
+                eprintln!(
+                    "sextant export: could not write {shown}: {}",
+                    escape_untrusted(&error.to_string())
+                );
                 return ExitCode::from(EXIT_EXPORT_ERROR);
             }
-            outln!("Wrote {target} parser to {path}");
+            outln!("Wrote {target} parser to {shown}");
         }
         None => out!("{parser}"),
     }
@@ -894,7 +918,11 @@ fn run_cross_validate(report: &Report, target: ExportFormat, dir: &str) -> Optio
     let samples = match read_sample_dir(dir) {
         Ok(samples) => samples,
         Err(error) => {
-            eprintln!("sextant export: could not read samples from {dir}: {error}");
+            eprintln!(
+                "sextant export: could not read samples from {}: {}",
+                escape_untrusted(dir),
+                escape_untrusted(&error.to_string())
+            );
             return Some(ExitCode::from(EXIT_INPUT_ERROR));
         }
     };
@@ -904,11 +932,14 @@ fn run_cross_validate(report: &Report, target: ExportFormat, dir: &str) -> Optio
             None
         }
         sextant_export::crossval::CrossValidation::Skipped { reason } => {
-            outln!("Cross-validation: skipped ({reason}).");
+            outln!("Cross-validation: skipped ({}).", escape_lines(&reason));
             None
         }
         sextant_export::crossval::CrossValidation::Failed { detail } => {
-            eprintln!("sextant export: cross-validation failed: {detail}");
+            eprintln!(
+                "sextant export: cross-validation failed: {}",
+                escape_lines(&detail)
+            );
             Some(ExitCode::from(EXIT_EXPORT_ERROR))
         }
     }

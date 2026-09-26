@@ -799,6 +799,12 @@ impl<'a> Section<'a> {
                     .evidence
                     .notes
                     .push("value equals the number of records that follow".to_owned());
+                // Nothing references a generically named piece, so it can be
+                // named for the role it now has.
+                let generic = format!("{}field_{offset}", self.prefix);
+                if field.name.as_deref() == Some(generic.as_str()) {
+                    field.name = Some(namer.name("count"));
+                }
             }
         }
 

@@ -68,6 +68,19 @@ fn infer_produces_a_scored_field_map_on_every_corpus_format() {
 }
 
 #[test]
+fn a_header_field_that_counts_the_records_is_named_for_its_role() {
+    let report = infer(&ingest_corpus("tlv"), &InferenceOptions::default());
+    let count = report
+        .format
+        .root
+        .fields
+        .iter()
+        .find(|field| field.role == Some(sextant_ir::Role::Count))
+        .expect("the TLV record count is found");
+    assert_eq!(count.name.as_deref(), Some("count"));
+}
+
+#[test]
 fn refinement_history_only_records_non_regressing_changes() {
     // Whatever the loop accepts, every recorded step must strictly improve the
     // verified score: the non-regression invariant (FR-26, FR-28).
