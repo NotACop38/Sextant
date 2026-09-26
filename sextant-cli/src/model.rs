@@ -34,16 +34,18 @@ pub(crate) struct Model {
 impl Model {
     /// Resolve and build the requested provider, reading its credential and
     /// settings from the environment or the Sextant config file, never from a
-    /// flag (FR-40).
+    /// flag (FR-40). When `SEXTANT_MODEL_CACHE_DIR` is set, responses are
+    /// cached there and a repeated request makes no provider call (NFR-6).
     ///
     /// # Errors
     ///
     /// Returns a message for an unknown provider, a missing credential or
-    /// model, an unusable config file, or an invalid setting.
+    /// model, an unusable config file, an invalid setting, or a cache
+    /// directory that cannot hold entries.
     pub(crate) fn prepare(request: &ModelRequest<'_>) -> Result<Self, String> {
         use sextant_llm::{
-            CallLimits, LlmClient, ProviderKind, build_provider, default_secret_source,
-            resolve_provider,
+            CallLimits, EnvSource as _, LlmClient, MODEL_CACHE_DIR_ENV, ProviderKind,
+            ResponseCache, build_provider, default_secret_source, resolve_provider,
         };
         let kind: ProviderKind = request
             .provider
@@ -58,10 +60,18 @@ impl Model {
         let kind = resolve_provider(Some(kind), &env).map_err(|error| error.to_string())?;
         let provider =
             build_provider(kind, request.model, &env).map_err(|error| error.to_string())?;
-        let client = LlmClient::new(provider).with_limits(CallLimits {
+        let mut client = LlmClient::new(provider).with_limits(CallLimits {
             max_calls: Some(request.max_calls),
             budget: None,
         });
+        if let Some(dir) = env
+            .get(MODEL_CACHE_DIR_ENV)
+            .filter(|dir| !dir.trim().is_empty())
+        {
+            let cache = ResponseCache::new(dir);
+            cache.prepare().map_err(|error| error.to_string())?;
+            client = client.with_cache(cache);
+        }
         Ok(Self { client })
     }
 

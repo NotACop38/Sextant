@@ -33,6 +33,13 @@ pub const ANTHROPIC_EFFORT_ENV: &str = "SEXTANT_ANTHROPIC_EFFORT";
 /// Anthropic model within the same call.
 pub const ANTHROPIC_FALLBACKS_ENV: &str = "SEXTANT_ANTHROPIC_FALLBACKS";
 
+/// Setting naming a directory for the on-disk model response cache (NFR-6,
+/// NFR-9). Each entry is keyed by a hash of the exact request, so repeating a
+/// run replays the cached answer without a provider call. It is unset by
+/// default: cached requests and responses can echo sample bytes, so nothing is
+/// written to disk unless the user asks for it.
+pub const MODEL_CACHE_DIR_ENV: &str = "SEXTANT_MODEL_CACHE_DIR";
+
 /// The largest config file Sextant reads. A `KEY=VALUE` secrets file is tiny,
 /// so anything larger is a mistake or an attack, not configuration.
 pub const MAX_CONFIG_FILE_BYTES: u64 = 64 * 1024;

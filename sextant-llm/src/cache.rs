@@ -120,6 +120,21 @@ impl ResponseCache {
         &self.root
     }
 
+    /// Create the cache directory now instead of on the first write, and check
+    /// that it can hold entries: it must be a real directory, not a symlink,
+    /// and on Unix it must accept owner-only permissions. Call this before the
+    /// first provider request so a misconfigured cache fails before a billed
+    /// call rather than after it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LlmError::Cache`] when the directory cannot be created or
+    /// inspected, is a symlink or not a directory, or cannot be restricted to
+    /// its owner.
+    pub fn prepare(&self) -> Result<(), LlmError> {
+        self.prepare_root()
+    }
+
     /// Create the cache root if needed, refuse a root that is a symlink or not
     /// a directory, and restrict it to its owner on Unix.
     fn prepare_root(&self) -> Result<(), LlmError> {
@@ -489,6 +504,31 @@ mod tests {
         let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
         // The rewrite must drop the inherited group and world read bits.
         assert_eq!(mode, 0o600, "entry kept a broad mode: {mode:o}");
+    }
+
+    #[test]
+    fn prepare_creates_the_directory_up_front_and_refuses_a_file() {
+        let dir = TempDir::new("prepare");
+        let cache = ResponseCache::new(dir.0.join("nested").join("cache"));
+        cache.prepare().expect("create the cache directory");
+        assert!(is_real_directory(cache.root()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(cache.root())
+                .expect("stat the cache directory")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "cache directory mode was {mode:o}");
+        }
+
+        let file = dir.0.join("occupied");
+        std::fs::write(&file, b"x").expect("write a plain file");
+        let error = ResponseCache::new(&file)
+            .prepare()
+            .expect_err("a file cannot hold entries");
+        assert!(matches!(error, LlmError::Cache(_)), "{error}");
     }
 
     #[test]

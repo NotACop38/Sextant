@@ -86,7 +86,7 @@ fn write_stdout(text: std::fmt::Arguments<'_>) {
 }
 
 /// Infer the structure of unknown binary formats and protocols from samples,
-/// then emit parsers verified against those samples.
+/// verify it natively against them, and export parser specifications.
 #[derive(Debug, Parser)]
 #[command(name = "sextant", version, about, long_about = None)]
 struct Cli {
@@ -167,7 +167,7 @@ enum Command {
         #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_BYTES_PER_SAMPLE)]
         max_bytes_per_sample: usize,
     },
-    /// Export a verified parser from a report (FR-36, FR-37).
+    /// Export a parser specification from a report (FR-36, FR-37).
     Export {
         /// Report produced by `sextant infer`.
         #[arg(value_name = "REPORT")]

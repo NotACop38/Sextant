@@ -48,8 +48,8 @@ pub use cache::{CACHE_FORMAT_VERSION, ResponseCache, request_key};
 pub use client::{Backoff, CallLimits, DEFAULT_MAX_CALLS, LlmClient, MAX_RETRY_AFTER, Pricing};
 pub use config::{
     ANTHROPIC_EFFORT_ENV, ANTHROPIC_FALLBACKS_ENV, ConfigFileSource, EnvSource, LayeredEnv,
-    MAX_CONFIG_FILE_BYTES, ProcessEnv, ProviderKind, SEXTANT_CONFIG_ENV, default_secret_source,
-    detect_available, resolve_provider,
+    MAX_CONFIG_FILE_BYTES, MODEL_CACHE_DIR_ENV, ProcessEnv, ProviderKind, SEXTANT_CONFIG_ENV,
+    default_secret_source, detect_available, resolve_provider,
 };
 pub use error::LlmError;
 pub use factory::{ANTHROPIC_BASE_URL_ENV, OPENAI_BASE_URL_ENV, build_provider};

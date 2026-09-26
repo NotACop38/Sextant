@@ -47,6 +47,7 @@ fn run_in(dir: &PathBuf, args: &[&str], vars: &[(&str, &str)]) -> Output {
         "OPENAI_BASE_URL",
         "OLLAMA_HOST",
         "SEXTANT_CONFIG",
+        "SEXTANT_MODEL_CACHE_DIR",
     ] {
         command.env_remove(key);
     }
@@ -293,6 +294,96 @@ fn a_failed_model_call_is_recorded_and_the_verified_result_stands() {
     let usage = &report["metadata"]["model"];
     assert_eq!(usage["accepted"], 0);
     assert!(usage["error"].is_string(), "{usage}");
+}
+
+#[cfg(feature = "llm")]
+#[test]
+fn a_cached_response_answers_a_repeated_run_without_a_request() {
+    let dir = scratch("cache");
+    let proposal = serde_json::json!({
+        "format_family": "tlv",
+        "fields": [{"index": 0, "name": "signature", "role": "magic"}]
+    });
+    let (base_url, requests) = fake_server(message(&proposal.to_string()));
+    let tlv = corpus_dir("tlv/samples");
+    let cache = dir.join("model-cache");
+    let run = |report: &str| {
+        run_in(
+            &dir,
+            &[
+                "infer",
+                tlv.to_str().unwrap(),
+                "--provider",
+                "anthropic",
+                "--out",
+                report,
+            ],
+            &[
+                ("ANTHROPIC_API_KEY", "sk-ant-test"),
+                ("ANTHROPIC_BASE_URL", &base_url),
+                ("SEXTANT_MODEL_CACHE_DIR", cache.to_str().unwrap()),
+            ],
+        )
+    };
+    let read = |name: &str| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(dir.join(name)).expect("report written"))
+            .expect("report JSON")
+    };
+
+    let first = run("first.json");
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    requests
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the first run called the provider");
+
+    let second = run("second.json");
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(
+        requests.recv_timeout(Duration::from_millis(300)).is_err(),
+        "the repeated run called the provider despite the cache"
+    );
+    let (first, second) = (read("first.json"), read("second.json"));
+    assert_eq!(first["metadata"]["model"]["calls"], 1);
+    assert_eq!(second["metadata"]["model"]["calls"], 0);
+    assert_eq!(second["metadata"]["model"]["accepted"], 1);
+    assert_eq!(
+        first["format"], second["format"],
+        "the cached answer reproduces the result"
+    );
+}
+
+#[cfg(feature = "llm")]
+#[test]
+fn an_unusable_cache_directory_fails_before_any_request() {
+    let dir = scratch("bad-cache");
+    let (base_url, requests) = fake_server(message("{}"));
+    let blocker = dir.join("not-a-directory");
+    std::fs::write(&blocker, b"occupied").expect("write a plain file");
+    let tlv = corpus_dir("tlv/samples");
+    let output = run_in(
+        &dir,
+        &["infer", tlv.to_str().unwrap(), "--provider", "anthropic"],
+        &[
+            ("ANTHROPIC_API_KEY", "sk-ant-test"),
+            ("ANTHROPIC_BASE_URL", &base_url),
+            ("SEXTANT_MODEL_CACHE_DIR", blocker.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cache"), "{stderr}");
+    assert!(
+        requests.recv_timeout(Duration::from_millis(300)).is_err(),
+        "a request was sent although the cache was unusable"
+    );
 }
 
 #[cfg(not(feature = "llm"))]

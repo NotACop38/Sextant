@@ -20,7 +20,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/NotACop38/Sextant"
 homepage = "https://github.com/NotACop38/Sextant"
 authors = ["The Sextant contributors"]
-description = "Infers the structure of unknown binary formats and protocols from samples and emits verified parsers."
+description = "Infers the structure of unknown binary formats and protocols from samples, verifies each hypothesis natively, and exports parser specifications."
 keywords = ["reverse-engineering", "binary", "parser", "protocol", "kaitai"]
 categories = ["command-line-utilities", "parser-implementations", "development-tools"]
 

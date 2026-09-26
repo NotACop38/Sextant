@@ -1,6 +1,6 @@
 [package]
 name = "sextant-export"
-description = "Exporters that turn a verified Sextant IR into Kaitai, ImHex, Wireshark, and 010 Editor parsers."
+description = "Exporters that translate a Sextant IR into Kaitai Struct, ImHex, Wireshark Lua, and 010 Editor parser specifications."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

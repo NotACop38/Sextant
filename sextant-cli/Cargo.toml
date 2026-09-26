@@ -4,7 +4,7 @@
 # `sextant`. See docs/RELEASING.md for the naming rationale.
 [package]
 name = "sextant-re"
-description = "Sextant: infer and verify the structure of unknown binary formats and protocols. Installs the `sextant` command."
+description = "Sextant: infer the structure of unknown binary formats and protocols from samples, verify it natively, and export parser specifications. Installs the `sextant` command."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
