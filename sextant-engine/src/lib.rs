@@ -20,14 +20,14 @@
 //!
 //! [`infer_candidates`] turns a sample set into one or more candidate
 //! [`Format`](sextant_ir::Format) hypotheses using classical techniques:
-//! byte statistics (FR-6), positional [`align`]ment (FR-7), magic, length,
+//! byte statistics (FR-6), positional [alignment](mod@align) (FR-7), magic, length,
 //! count, offset, checksum, and packed-flag evidence detection (FR-8 to FR-11).
 //! Each candidate is validated and scored by the executor and scorer, so the
 //! list is ranked by a verified preliminary score (FR-12).
 //!
 //! # Ingestion (Step 4)
 //!
-//! [`ingest`] turns user inputs (files, directories, and glob patterns) into a
+//! [`ingest()`] turns user inputs (files, directories, and glob patterns) into a
 //! [`SampleSet`]: an ordered list of [`Sample`]s, each with [`Provenance`].
 //! Per-sample and total byte caps bound memory and are surfaced through
 //! [`Notice`]s (FR-1, FR-3, FR-4, FR-5).

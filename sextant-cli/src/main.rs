@@ -504,7 +504,7 @@ fn run_infer(
 /// (Step 11, FR-2). Writes the report with `--out` so it can be exported to a
 /// Wireshark dissector, the primary output for the protocol track.
 ///
-/// Capture inputs are resolved exactly like file inputs, through [`ingest`]:
+/// Capture inputs are resolved exactly like file inputs, through [`ingest()`]:
 /// files, directories (recursively with `-r`), and globs, with the same
 /// per-sample and total byte caps and their notices (FR-5, FR-24), the same
 /// refusal of FIFOs, sockets, and devices, and the same de-duplication of a

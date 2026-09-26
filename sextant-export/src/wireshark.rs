@@ -10,7 +10,7 @@
 //! and a structure with explicit offsets ends at the furthest byte any of its
 //! fields reached.
 //!
-//! The dissector is registered as a [`Proto`] but not bound to a port (file
+//! The dissector is registered as a `Proto` but not bound to a port (file
 //! formats have none, and protocols arrive in Step 11); a commented example
 //! shows how to attach it. Checksums are not verified, matching the other
 //! exporters.
@@ -185,7 +185,7 @@ impl Gen {
         self.code.push('\n');
     }
 
-    /// Register a [`ProtoField`] once, keyed by its dotted path.
+    /// Register a `ProtoField` once, keyed by its dotted path.
     fn register(&mut self, key: &str, ctor: &str) {
         if self.registered.insert(key.to_owned()) {
             self.fields.push(format!("f[\"{key}\"] = {ctor}"));

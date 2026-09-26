@@ -68,6 +68,7 @@ cargo build --all-targets --all-features --verbose
 cargo build --release
 cargo test --workspace --all-features --verbose
 cargo clippy --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 cargo deny check
 cargo audit
 cargo audit --file fuzz/Cargo.lock

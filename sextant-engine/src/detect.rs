@@ -91,8 +91,8 @@ impl Magic {
 /// every sample (FR-8).
 ///
 /// Returns `None` when fewer than two samples are given, when the first byte
-/// already varies, or when the invariant run is shorter than [`MIN_MAGIC_LEN`].
-/// A run longer than [`MAX_MAGIC_LEN`] is truncated.
+/// already varies, or when the invariant run is shorter than two bytes. A run
+/// longer than 64 bytes is truncated.
 #[must_use]
 pub fn detect_magic<S: AsRef<[u8]>>(samples: &[S], alignment: &Alignment) -> Option<Magic> {
     let prefix = alignment.invariant_prefix_len().min(MAX_MAGIC_LEN);
