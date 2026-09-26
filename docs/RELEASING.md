@@ -83,8 +83,8 @@ the registry:
 ```
 cargo publish -p sextant-ir
 cargo publish -p sextant-llm
-cargo publish -p sextant-export
 cargo publish -p sextant-engine
+cargo publish -p sextant-export
 cargo publish -p sextant-bench
 cargo publish -p sextant-re
 ```

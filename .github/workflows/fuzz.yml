@@ -48,9 +48,11 @@ jobs:
           - export_wireshark
           - export_bt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install the nightly Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           toolchain: nightly
       - name: Install cargo-fuzz
@@ -59,10 +61,11 @@ jobs:
         # dependency (rustix 0.36.5) that no longer builds on the current
         # nightly compiler, so a from-source install fails before any fuzzing
         # runs. A prebuilt binary keeps the fuzz tool independent of the
-        # project toolchain, the same approach the cargo-audit job uses.
-        uses: taiki-e/install-action@v2
+        # project toolchain, the same approach the cargo-audit job uses. The
+        # tool version is pinned too; bump it deliberately.
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
         with:
-          tool: cargo-fuzz
+          tool: cargo-fuzz@0.13.2
       - name: Choose the per-target budget
         id: budget
         # A long budget on the nightly schedule, a short smoke run on a pull
@@ -99,7 +102,7 @@ jobs:
           echo "No crash artifacts for ${{ matrix.target }}."
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}/

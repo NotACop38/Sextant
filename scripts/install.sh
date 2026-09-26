@@ -13,14 +13,24 @@
 #   SEXTANT_BIN_DIR   Install directory (default: $HOME/.local/bin).
 #   SEXTANT_REPO      GitHub owner/repo (default: NotACop38/Sextant).
 #
-# This script installs released artifacts only; to build from source use
-# `cargo install sextant-re` or `cargo build --release`.
+# On x86_64 Linux it installs the glibc build when the system has glibc 2.34 or
+# newer, and otherwise (musl distributions such as Alpine, an older glibc, or a
+# C library it cannot identify) the fully static musl build, which runs on any
+# x86_64 Linux.
+#
+# This script installs released artifacts only. To build from source, clone the
+# repository and run `cargo build --release --locked -p sextant-re`; the binary
+# is written to target/release/sextant. On a platform without a prebuilt
+# binary, the script prints those commands.
 
 set -eu
 
 REPO="${SEXTANT_REPO:-NotACop38/Sextant}"
 BIN_NAME="sextant"
 BIN_DIR="${SEXTANT_BIN_DIR:-$HOME/.local/bin}"
+# The oldest glibc the x86_64-unknown-linux-gnu build supports. The release
+# workflow refuses to publish a glibc build that needs anything newer.
+GLIBC_MIN="2.34"
 
 err() {
   echo "install.sh: error: $*" >&2
@@ -29,6 +39,67 @@ err() {
 
 need() {
   command -v "$1" >/dev/null 2>&1 || err "required tool not found: $1"
+}
+
+# No prebuilt binary exists for this platform: print the exact commands that
+# build and install sextant from source, then stop. (The CLI crate is not on
+# crates.io yet, so `cargo install` cannot fetch it.)
+from_source() {
+  clone_ref=""
+  if [ -n "${SEXTANT_VERSION:-}" ]; then
+    clone_ref=" --branch v${SEXTANT_VERSION}"
+  fi
+  cat >&2 <<EOF
+install.sh: error: no prebuilt ${BIN_NAME} binary is published for $1.
+Build it from source instead (needs git and Rust 1.85 or newer, see https://rustup.rs):
+
+  git clone${clone_ref} https://github.com/${REPO}.git sextant-src
+  cd sextant-src
+  cargo build --release --locked -p sextant-re
+  mkdir -p "${BIN_DIR}"
+  install -m 0755 target/release/${BIN_NAME} "${BIN_DIR}/${BIN_NAME}"
+EOF
+  exit 1
+}
+
+# Succeed when the dotted version $1 is at least $2 (for example 2.35 >= 2.34).
+version_at_least() {
+  awk -v have="$1" -v need="$2" 'BEGIN {
+    nh = split(have, h, "."); nn = split(need, n, ".")
+    for (i = 1; i <= (nh > nn ? nh : nn); i++) {
+      a = (i <= nh) ? h[i] + 0 : 0
+      b = (i <= nn) ? n[i] + 0 : 0
+      if (a > b) exit 0
+      if (a < b) exit 1
+    }
+    exit 0
+  }'
+}
+
+# Succeed on a musl-based system such as Alpine.
+is_musl() {
+  [ -f /etc/alpine-release ] && return 0
+  for loader in /lib/ld-musl-*.so.1; do
+    [ -e "$loader" ] && return 0
+  done
+  command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl
+}
+
+# Choose the x86_64 Linux artifact for this system's C library.
+pick_linux_x86_64_target() {
+  glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | sed -n 's/^glibc //p')"
+  if [ -n "$glibc" ]; then
+    if version_at_least "$glibc" "$GLIBC_MIN"; then
+      target="x86_64-unknown-linux-gnu"
+      return 0
+    fi
+    echo "Detected glibc ${glibc}, older than ${GLIBC_MIN}: using the static musl build."
+  elif is_musl; then
+    echo "Detected musl libc: using the static musl build."
+  else
+    echo "Could not identify the C library: using the static musl build."
+  fi
+  target="x86_64-unknown-linux-musl"
 }
 
 need uname
@@ -51,8 +122,8 @@ arch="$(uname -m)"
 case "$os" in
   Linux)
     case "$arch" in
-      x86_64 | amd64) target="x86_64-unknown-linux-gnu" ;;
-      *) err "unsupported Linux architecture: $arch (try cargo install sextant-re)" ;;
+      x86_64 | amd64) pick_linux_x86_64_target ;;
+      *) from_source "Linux on $arch" ;;
     esac
     ;;
   Darwin)
