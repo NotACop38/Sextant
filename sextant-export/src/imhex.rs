@@ -8,7 +8,7 @@
 //!
 //! Checksum and constant constraints are annotations. The public entry point
 //! rejects layouts this emitter cannot preserve, including offsets, delimiters,
-//! byte-bounded arrays, and ancestor dependencies.
+//! byte-bounded arrays, sized structs, and ancestor dependencies.
 //!
 //! A member or root variable whose name is an ImHex keyword, built-in type, or
 //! the `std` namespace gets a trailing underscore, and every reference to it uses

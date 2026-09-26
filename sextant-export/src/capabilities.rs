@@ -290,7 +290,20 @@ impl<'a> Check<'a> {
                     self.error("enum definition width does not match the generated template field")
                 );
             }
-            Kind::Struct { structure } => self.structure(structure, path)?,
+            Kind::Struct { structure } => {
+                // A sized struct is a bounded region, so every field inside it,
+                // including one that reads to the end, must stop at the region
+                // end. The templates have no bounded substream to express that.
+                if field.size.is_some()
+                    && matches!(self.target, ExportFormat::ImHex | ExportFormat::Bt)
+                {
+                    return Err(self.error(
+                        "sized structs need a bounded substream, which this template exporter \
+                         cannot express; export to Kaitai or Wireshark instead",
+                    ));
+                }
+                self.structure(structure, path)?
+            }
             Kind::Array { element, count } => {
                 if matches!(self.target, ExportFormat::ImHex | ExportFormat::Bt)
                     && matches!(count, CountRule::BoundedBy { .. })
@@ -497,10 +510,18 @@ fn minimum_size(field: &Field) -> u64 {
             Some(SizeRule::Delimited { terminator, .. }) => terminator.len() as u64,
             _ => 0,
         },
-        Kind::Struct { structure } => structure
-            .fields
-            .iter()
-            .fold(0u64, |size, field| size.saturating_add(minimum_size(field))),
+        // A sized struct consumes its whole region, which a successful parse
+        // makes at least as large as its fields need.
+        Kind::Struct { structure } => {
+            let fields = structure
+                .fields
+                .iter()
+                .fold(0u64, |size, field| size.saturating_add(minimum_size(field)));
+            match &field.size {
+                Some(SizeRule::Fixed { bytes }) => (*bytes).max(fields),
+                _ => fields,
+            }
+        }
         Kind::Array {
             element,
             count: CountRule::Fixed { count },

@@ -10,7 +10,9 @@
 //!
 //! Checksums are rendered as `doc` notes. The public entry point rejects layouts
 //! this emitter cannot preserve, including explicit offsets and multi-byte
-//! delimiters. Byte-bounded arrays use a nested substream.
+//! delimiters. Byte-bounded arrays use a nested substream, and a sized struct
+//! is a user type with a `size` (or `size-eos`), which Kaitai parses in a
+//! substream of exactly that size.
 //!
 //! Every IR-derived fragment of a `doc` or `title` passes through
 //! [`comment_text`], because the Kaitai compiler copies `doc` text into comments
@@ -273,6 +275,9 @@ impl Ctx {
             Kind::Struct { structure } => {
                 let type_name = self.define_type(field, structure);
                 attrs.push(("type".to_owned(), type_name));
+                // A sized struct parses in a substream of exactly its size, as
+                // the native executor bounds it to its region.
+                self.size_attrs(field.size.as_ref(), &mut attrs);
             }
             Kind::Array { element, count } => {
                 self.array_attrs(element, count, &mut attrs);
@@ -370,6 +375,9 @@ impl Ctx {
             Kind::Struct { structure } => {
                 let type_name = self.define_type(element, structure);
                 attrs.push(("type".to_owned(), type_name));
+                // On a repeated attribute, `size` bounds each element in its own
+                // substream, which is what a sized element struct means.
+                self.size_attrs(element.size.as_ref(), attrs);
             }
             Kind::Integer {
                 width,

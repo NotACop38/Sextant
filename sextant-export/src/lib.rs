@@ -151,8 +151,10 @@ impl std::error::Error for ExportError {}
 /// # Errors
 ///
 /// Rejects invalid, excessively large, or unsupported layouts. In particular,
-/// ImHex and 010 exports reject offsets, delimiters, byte-bounded arrays, and
-/// ancestor dependencies. Lua also rejects ancestor dependencies and uses a
+/// ImHex and 010 exports reject offsets, delimiters, byte-bounded arrays, sized
+/// structs, and ancestor dependencies, since neither template language has a
+/// bounded substream. Kaitai parses a sized struct in a substream of its size,
+/// and Lua bounds its fields to the region, as the native executor does. Lua also rejects ancestor dependencies and uses a
 /// shared 1,048,576-unit budget for arrays and delimiter scanning. UTF-16 is
 /// currently supported only by Kaitai.
 /// Kaitai rejects offsets and multi-byte delimiters. Non-Lua targets reject

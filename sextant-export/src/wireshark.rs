@@ -5,6 +5,10 @@
 //! dissection tree. This exporter generates that function from the IR. Each
 //! integer field's value is captured in a local so a later derived size or count
 //! can reference it, arrays become loops, and nested structures become subtrees.
+//! The layout rules match the native executor: a sized struct pushes its region
+//! end as the limit every field inside it checks, and ends at that region end,
+//! and a structure with explicit offsets ends at the furthest byte any of its
+//! fields reached.
 //!
 //! The dissector is registered as a [`Proto`] but not bound to a port (file
 //! formats have none, and protocols arrive in Step 11); a commented example
@@ -190,12 +194,74 @@ impl Gen {
 
     /// Emit code dissecting `structure` into the tree item named `parent`, with
     /// dotted-path `prefix` for field keys.
+    ///
+    /// Like the native executor, a structure ends at the furthest byte any of
+    /// its fields reached. Without explicit offsets the cursor only moves
+    /// forward, so it already ends there; with them it can move back, so the
+    /// furthest end is tracked and restored after the last field.
     fn emit_struct(&mut self, structure: &Structure, parent: &str, prefix: &str, indent: usize) {
         let base = self.temp("base");
         self.line(indent, &format!("local {base} = offset"));
+        let positioned = structure.fields.iter().any(|field| field.offset.is_some());
+        let extent = positioned.then(|| self.temp("ext"));
+        if let Some(extent) = &extent {
+            self.line(indent, &format!("local {extent} = offset"));
+        }
         for (index, field) in structure.fields.iter().enumerate() {
             self.emit_field(field, index, parent, prefix, &base, indent);
+            if let Some(extent) = &extent {
+                self.line(
+                    indent,
+                    &format!("if offset > {extent} then {extent} = offset end"),
+                );
+            }
         }
+        if let Some(extent) = &extent {
+            self.line(indent, &format!("offset = {extent}"));
+        }
+    }
+
+    /// Emit a struct field into a subtree of `parent`. A sized struct is a
+    /// bounded region, as in the native executor: its fields see the region end
+    /// as their limit, so none can read past it, and the struct ends at the
+    /// region end however much of it they read. `prefix` resolves a derived
+    /// size against the struct's siblings.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_struct_node(
+        &mut self,
+        field: &Field,
+        structure: &Structure,
+        label: &str,
+        parent: &str,
+        key: &str,
+        prefix: &str,
+        indent: usize,
+    ) {
+        let region = field.size.as_ref().map(|rule| {
+            let expression = self.size_expr(Some(rule), prefix);
+            let size = self.checked_size(&expression, indent);
+            let end = self.temp("rend");
+            self.line(indent, &format!("local {end} = offset + {size}"));
+            end
+        });
+        let sub = self.temp("sub");
+        let start = self.temp("start");
+        let label = lua_escape(label);
+        self.line(indent, &format!("local {start} = offset"));
+        self.line(
+            indent,
+            &format!("local {sub} = {parent}:add(buffer(offset), \"{label}\")"),
+        );
+        match region {
+            None => self.emit_struct(structure, &sub, key, indent),
+            Some(end) => {
+                self.limits.push(end.clone());
+                self.emit_struct(structure, &sub, key, indent);
+                self.limits.pop();
+                self.line(indent, &format!("offset = {end}"));
+            }
+        }
+        self.line(indent, &format!("{sub}:set_len(offset - {start})"));
     }
 
     /// Emit one field: honor an explicit offset, then dissect by kind.
@@ -225,16 +291,7 @@ impl Gen {
 
         match &field.kind {
             Kind::Struct { structure } => {
-                let sub = self.temp("sub");
-                let start = self.temp("start");
-                let label = lua_escape(&name);
-                self.line(indent, &format!("local {start} = offset"));
-                self.line(
-                    indent,
-                    &format!("local {sub} = {parent}:add(buffer(offset), \"{label}\")"),
-                );
-                self.emit_struct(structure, &sub, &key, indent);
-                self.line(indent, &format!("{sub}:set_len(offset - {start})"));
+                self.emit_struct_node(field, structure, &name, parent, &key, prefix, indent);
             }
             Kind::Array { element, count } => {
                 self.emit_array(&name, &key, element, count, parent, indent);
@@ -555,16 +612,16 @@ impl Gen {
     fn emit_element(&mut self, element: &Field, key: &str, arr: &str, indent: usize) {
         match &element.kind {
             Kind::Struct { structure } => {
-                let label = lua_escape(&element.name.clone().unwrap_or_else(|| "item".to_owned()));
-                let el = self.temp("el");
-                let estart = self.temp("estart");
-                self.line(indent, &format!("local {estart} = offset"));
-                self.line(
+                let label = element.name.clone().unwrap_or_else(|| "item".to_owned());
+                self.emit_struct_node(
+                    element,
+                    structure,
+                    &label,
+                    arr,
+                    key,
+                    parent_prefix(key),
                     indent,
-                    &format!("local {el} = {arr}:add(buffer(offset), \"{label}\")"),
                 );
-                self.emit_struct(structure, &el, key, indent);
-                self.line(indent, &format!("{el}:set_len(offset - {estart})"));
             }
             Kind::Array {
                 element: inner,
