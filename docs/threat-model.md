@@ -64,10 +64,12 @@ relies on. The detailed privacy notes live in
   sanitized. Unsupported target layouts are rejected, and generated Lua enforces
   progress and work limits. Regression coverage is distinct from qualification
   in every target runtime.
-- Secrets come only from the environment or a config file (`SEXTANT_CONFIG` or
-  `~/.config/sextant/config` as `KEY=VALUE` lines), never from a flag, are never
-  logged, and the on-disk cache that can hold sample-derived bytes is written
-  owner-only on Unix. Process environment values override file contents.
+- Secrets come only from the environment or a config file (`SEXTANT_CONFIG`, or
+  by default `~/.config/sextant/config`, `%APPDATA%\sextant\config` on Windows,
+  as `KEY=VALUE` lines), never from a flag, are never logged, and the on-disk
+  cache that can hold sample-derived bytes is written owner-only on Unix. On
+  Unix a config file that grants its group or others any access is refused.
+  Process environment values override file contents.
 - `--no-llm` produces zero network egress, and the executor and scorer have no
   network, JVM, or external-runtime dependency.
 

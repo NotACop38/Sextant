@@ -16,6 +16,11 @@ to prompts; API keys authenticate the request rather than becoming prompt text.
 Anthropic, OpenAI, and Ollama adapters use the caller's configured endpoint.
 Ollama is local only when that endpoint is local. A remote Ollama endpoint sends
 the request off the machine. The caller must choose and trust its endpoint.
+Adapters that send an API key refuse a plain `http` endpoint unless it is
+loopback, and a loopback endpoint is never reached through a proxy. By default
+the Anthropic adapter opts into server-side refusal fallbacks, so a request its
+model declines can be re-run on another Anthropic model within the same call;
+set `SEXTANT_ANTHROPIC_FALLBACKS=off` to disable this.
 
 ## Limits, retries, and storage
 
@@ -23,11 +28,15 @@ the request off the machine. The caller must choose and trust its endpoint.
 - The client limits logical calls. Retrying a failed call can make up to four
   HTTP attempts, so logical-call counts are not transmission counts.
 - The optional spend check uses configured token prices and previously recorded
-  usage. Default prices are zero, and an in-flight call may exceed a remaining
-  budget. This is accounting support, not a strict provider spending cap.
+  usage, including usage reported for responses that were then rejected (a
+  refusal, a truncated answer, or unparseable JSON). Default prices are zero,
+  and an in-flight call may exceed a remaining budget. This is accounting
+  support, not a strict provider spending cap.
 - Disk caching is opt-in through client configuration. Without a configured
-  cache directory, repeated requests can be transmitted again. Cache contents
-  include model responses and should be stored in a private trusted directory.
+  cache directory, repeated requests can be transmitted again. Only successful
+  responses are cached. Cache contents include model responses and should be
+  stored in a private trusted directory; on Unix the cache directory is set to
+  mode 0700 and entries to 0600, and a failure to set either is an error.
 - Provider responses can contain prose or fences around JSON; Sextant extracts
   a JSON proposal and validates its supported operations before applying it.
 
@@ -40,8 +49,9 @@ without affecting that score. Their semantic correctness is not verified by
 byte coverage and must be assessed by the analyst.
 
 Native fit does not validate a provider, its retention policy, exported parser
-runtime behavior, or results on unseen inputs. Low-temperature requests and
-optional caches do not guarantee reproducible provider responses.
+runtime behavior, or results on unseen inputs. Requests leave the sampling
+temperature unset unless the caller sets one (current Anthropic models reject
+it), and optional caches do not guarantee reproducible provider responses.
 
 ## Keeping analysis local
 
