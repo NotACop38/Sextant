@@ -128,12 +128,105 @@ you cannot see. Respond with a single JSON object and nothing else.";
 const SCHEMA_HINT: &str = "\
 {\"format_family\": \"<string, optional>\", \"fields\": [{\"index\": <int>, \
 \"name\": \"<identifier, optional>\", \"role\": \"<one of: magic, version, \
-length, count, offset, checksum, timestamp, flags, enum, reserved, payload, \
-unknown>\", \"type\": {\"type\": \"integer\", \"width\": <1|2|4|8>, \"signed\": \
+length, count, offset, message_type, sequence, checksum, timestamp, flags, enum, \
+reserved, payload, unknown>\", \"type\": {\"type\": \"integer\", \"width\": <1|2|4|8>, \"signed\": \
 \"unsigned|signed\", \"endianness\": \"little|big\"}, \"size\": {\"rule\": \
 \"fixed|derived|to_end\", \"bytes\": <int>, \"length_field\": \"<name>\"}, \
 \"enum\": [{\"value\": <int>, \"name\": \"<identifier>\"}], \"rationale\": \
 \"<string, optional>\"}]}";
+
+/// Every semantic role a proposal may name, as the IR serializes it.
+const ROLE_NAMES: [&str; 14] = [
+    "magic",
+    "version",
+    "length",
+    "count",
+    "offset",
+    "message_type",
+    "sequence",
+    "checksum",
+    "timestamp",
+    "flags",
+    "enum",
+    "reserved",
+    "payload",
+    "unknown",
+];
+
+/// The JSON Schema of a [`ModelProposal`], sent with the request so a provider
+/// that supports structured output returns a well-formed object (FR-30). It
+/// uses only the subset structured output accepts: every object is closed, and
+/// there are no numeric or length constraints. The pass still checks every
+/// entry itself, so a provider that ignores the schema is handled the same way.
+fn proposal_schema() -> serde_json::Value {
+    use serde_json::json;
+    let closed = |properties: serde_json::Value, required: &[&str]| {
+        json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false,
+        })
+    };
+    let kind = json!({
+        "anyOf": [
+            closed(
+                json!({
+                    "type": {"const": "integer"},
+                    "width": {"enum": [1, 2, 4, 8]},
+                    "signed": {"enum": ["unsigned", "signed"]},
+                    "endianness": {"enum": ["little", "big"]},
+                }),
+                &["type", "width", "signed"],
+            ),
+            closed(json!({"type": {"const": "bytes"}}), &["type"]),
+            closed(
+                json!({
+                    "type": {"const": "string"},
+                    "encoding": {"enum": ["ascii", "utf8", "utf16_le", "utf16_be", "latin1"]},
+                }),
+                &["type", "encoding"],
+            ),
+            closed(json!({"type": {"const": "opaque"}}), &["type"]),
+        ]
+    });
+    let size = json!({
+        "anyOf": [
+            closed(
+                json!({"rule": {"const": "fixed"}, "bytes": {"type": "integer"}}),
+                &["rule", "bytes"],
+            ),
+            closed(
+                json!({"rule": {"const": "derived"}, "length_field": {"type": "string"}}),
+                &["rule", "length_field"],
+            ),
+            closed(json!({"rule": {"const": "to_end"}}), &["rule"]),
+        ]
+    });
+    let variant = closed(
+        json!({"value": {"type": "integer"}, "name": {"type": "string"}}),
+        &["value", "name"],
+    );
+    let field = closed(
+        json!({
+            "index": {"type": "integer"},
+            "name": {"type": "string"},
+            "role": {"enum": ROLE_NAMES},
+            "type": kind,
+            "size": size,
+            "enum": {"type": "array", "items": variant},
+            "rationale": {"type": "string"},
+        }),
+        &["index"],
+    );
+    closed(
+        json!({
+            "format_family": {"type": "string"},
+            "fields": {"type": "array", "items": field},
+        }),
+        &["fields"],
+    )
+}
 
 /// Options controlling the semantic pass.
 #[derive(Debug, Clone)]
@@ -316,7 +409,9 @@ pub fn semantic_pass<P: LlmProvider>(
 
     let paths = field_paths(format);
     let prompt = build_prompt(format, &paths, samples, options);
-    let request = JsonRequest::new(prompt, SCHEMA_HINT).with_system(SYSTEM_PROMPT);
+    let request = JsonRequest::new(prompt, SCHEMA_HINT)
+        .with_system(SYSTEM_PROMPT)
+        .with_json_schema(proposal_schema());
     let response = client.complete_json(&request)?;
     // Free-form output is not accepted: the response must be a proposal object
     // (FR-30). Its entries are read one at a time below.
@@ -1314,6 +1409,87 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use sextant_ir::{ChecksumAlgorithm, ChecksumSpec, Confidence, CoveredRange, Signedness};
+
+    /// Visit every schema node in `schema`, depth first.
+    fn visit(schema: &Value, check: &mut impl FnMut(&serde_json::Map<String, Value>)) {
+        match schema {
+            Value::Object(map) => {
+                check(map);
+                map.values().for_each(|child| visit(child, check));
+            }
+            Value::Array(items) => items.iter().for_each(|child| visit(child, check)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn the_proposal_schema_uses_only_what_structured_output_accepts() {
+        let schema = proposal_schema();
+        let mut objects = 0;
+        visit(&schema, &mut |node| {
+            if node.contains_key("properties") {
+                objects += 1;
+                assert_eq!(
+                    node.get("additionalProperties"),
+                    Some(&Value::Bool(false)),
+                    "an object schema is open: {node:?}"
+                );
+            }
+            for unsupported in [
+                "minimum",
+                "maximum",
+                "multipleOf",
+                "minLength",
+                "maxLength",
+                "pattern",
+            ] {
+                assert!(
+                    !node.contains_key(unsupported),
+                    "unsupported keyword {unsupported}"
+                );
+            }
+        });
+        assert!(objects >= 8, "expected every nested object: {objects}");
+    }
+
+    #[test]
+    fn every_role_and_encoding_in_the_schema_is_a_real_ir_value() {
+        for name in ROLE_NAMES {
+            let role: Role = serde_json::from_value(Value::from(name)).expect("a role name");
+            assert_eq!(serde_json::to_value(role).expect("serialize"), name);
+        }
+        for encoding in ["ascii", "utf8", "utf16_le", "utf16_be", "latin1"] {
+            let kind: Kind =
+                serde_json::from_value(serde_json::json!({"type": "string", "encoding": encoding}))
+                    .expect("a string encoding");
+            assert!(matches!(kind, Kind::String { .. }));
+        }
+    }
+
+    #[test]
+    fn a_proposal_that_follows_the_schema_is_read_in_full() {
+        let entry = serde_json::json!({
+            "index": 2,
+            "name": "chunk_length",
+            "role": "length",
+            "type": {"type": "integer", "width": 4, "signed": "unsigned", "endianness": "big"},
+            "size": {"rule": "fixed", "bytes": 4},
+            "enum": [{"value": 1, "name": "one"}],
+            "rationale": "governs the data length"
+        });
+        let proposal = parse_entry(&entry).expect("a well-formed entry");
+        assert_eq!(proposal.index, 2);
+        assert_eq!(proposal.role, Some(Role::Length));
+        assert!(matches!(
+            proposal.kind,
+            Some(Kind::Integer { width: 4, .. })
+        ));
+        assert!(matches!(proposal.size, Some(SizeRule::Fixed { bytes: 4 })));
+        assert_eq!(
+            proposal.enum_variants.map(|variants| variants.len()),
+            Some(1)
+        );
+    }
 
     fn u8_named(name: &str) -> Field {
         Field::new(
