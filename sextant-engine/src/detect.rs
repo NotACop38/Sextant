@@ -587,6 +587,17 @@ pub fn detect_bitfields<S: AsRef<[u8]>>(
     findings
 }
 
+impl Bitfield {
+    /// Whether the varying bits are exactly the low-order bits and every
+    /// constant bit is zero: the signature of a small unsigned count, index, or
+    /// length (values such as 1 to 5) rather than of packed flags, which vary in
+    /// bits above constant ones or carry constant set bits.
+    #[must_use]
+    pub fn is_small_unsigned(&self) -> bool {
+        self.constant_value == 0 && self.varying_mask & self.varying_mask.wrapping_add(1) == 0
+    }
+}
+
 fn mask_from_bits(bits: &BitSlice<u8, Lsb0>) -> u8 {
     let mut mask = 0u8;
     for bit in 0..8usize {
@@ -759,6 +770,21 @@ mod tests {
         assert_eq!(field.constant_value, 0xA0);
         assert_eq!(field.varying_mask, 0x07);
         assert_eq!(field.groups, vec![(0, 3)]);
+    }
+
+    #[test]
+    fn a_small_counter_is_told_apart_from_packed_flags() {
+        // Values 1 to 5: only the low bits vary and the rest stay zero.
+        let counter: Vec<Vec<u8>> = [1u8, 3, 5, 2].iter().map(|&v| vec![v]).collect();
+        let found = detect_bitfields(&counter, 0, 1);
+        assert!(found[0].is_small_unsigned(), "{found:?}");
+        // A constant set bit above the varying ones, or a varying bit above a
+        // constant one, is the signature of flags.
+        for values in [[0xA1u8, 0xA5, 0xA2], [0x01, 0x09, 0x01]] {
+            let flags: Vec<Vec<u8>> = values.iter().map(|&v| vec![v]).collect();
+            let found = detect_bitfields(&flags, 0, 1);
+            assert!(!found[0].is_small_unsigned(), "{found:?}");
+        }
     }
 
     #[test]

@@ -1685,7 +1685,11 @@ fn segment_field(
                         0.5,
                         "values are plausible Unix times in seconds",
                     )
-                } else if *width == 1 && bitfields.iter().any(|bits| bits.offset == offset) {
+                } else if *width == 1
+                    && bitfields
+                        .iter()
+                        .any(|bits| bits.offset == offset && !bits.is_small_unsigned())
+                {
                     (
                         format!("flags_{offset}"),
                         Role::Flags,
