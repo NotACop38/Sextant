@@ -75,6 +75,7 @@ pub mod scorer;
 pub mod segment;
 pub mod semantic;
 pub mod stats;
+pub mod text;
 
 pub use align::{Alignment, Column, Region, align};
 pub use candidate::{Candidate, infer_candidates};

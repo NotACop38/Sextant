@@ -1236,26 +1236,6 @@ fn unsafe_name_reason(what: &str) -> String {
     )
 }
 
-/// Whether `c` must never be stored from model text: a control character, a
-/// bidirectional formatting character, a line or paragraph separator, or an
-/// invisible formatting character such as a zero-width space or a tag
-/// character.
-fn is_hidden_or_control(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c,
-            '\u{00AD}'
-                | '\u{061C}'
-                | '\u{180E}'
-                | '\u{200B}'..='\u{200F}'
-                | '\u{2028}'..='\u{202E}'
-                | '\u{2060}'..='\u{206F}'
-                | '\u{FEFF}'
-                | '\u{FFF9}'..='\u{FFFB}'
-                | '\u{E0000}'..='\u{E007F}'
-        )
-}
-
 /// Clean free text from a model before it is stored in the IR. Tabs and line
 /// breaks become spaces; control, bidirectional, and other invisible formatting
 /// characters are removed; surrounding whitespace is trimmed; and text longer
@@ -1269,7 +1249,7 @@ fn sanitize_text(text: &str, max_bytes: usize) -> String {
         } else {
             c
         };
-        if is_hidden_or_control(c) {
+        if crate::text::is_unsafe_to_display(c) {
             continue;
         }
         if out.len() + c.len_utf8() > max_bytes {

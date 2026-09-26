@@ -471,3 +471,27 @@ fn infer_on_a_missing_path_is_an_input_error() {
         "a missing input should exit with the PRD input-error code"
     );
 }
+
+#[test]
+fn a_reader_that_closes_the_pipe_ends_the_run_quietly() {
+    // `sextant infer samples | head -1`: once the reader is gone, the next write
+    // fails with a broken pipe. That must end the run with success, as a filter
+    // does, not with a panic.
+    use std::process::Stdio;
+    let mut child = sextant()
+        .arg("infer")
+        .arg(corpus_dir("png/samples"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sextant");
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("wait for sextant");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+    assert!(
+        output.status.success(),
+        "status {:?}, stderr: {stderr}",
+        output.status
+    );
+}

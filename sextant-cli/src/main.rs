@@ -47,6 +47,40 @@ const EXIT_EXPORT_ERROR: u8 = 4;
 /// The PRD exit code for an internal error (Section 14).
 const EXIT_INTERNAL_ERROR: u8 = 5;
 
+/// Write a line to standard output (see [`write_stdout`]).
+macro_rules! outln {
+    () => {
+        write_stdout(format_args!("\n"))
+    };
+    ($($arg:tt)*) => {
+        write_stdout(format_args!("{}\n", format_args!($($arg)*)))
+    };
+}
+
+/// Write to standard output without a line break (see [`write_stdout`]).
+macro_rules! out {
+    ($($arg:tt)*) => {
+        write_stdout(format_args!($($arg)*))
+    };
+}
+
+/// Write to standard output. When the reader has closed the pipe early (for
+/// example `sextant infer samples | head`), the program ends quietly with
+/// success, as a filter should, instead of panicking as `println!` does. Any
+/// other write error is reported and ends the program with the internal-error
+/// code.
+fn write_stdout(text: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+    let mut stdout = std::io::stdout().lock();
+    if let Err(error) = stdout.write_fmt(text) {
+        if error.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
+        eprintln!("sextant: could not write to standard output: {error}");
+        std::process::exit(i32::from(EXIT_INTERNAL_ERROR));
+    }
+}
+
 /// Infer the structure of unknown binary formats and protocols from samples,
 /// then emit parsers verified against those samples.
 #[derive(Debug, Parser)]
@@ -229,28 +263,15 @@ fn report_parse_outcome(error: &clap::Error) -> ExitCode {
     }
 }
 
-/// Escape the characters of a user-controlled string (a path, a pattern, or a
-/// command-line argument) that could drive or disguise terminal output: control
-/// characters, such as escape, carriage return, and newline, and the Unicode
-/// bidirectional embedding, override, and isolate controls (U+202A to U+202E
-/// and U+2066 to U+2069). Each becomes a visible Rust-style escape such as
-/// `\u{1b}`; everything else, including other non-ASCII text, is kept as is.
+/// Escape the characters of an untrusted string (a path, a pattern, a
+/// command-line argument, or text from a report) that could drive or disguise
+/// terminal output: control characters such as escape, carriage return, and
+/// newline, and bidirectional, invisible, and other formatting characters (see
+/// [`sextant_engine::text::is_unsafe_to_display`]). Each becomes a visible
+/// Rust-style escape such as `\u{1b}`; everything else, including ordinary
+/// non-ASCII text, is kept as is.
 fn escape_untrusted(text: &str) -> Cow<'_, str> {
-    fn needs_escape(c: char) -> bool {
-        c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-    }
-    if !text.chars().any(needs_escape) {
-        return Cow::Borrowed(text);
-    }
-    let mut escaped = String::with_capacity(text.len() + 16);
-    for c in text.chars() {
-        if needs_escape(c) {
-            escaped.extend(c.escape_default());
-        } else {
-            escaped.push(c);
-        }
-    }
-    Cow::Owned(escaped)
+    sextant_engine::text::escape_for_display(text)
 }
 
 /// Run the accuracy benchmark over the ground-truth corpus and print the results
@@ -286,7 +307,7 @@ fn run_bench(corpus: Option<&str>, out: Option<&str>, force: bool) -> ExitCode {
         }
     };
 
-    print!("{}", bench::render_table(&report));
+    out!("{}", bench::render_table(&report));
 
     if let Some(path) = out {
         match report.to_json() {
@@ -295,7 +316,7 @@ fn run_bench(corpus: Option<&str>, out: Option<&str>, force: bool) -> ExitCode {
                     eprintln!("sextant bench: could not write results to {path}: {error}");
                     return ExitCode::from(EXIT_INPUT_ERROR);
                 }
-                println!("\nWrote machine-readable results to {path}");
+                outln!("\nWrote machine-readable results to {path}");
             }
             Err(error) => {
                 eprintln!("sextant bench: could not serialize results: {error}");
@@ -382,7 +403,7 @@ fn run_infer(
     if let Some(path) = out {
         let shown = escape_untrusted(path);
         match write_report(&report, path, force) {
-            Ok(()) => println!("\nWrote report to {shown}"),
+            Ok(()) => outln!("\nWrote report to {shown}"),
             Err(error) => {
                 eprintln!(
                     "sextant infer: could not write report to {shown}: {}",
@@ -445,7 +466,7 @@ fn run_infer_protocol(
     print_sample_set(&set, "file", "files");
     for sample in &set.samples {
         if sample.provenance.is_truncated() {
-            println!(
+            outln!(
                 "note: {} was clipped to {} of {} bytes by --max-bytes-per-sample; packets \
                  after that point were not read.",
                 escape_untrusted(&sample.path().display().to_string()),
@@ -472,7 +493,7 @@ fn run_infer_protocol(
             Err(PcapError::UnknownFormat)
                 if !inputs.iter().any(|input| Path::new(input) == sample.path()) =>
             {
-                println!("note: {shown}: skipped, not a pcap or pcapng capture.");
+                outln!("note: {shown}: skipped, not a pcap or pcapng capture.");
                 continue;
             }
             Err(error) => {
@@ -481,7 +502,7 @@ fn run_infer_protocol(
             }
         };
         for notice in extraction.notices() {
-            println!("note: {shown}: {notice}.");
+            outln!("note: {shown}: {notice}.");
         }
         messages.extend(extraction.messages);
         if extraction.message_cap_reached {
@@ -512,15 +533,15 @@ fn run_infer_protocol(
     let limits = limits_with_optional_timeout(timeout);
     let inference = infer_protocol(&messages, transport, port, &limits);
 
-    println!(
+    outln!(
         "Extracted {} {transport} message(s) on port {port}.",
         inference.message_count
     );
     if message_cap_hit {
-        println!("{cap_note}");
+        outln!("{cap_note}");
     }
     print_clustering(&inference, port);
-    println!(
+    outln!(
         "Request/response pairs associated: {}.",
         inference.associations.len()
     );
@@ -530,8 +551,8 @@ fn run_infer_protocol(
         let shown = escape_untrusted(path);
         match write_report(&inference.report, path, force) {
             Ok(()) => {
-                println!("\nWrote report to {shown}");
-                println!(
+                outln!("\nWrote report to {shown}");
+                outln!(
                     "Export a Wireshark dissector with: sextant export {shown} --format wireshark"
                 );
             }
@@ -577,18 +598,18 @@ fn print_clustering(inference: &ProtocolInference, port: u16) {
     };
     match &clustering.discriminant {
         Some(discriminant) => {
-            println!(
+            outln!(
                 "Message clustering over {scope}: {} type(s) discriminated at byte offset {}.",
                 clustering.clusters.len(),
                 discriminant.offset
             );
             for cluster in &clustering.clusters {
                 if let Some(value) = cluster.type_value {
-                    println!("  type {value:#04x}: {} message(s)", cluster.indices.len());
+                    outln!("  type {value:#04x}: {} message(s)", cluster.indices.len());
                 }
             }
         }
-        None => println!(
+        None => outln!(
             "Message clustering over {scope}: a single message type (no discriminant found)."
         ),
     }
@@ -746,7 +767,7 @@ fn run_inspect(
         color,
         ..InspectOptions::default()
     };
-    print!("{}", render(&report, &sample, &options));
+    out!("{}", render(&report, &sample, &options));
     ExitCode::SUCCESS
 }
 
@@ -788,9 +809,9 @@ fn run_export(
                 eprintln!("sextant export: could not write {path}: {error}");
                 return ExitCode::from(EXIT_EXPORT_ERROR);
             }
-            println!("Wrote {target} parser to {path}");
+            outln!("Wrote {target} parser to {path}");
         }
-        None => print!("{parser}"),
+        None => out!("{parser}"),
     }
 
     if let Some(dir) = cross_validate {
@@ -819,13 +840,11 @@ fn run_cross_validate(report: &Report, target: ExportFormat, dir: &str) -> Optio
     };
     match sextant_export::crossval::cross_validate(&report.format, &samples) {
         sextant_export::crossval::CrossValidation::Passed { samples } => {
-            println!(
-                "Cross-validation: the Kaitai spec compiled and parsed all {samples} samples."
-            );
+            outln!("Cross-validation: the Kaitai spec compiled and parsed all {samples} samples.");
             None
         }
         sextant_export::crossval::CrossValidation::Skipped { reason } => {
-            println!("Cross-validation: skipped ({reason}).");
+            outln!("Cross-validation: skipped ({reason}).");
             None
         }
         sextant_export::crossval::CrossValidation::Failed { detail } => {
@@ -858,50 +877,68 @@ fn read_sample_dir(dir: &str) -> std::io::Result<Vec<Vec<u8>>> {
     Ok(samples)
 }
 
-/// Print the scored field map and the fit-score breakdown of a report.
+/// Print the scored field map and the fit-score breakdown of a report. Names,
+/// labels, and step descriptions are escaped, since a hypothesis can carry
+/// names from a model.
 fn print_report(report: &Report) {
     let score = &report.score;
-    println!();
-    println!(
+    outln!();
+    outln!(
         "Best hypothesis: {} (fit score {:.3})",
-        report.format.name, score.overall
+        escape_untrusted(&report.format.name),
+        score.overall
     );
-    println!(
-        "  coverage {:.3}  consistency {:.3}  generality {:.3}",
-        score.coverage, score.consistency, score.generality
+    outln!(
+        "  coverage {:.3}  consistency {:.3}  generality {:.3}  structure {:.3}",
+        score.coverage,
+        score.consistency,
+        score.generality,
+        score.structure
+    );
+    let verified = score
+        .samples
+        .iter()
+        .filter(|sample| sample.fully_verified())
+        .count();
+    outln!(
+        "  {verified} of {} sample(s) fully verified; {} checksum check(s) passed",
+        score.samples.len(),
+        score.checksums_passed()
     );
     if report.metadata.no_llm {
-        println!("  mode: statistics-only (no language model, no network egress)");
+        outln!("  mode: statistics-only (no language model, no network egress)");
     }
 
-    println!("Field map:");
+    outln!("Field map:");
     for entry in &report.field_map {
         let indent = "  ".repeat(entry.depth + 1);
-        println!(
+        outln!(
             "{indent}{name}: {role}, {kind}, {size} (confidence {conf:.2})",
-            name = entry.name,
-            role = entry.role,
-            kind = entry.kind,
-            size = entry.size,
+            name = escape_untrusted(&entry.name),
+            role = escape_untrusted(&entry.role),
+            kind = escape_untrusted(&entry.kind),
+            size = escape_untrusted(&entry.size),
             conf = entry.confidence,
         );
     }
-    println!(
+    outln!(
         "  (confidence describes evidence from these samples, not certainty about field meaning; \
          per-field evidence is in the report JSON)"
     );
 
     if report.refinement.is_empty() {
-        println!("Refinement: no improving change was found (already converged).");
+        outln!("Refinement: no improving change was found (already converged).");
     } else {
-        println!(
+        outln!(
             "Refinement: {} accepted change(s):",
             report.refinement.len()
         );
         for step in &report.refinement {
-            println!(
+            outln!(
                 "  {} (score {:.3} to {:.3})",
-                step.description, step.score_before, step.score_after
+                escape_untrusted(&step.description),
+                step.score_before,
+                step.score_after
             );
         }
     }
@@ -932,7 +969,7 @@ fn ingest_or_report(inputs: &[String], options: &IngestOptions, what: &str) -> O
 /// names are untrusted) and retained size, the total, and any cap notices to
 /// standard output. `singular` and `plural_form` name what the samples are.
 fn print_sample_set(set: &SampleSet, singular: &str, plural_form: &str) {
-    println!(
+    outln!(
         "Ingested {} {} ({} bytes total).",
         set.len(),
         plural(set.len(), singular, plural_form),
@@ -942,16 +979,17 @@ fn print_sample_set(set: &SampleSet, singular: &str, plural_form: &str) {
         let path = sample.provenance.path.display().to_string();
         let path = escape_untrusted(&path);
         if sample.provenance.is_truncated() {
-            println!(
+            outln!(
                 "  {path}: {} bytes (clipped from {} bytes)",
-                sample.provenance.length, sample.provenance.original_length
+                sample.provenance.length,
+                sample.provenance.original_length
             );
         } else {
-            println!("  {path}: {} bytes", sample.provenance.length);
+            outln!("  {path}: {} bytes", sample.provenance.length);
         }
     }
     for notice in &set.notices {
-        println!("note: {}", escape_untrusted(&notice.to_string()));
+        outln!("note: {}", escape_untrusted(&notice.to_string()));
     }
 }
 

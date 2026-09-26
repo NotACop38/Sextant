@@ -41,3 +41,6 @@ sextant-bench = { path = "bench", version = "0.1.0" }
 # The parsing core handles untrusted input, so unsafe is denied by default
 # (NFR-1). Any exception requires a written justification and a covering test.
 unsafe_code = "deny"
+# Every public item carries a doc comment (the Global Definition of Done).
+# Clippy runs with warnings as errors, so a missing doc fails the gate.
+missing_docs = "warn"
