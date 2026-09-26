@@ -308,7 +308,10 @@ fn find_checksum(
 /// At least two samples are required, so a coincidental alignment in one
 /// sample cannot invent a structure. A layout is accepted only when it replays
 /// to the exact end of every sample, finds a record in each, more than one
-/// record somewhere, and more than one distinct length value.
+/// record somewhere, and more than one distinct length value, and when at most
+/// half of its records are made entirely of zero bytes: zero padding read with
+/// a zero length field parses as endless empty records, which is padding, not
+/// a record stream.
 #[must_use]
 pub fn detect_chunk_layouts(samples: &[&[u8]]) -> Vec<ChunkLayout> {
     if samples.len() < 2 {
@@ -364,6 +367,24 @@ pub fn detect_chunk_layouts(samples: &[&[u8]]) -> Vec<ChunkLayout> {
                             .collect::<std::collections::BTreeSet<_>>()
                             .len();
                         if counts.iter().copied().max().unwrap_or(0) < 2 || distinct_lengths < 2 {
+                            continue;
+                        }
+                        let zero_records: usize = records
+                            .iter()
+                            .zip(samples)
+                            .map(|(found, sample)| {
+                                found
+                                    .iter()
+                                    .filter(|record| {
+                                        record.length == 0
+                                            && sample[record.start..record.start + geometry.fixed]
+                                                .iter()
+                                                .all(|&byte| byte == 0)
+                                    })
+                                    .count()
+                            })
+                            .sum();
+                        if zero_records * 2 > counts.iter().sum::<usize>() {
                             continue;
                         }
                         for mid in 0..=after {
@@ -512,6 +533,35 @@ mod tests {
             detect_chunk_layouts(&slices)
                 .iter()
                 .all(|layout| layout.record_counts.iter().max() >= Some(&2))
+        );
+    }
+
+    #[test]
+    fn zero_padding_is_not_read_as_a_stream_of_empty_records() {
+        // A few real tag and length records, then zero padding. Read as
+        // [tag u8][length u8], the padding parses as empty all-zero records.
+        let make = |payloads: &[&[u8]], padding: usize| {
+            let mut out = Vec::new();
+            for (tag, payload) in payloads.iter().enumerate() {
+                out.push(tag as u8 + 1);
+                out.push(payload.len() as u8);
+                out.extend_from_slice(payload);
+            }
+            out.extend(std::iter::repeat_n(0u8, padding));
+            out
+        };
+        let samples = [
+            make(&[b"ab", b"cde"], 40),
+            make(&[b"xyz", b"q"], 64),
+            make(&[b"hello"], 36),
+        ];
+        let slices: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
+        let found = detect_chunk_layouts(&slices);
+        assert!(
+            !found
+                .iter()
+                .any(|layout| layout.header_len == 0 && layout.width == 1 && layout.pre == 1),
+            "padding was accepted as records: {found:?}"
         );
     }
 
