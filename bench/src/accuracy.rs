@@ -428,9 +428,6 @@ fn ground_truth_boundaries(fields: &[TruthField], end: usize) -> BTreeSet<usize>
 /// A single inferred leaf field, flattened from the executed parse tree.
 #[derive(Debug, Clone)]
 struct InferredField {
-    /// The field's end offset (exclusive), so a match can require the whole span
-    /// to agree, not just the start.
-    end: usize,
     /// The field's role token.
     role: String,
     /// The field's storage type.
@@ -463,14 +460,16 @@ fn inferred_boundaries(fields: &[FieldInstance], consumed: usize, len: usize) ->
     out
 }
 
-/// Index the inferred leaf fields by their start offset, so a ground-truth field
-/// can be matched to the inferred field that begins at the same place. The
-/// sample bytes are needed to recover an integer field's byte order.
-fn inferred_leaves_by_start(
+/// Index the inferred leaf fields by their byte span, so a ground-truth field
+/// can be matched to the inferred field that occupies exactly the same bytes.
+/// Keying by span rather than start keeps an empty field (a zero-length chunk
+/// body, say) from hiding the field that starts where it does. The sample bytes
+/// are needed to recover an integer field's byte order.
+fn inferred_leaves_by_span(
     fields: &[FieldInstance],
     bytes: &[u8],
-) -> HashMap<usize, InferredField> {
-    fn walk(field: &FieldInstance, bytes: &[u8], out: &mut HashMap<usize, InferredField>) {
+) -> HashMap<(usize, usize), InferredField> {
+    fn walk(field: &FieldInstance, bytes: &[u8], out: &mut HashMap<(usize, usize), InferredField>) {
         match &field.value {
             Value::Struct(children) | Value::Array(children) => {
                 for child in children {
@@ -478,11 +477,11 @@ fn inferred_leaves_by_start(
                 }
             }
             value => {
-                out.entry(field.start).or_insert_with(|| InferredField {
-                    end: field.end,
-                    role: canonical_field_role(field.role),
-                    ty: inferred_type_token(value, bytes, field.start, field.end),
-                });
+                out.entry((field.start, field.end))
+                    .or_insert_with(|| InferredField {
+                        role: canonical_field_role(field.role),
+                        ty: inferred_type_token(value, bytes, field.start, field.end),
+                    });
             }
         }
     }
@@ -564,19 +563,16 @@ pub fn evaluate_format_in(corpus_dir: &Path, format: &str) -> std::io::Result<Fo
         let truth_boundaries = ground_truth_boundaries(&truth_fields, end);
         let execution = execute(&refined.format, bytes, &limits);
         let inferred = inferred_boundaries(&execution.fields, execution.consumed, bytes.len());
-        let leaves = inferred_leaves_by_start(&execution.fields, bytes);
+        let leaves = inferred_leaves_by_span(&execution.fields, bytes);
         let (precision, recall, f1) = boundary_scores(&truth_boundaries, &inferred);
 
         for truth in &truth_fields {
             field_total += 1;
-            // Award semantic credit only when the inferred field occupies the
+            // Award semantic credit only when an inferred field occupies the
             // same span as the ground-truth field. A field at the right start but
             // the wrong length was not recovered, so it earns no role or type
             // hit even if its label happens to agree.
-            if let Some(inferred_field) = leaves.get(&truth.start) {
-                if inferred_field.end != truth.end {
-                    continue;
-                }
+            if let Some(inferred_field) = leaves.get(&(truth.start, truth.end)) {
                 if inferred_field.role == truth.role {
                     role_hits += 1;
                 }
