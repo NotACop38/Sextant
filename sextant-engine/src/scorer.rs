@@ -299,12 +299,16 @@ struct FieldTally {
 /// Field definitions are identified by address. The format is borrowed
 /// immutably for the whole scoring pass, so each definition keeps one stable,
 /// unique address, and every element of an array maps to its element
-/// definition. The address is only compared, never dereferenced.
+/// definition. The address is only compared, never dereferenced. Tallies are
+/// kept in first-visit order, which follows the deterministic parse order, so
+/// the floating-point sum in [`StructureTally::finish`] is reproducible run to
+/// run (a hash map's iteration order over addresses is not).
 #[derive(Debug, Default)]
 struct StructureTally {
     raw_bits: f64,
     data_bits: f64,
-    fields: HashMap<*const Field, FieldTally>,
+    fields: Vec<FieldTally>,
+    index: HashMap<*const Field, usize>,
 }
 
 /// Whether a field's constraints of each kind were checked and all passed.
@@ -365,8 +369,16 @@ impl StructureTally {
         sample: &[u8],
         verified: &HashMap<(usize, &str), Verified>,
     ) {
-        let first_visit = !self.fields.contains_key(&std::ptr::from_ref(field));
-        let tally = self.fields.entry(std::ptr::from_ref(field)).or_default();
+        let key = std::ptr::from_ref(field);
+        let (slot, first_visit) = match self.index.get(&key) {
+            Some(&slot) => (slot, false),
+            None => {
+                self.fields.push(FieldTally::default());
+                self.index.insert(key, self.fields.len() - 1);
+                (self.fields.len() - 1, true)
+            }
+        };
+        let tally = &mut self.fields[slot];
         if first_visit {
             tally.constant_bytes = field
                 .constraints
@@ -437,7 +449,7 @@ impl StructureTally {
             return 0.0;
         }
         let mut described = self.data_bits;
-        for tally in self.fields.values() {
+        for tally in &self.fields {
             described += RAW_BITS_PER_BYTE * tally.constant_bytes as f64;
             if !tally.only_constant {
                 described += FIELD_MODEL_BITS;
