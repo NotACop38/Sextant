@@ -37,15 +37,26 @@ relies on. The detailed privacy notes live in
   These controls are exercised with malformed-input tests and fuzzing; they are
   not a proof covering every possible input.
 - Ingestion caps per-sample and total bytes and never reads a file whole.
-  Traversal of a literal directory input does not follow symlinks, so it cannot
-  loop on a cycle or read outside the selected tree. A recursive glob pattern
-  (for example `root/**/*`) is expanded by the `glob` crate, which may traverse
-  symlinked directories while matching; after expansion Sextant refuses symlink
-  matches themselves and drops any path whose canonical form escapes the glob's
-  literal prefix. Prefer a literal directory input when the tree may contain
-  symlink cycles. The `inspect` and `export --cross-validate` paths apply the
-  same per-sample and total byte caps, and report JSON is size-capped before
-  parse.
+  Directory inputs and glob patterns (for example `root/**/*`) are expanded by
+  one bounded walker that never follows a symlink it finds, so it cannot loop on
+  a cycle or read outside the selected tree; only a symlink named explicitly as
+  an input, or as the literal leading directories of a glob, is honored. The
+  walk stops with a notice after one million directory entries or 100,000
+  resolved files. Only regular files become samples: FIFOs, sockets, and
+  devices are skipped with a notice, and each file is checked again through its
+  open handle, opened without blocking on Linux, macOS, and the BSDs, so a file
+  swapped for a FIFO cannot hang a run. Capture inputs (`--transport` and
+  `--port`) go through the same ingestion. The `inspect` and
+  `export --cross-validate` paths apply the same per-sample and total byte caps
+  and the same regular-file check, and report JSON is size-capped before parse.
+- The pcap reader skips packets the capture cut short (captured length below
+  the original length, or an IP or UDP length beyond the captured bytes) rather
+  than treating a partial payload as a message, and reports how many it
+  skipped. A truncated or corrupt later record or block ends reading with the
+  earlier messages kept and a notice.
+- The CLI escapes control characters and Unicode bidirectional controls in the
+  file names, patterns, and arguments it prints, so a hostile name cannot
+  inject terminal escape sequences.
 - Optional Kaitai cross-validation (`export --cross-validate`) shells out to
   tools found on `PATH` (`kaitai-struct-compiler` / `ksc`, and `python3` with
   `kaitaistruct`). Pin a reviewed binary with `SEXTANT_KAITAI_COMPILER` when you

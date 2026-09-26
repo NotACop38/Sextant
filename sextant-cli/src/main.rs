@@ -17,19 +17,26 @@
 //! prints the PRD Section 15 metrics table (Step 12), exiting non-zero if any
 //! configured target is missed so it doubles as the CI regression guard.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use sextant_engine::ingest::read_regular_file;
+use sextant_engine::pcap::extract_capture;
+use sextant_engine::protocol::Population;
 use sextant_engine::{
     Clustering, DEFAULT_MAX_BYTES_PER_SAMPLE, DEFAULT_MAX_MESSAGES, DEFAULT_MAX_REPORT_BYTES,
     DEFAULT_MAX_TOTAL_BYTES, ExtractOptions, InferenceOptions, IngestOptions, InspectOptions,
-    Limits, ProtocolInference, Report, SampleSet, Transport, extract_messages, infer,
-    infer_protocol, ingest, render,
+    Limits, PcapError, ProtocolInference, Report, SampleSet, Transport, infer, infer_protocol,
+    ingest, render,
 };
 use sextant_export::{ExportFormat, export};
 
+/// The PRD exit code for a usage error (Section 14): an unknown flag, a missing
+/// required argument, or a malformed flag value.
+const EXIT_USAGE_ERROR: u8 = 1;
 /// The PRD exit code for an input error (Section 14): a path that does not
 /// exist, a malformed glob, an unreadable file, or no usable samples.
 const EXIT_INPUT_ERROR: u8 = 2;
@@ -148,7 +155,10 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => return report_parse_outcome(&error),
+    };
     match cli.command {
         Command::Infer {
             inputs,
@@ -197,6 +207,50 @@ fn main() -> ExitCode {
             run_bench(corpus.as_deref(), out.as_deref(), force)
         }
     }
+}
+
+/// Report a command line that did not parse into a command, with the PRD exit
+/// codes (Section 14): `--help` and `--version` print to standard output and
+/// exit 0, and a usage error prints to standard error and exits 1, distinct
+/// from the input-error code 2.
+fn report_parse_outcome(error: &clap::Error) -> ExitCode {
+    if error.use_stderr() {
+        // The message can quote the offending argument, so it is rendered as
+        // plain text and escaped line by line before it reaches the terminal.
+        let text = error.to_string();
+        let lines: Vec<Cow<'_, str>> = text.split('\n').map(escape_untrusted).collect();
+        eprint!("{}", lines.join("\n"));
+        ExitCode::from(EXIT_USAGE_ERROR)
+    } else {
+        // Help and version text is Sextant's own; a closed stream is not an
+        // error worth reporting.
+        let _ = error.print();
+        ExitCode::SUCCESS
+    }
+}
+
+/// Escape the characters of a user-controlled string (a path, a pattern, or a
+/// command-line argument) that could drive or disguise terminal output: control
+/// characters, such as escape, carriage return, and newline, and the Unicode
+/// bidirectional embedding, override, and isolate controls (U+202A to U+202E
+/// and U+2066 to U+2069). Each becomes a visible Rust-style escape such as
+/// `\u{1b}`; everything else, including other non-ASCII text, is kept as is.
+fn escape_untrusted(text: &str) -> Cow<'_, str> {
+    fn needs_escape(c: char) -> bool {
+        c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    }
+    if !text.chars().any(needs_escape) {
+        return Cow::Borrowed(text);
+    }
+    let mut escaped = String::with_capacity(text.len() + 16);
+    for c in text.chars() {
+        if needs_escape(c) {
+            escaped.extend(c.escape_default());
+        } else {
+            escaped.push(c);
+        }
+    }
+    Cow::Owned(escaped)
 }
 
 /// Run the accuracy benchmark over the ground-truth corpus and print the results
@@ -286,6 +340,7 @@ fn run_infer(
                 inputs,
                 transport,
                 port,
+                recursive,
                 max_bytes_per_sample,
                 max_total_bytes,
                 timeout,
@@ -303,24 +358,15 @@ fn run_infer(
         (None, None) => {}
     }
 
-    let options = IngestOptions {
-        max_bytes_per_sample,
-        max_total_bytes,
-        recursive,
-    };
-    let set = match ingest(inputs, &options) {
-        Ok(set) if set.is_empty() => {
-            eprintln!("sextant infer: no samples found in the given inputs");
-            return ExitCode::from(EXIT_INPUT_ERROR);
-        }
-        Ok(set) => set,
-        Err(error) => {
-            eprintln!("sextant infer: {error}");
-            return ExitCode::from(EXIT_INPUT_ERROR);
-        }
+    let options = IngestOptions::default()
+        .with_max_bytes_per_sample(max_bytes_per_sample)
+        .with_max_total_bytes(max_total_bytes)
+        .with_recursive(recursive);
+    let Some(set) = ingest_or_report(inputs, &options, "samples") else {
+        return ExitCode::from(EXIT_INPUT_ERROR);
     };
 
-    print_sample_set(&set);
+    print_sample_set(&set, "sample", "samples");
 
     let inference = InferenceOptions {
         limits: limits_with_optional_timeout(timeout),
@@ -334,10 +380,14 @@ fn run_infer(
     print_report(&report);
 
     if let Some(path) = out {
+        let shown = escape_untrusted(path);
         match write_report(&report, path, force) {
-            Ok(()) => println!("\nWrote report to {path}"),
+            Ok(()) => println!("\nWrote report to {shown}"),
             Err(error) => {
-                eprintln!("sextant infer: could not write report to {path}: {error}");
+                eprintln!(
+                    "sextant infer: could not write report to {shown}: {}",
+                    escape_untrusted(&error.to_string())
+                );
                 return ExitCode::from(EXIT_INPUT_ERROR);
             }
         }
@@ -358,15 +408,18 @@ fn run_infer(
 /// (Step 11, FR-2). Writes the report with `--out` so it can be exported to a
 /// Wireshark dissector, the primary output for the protocol track.
 ///
-/// The byte caps bound memory exactly as they do for file ingestion (FR-5,
-/// FR-24): each capture is read with a bounded reader so a single attacker-sized
-/// pcap cannot exhaust memory, and reading stops once the captures together would
-/// exceed the total cap.
+/// Capture inputs are resolved exactly like file inputs, through [`ingest`]:
+/// files, directories (recursively with `-r`), and globs, with the same
+/// per-sample and total byte caps and their notices (FR-5, FR-24), the same
+/// refusal of FIFOs, sockets, and devices, and the same de-duplication of a
+/// capture named twice. A capture clipped by a cap is reported, as are packets
+/// the reader skipped or dropped.
 #[allow(clippy::too_many_arguments)]
 fn run_infer_protocol(
     inputs: &[String],
     transport: &str,
     port: u16,
+    recursive: bool,
     max_bytes_per_sample: usize,
     max_total_bytes: usize,
     timeout: Option<u64>,
@@ -375,55 +428,75 @@ fn run_infer_protocol(
     force: bool,
 ) -> ExitCode {
     let Some(transport) = Transport::parse(transport) else {
-        eprintln!("sextant infer: unknown transport `{transport}`. Use tcp or udp.");
+        eprintln!(
+            "sextant infer: unknown transport `{}`. Use tcp or udp.",
+            escape_untrusted(transport)
+        );
         return ExitCode::from(EXIT_INPUT_ERROR);
     };
-    let mut extract = ExtractOptions::new(transport, port);
-    extract.max_messages = max_messages;
 
-    let mut messages = Vec::new();
-    let mut total_read = 0usize;
-    let mut message_cap_hit = false;
-    for input in inputs {
-        if messages.len() >= max_messages {
-            message_cap_hit = true;
-            break;
-        }
-        // A capture is read with the same caps file ingestion enforces: at most
-        // the per-sample cap from any one file, and never past the total cap.
-        let remaining = max_total_bytes.saturating_sub(total_read);
-        if remaining == 0 {
-            eprintln!(
-                "sextant infer: reached the total-input cap of {max_total_bytes} bytes; \
-                 skipping remaining capture(s)."
+    let options = IngestOptions::default()
+        .with_max_bytes_per_sample(max_bytes_per_sample)
+        .with_max_total_bytes(max_total_bytes)
+        .with_recursive(recursive);
+    let Some(set) = ingest_or_report(inputs, &options, "captures") else {
+        return ExitCode::from(EXIT_INPUT_ERROR);
+    };
+    print_sample_set(&set, "file", "files");
+    for sample in &set.samples {
+        if sample.provenance.is_truncated() {
+            println!(
+                "note: {} was clipped to {} of {} bytes by --max-bytes-per-sample; packets \
+                 after that point were not read.",
+                escape_untrusted(&sample.path().display().to_string()),
+                sample.provenance.length,
+                sample.provenance.original_length
             );
-            break;
         }
-        let cap = max_bytes_per_sample.min(remaining);
-        let bytes = match read_capped(input, cap) {
-            Ok(bytes) => bytes,
+    }
+
+    let mut extract = ExtractOptions::new(transport, port);
+    let mut messages = Vec::new();
+    let mut message_cap_hit = false;
+    for sample in &set.samples {
+        let path = sample.path().display().to_string();
+        let shown = escape_untrusted(&path);
+        // Leave room under the global message cap for this capture. With none
+        // left, the reader still reports whether a further message existed.
+        extract.max_messages = max_messages.saturating_sub(messages.len());
+        let extraction = match extract_capture(sample.bytes(), &extract) {
+            Ok(extraction) => extraction,
+            // A file that a directory or glob swept in and that is not a
+            // capture at all (a README beside the captures) is skipped with a
+            // note. A file named explicitly, or a damaged capture, is an error.
+            Err(PcapError::UnknownFormat)
+                if !inputs.iter().any(|input| Path::new(input) == sample.path()) =>
+            {
+                println!("note: {shown}: skipped, not a pcap or pcapng capture.");
+                continue;
+            }
             Err(error) => {
-                eprintln!("sextant infer: could not read capture {input}: {error}");
+                eprintln!("sextant infer: {shown}: {error}");
                 return ExitCode::from(EXIT_INPUT_ERROR);
             }
         };
-        total_read += bytes.len();
-        // Leave room under the global message cap for this capture.
-        extract.max_messages = max_messages.saturating_sub(messages.len());
-        match extract_messages(&bytes, &extract) {
-            Ok(extracted) => messages.extend(extracted),
-            Err(error) => {
-                eprintln!("sextant infer: {input}: {error}");
-                return ExitCode::from(EXIT_INPUT_ERROR);
-            }
+        for notice in extraction.notices() {
+            println!("note: {shown}: {notice}.");
+        }
+        messages.extend(extraction.messages);
+        if extraction.message_cap_reached {
+            message_cap_hit = true;
+            break;
         }
     }
-    if messages.len() >= max_messages {
-        message_cap_hit = true;
-        messages.truncate(max_messages);
-    }
+    let cap_note = format!(
+        "note: stopped at the --max-messages cap of {max_messages}; further messages were ignored."
+    );
 
     if messages.is_empty() {
+        if message_cap_hit {
+            eprintln!("{cap_note}");
+        }
         eprintln!(
             "sextant infer: no {transport} payloads on port {port} were found in the capture(s)."
         );
@@ -444,11 +517,9 @@ fn run_infer_protocol(
         inference.message_count
     );
     if message_cap_hit {
-        println!(
-            "note: stopped at the --max-messages cap of {max_messages}; further messages were ignored."
-        );
+        println!("{cap_note}");
     }
-    print_clustering(&inference);
+    print_clustering(&inference, port);
     println!(
         "Request/response pairs associated: {}.",
         inference.associations.len()
@@ -456,15 +527,19 @@ fn run_infer_protocol(
     print_report(&inference.report);
 
     if let Some(path) = out {
+        let shown = escape_untrusted(path);
         match write_report(&inference.report, path, force) {
             Ok(()) => {
-                println!("\nWrote report to {path}");
+                println!("\nWrote report to {shown}");
                 println!(
-                    "Export a Wireshark dissector with: sextant export {path} --format wireshark"
+                    "Export a Wireshark dissector with: sextant export {shown} --format wireshark"
                 );
             }
             Err(error) => {
-                eprintln!("sextant infer: could not write report to {path}: {error}");
+                eprintln!(
+                    "sextant infer: could not write report to {shown}: {}",
+                    escape_untrusted(&error.to_string())
+                );
                 return ExitCode::from(EXIT_INPUT_ERROR);
             }
         }
@@ -480,13 +555,30 @@ fn run_infer_protocol(
     }
 }
 
-/// Print how the messages clustered by type (FR-2).
-fn print_clustering(inference: &ProtocolInference) {
+/// Print how the messages clustered by type (FR-2), naming the messages the
+/// clusters cover: the requests toward the port when both directions are
+/// present, otherwise every message.
+fn print_clustering(inference: &ProtocolInference, port: u16) {
     let clustering: &Clustering = &inference.clustering;
+    let covered = clustering.clustered();
+    let excluded = clustering.excluded_short;
+    let members = match clustering.population {
+        Population::Requests => format!("request(s) sent to port {port}"),
+        Population::Responses => format!("response(s) sent from port {port}"),
+        Population::AllMessages => "message(s) in either direction".to_owned(),
+    };
+    let scope = if excluded == 0 {
+        format!("all {covered} {members}")
+    } else {
+        format!(
+            "{covered} of the {} {members}, leaving out {excluded} too short to hold the type byte",
+            covered + excluded
+        )
+    };
     match &clustering.discriminant {
         Some(discriminant) => {
             println!(
-                "Message clustering: {} type(s) discriminated at byte offset {}.",
+                "Message clustering over {scope}: {} type(s) discriminated at byte offset {}.",
                 clustering.clusters.len(),
                 discriminant.offset
             );
@@ -496,19 +588,20 @@ fn print_clustering(inference: &ProtocolInference) {
                 }
             }
         }
-        None => println!("Message clustering: a single message type (no discriminant found)."),
+        None => println!(
+            "Message clustering over {scope}: a single message type (no discriminant found)."
+        ),
     }
 }
 
-/// Read at most `cap` bytes from a file. A very large capture is never read
-/// whole: the read limit bounds both the bytes read and the allocation, so an
-/// attacker-sized pcap costs only `cap` bytes of memory (FR-24, FR-5).
+/// Read at most `cap` bytes from a regular file. A very large file is never
+/// read whole: the read limit bounds both the bytes read and the allocation, so
+/// an attacker-sized input costs only `cap` bytes of memory (FR-24, FR-5). The
+/// file is checked through its open handle, which is opened without blocking
+/// where the platform allows, so a FIFO, socket, or device is refused instead
+/// of hanging the read.
 fn read_capped(path: &str, cap: usize) -> std::io::Result<Vec<u8>> {
-    use std::io::Read as _;
-    let file = std::fs::File::open(path)?;
-    let mut data = Vec::new();
-    file.take(cap as u64).read_to_end(&mut data)?;
-    Ok(data)
+    read_regular_file(Path::new(path), cap).map(|(data, _)| data)
 }
 
 /// Apply an optional CLI timeout without clearing the default five-second cap
@@ -814,17 +907,40 @@ fn print_report(report: &Report) {
     }
 }
 
-/// Print the ingested sample count, each sample's path and retained size, the
-/// total, and any cap notices to standard output.
-fn print_sample_set(set: &SampleSet) {
+/// Ingest `inputs`, or report why nothing usable came of them. On an ingestion
+/// error, or when the inputs hold no `what` at all, the reason and any notices
+/// that explain it (a skipped FIFO, a traversal limit) go to standard error and
+/// `None` is returned for the caller to exit with the input-error code.
+fn ingest_or_report(inputs: &[String], options: &IngestOptions, what: &str) -> Option<SampleSet> {
+    match ingest(inputs, options) {
+        Ok(set) if set.is_empty() => {
+            for notice in &set.notices {
+                eprintln!("note: {}", escape_untrusted(&notice.to_string()));
+            }
+            eprintln!("sextant infer: no {what} found in the given inputs");
+            None
+        }
+        Ok(set) => Some(set),
+        Err(error) => {
+            eprintln!("sextant infer: {}", escape_untrusted(&error.to_string()));
+            None
+        }
+    }
+}
+
+/// Print the ingested sample count, each sample's path (escaped, since file
+/// names are untrusted) and retained size, the total, and any cap notices to
+/// standard output. `singular` and `plural_form` name what the samples are.
+fn print_sample_set(set: &SampleSet, singular: &str, plural_form: &str) {
     println!(
         "Ingested {} {} ({} bytes total).",
         set.len(),
-        plural(set.len(), "sample", "samples"),
+        plural(set.len(), singular, plural_form),
         set.total_bytes
     );
     for sample in &set.samples {
-        let path = sample.provenance.path.display();
+        let path = sample.provenance.path.display().to_string();
+        let path = escape_untrusted(&path);
         if sample.provenance.is_truncated() {
             println!(
                 "  {path}: {} bytes (clipped from {} bytes)",
@@ -835,7 +951,7 @@ fn print_sample_set(set: &SampleSet) {
         }
     }
     for notice in &set.notices {
-        println!("note: {notice}");
+        println!("note: {}", escape_untrusted(&notice.to_string()));
     }
 }
 
@@ -871,6 +987,29 @@ mod tests {
         let command = Cli::command();
         let version = command.get_version();
         assert!(version.is_some_and(|value| !value.is_empty()));
+    }
+
+    #[test]
+    fn untrusted_text_is_escaped_for_the_terminal() {
+        // Clean text, including non-ASCII names, is borrowed unchanged.
+        assert!(matches!(
+            escape_untrusted("caf\u{e9}/sample_01.bin"),
+            Cow::Borrowed(_)
+        ));
+        assert_eq!(
+            escape_untrusted("a\u{1b}[2Jb\r\nc\u{9b}d"),
+            "a\\u{1b}[2Jb\\r\\nc\\u{9b}d"
+        );
+        for bidi in ['\u{202a}', '\u{202e}', '\u{2066}', '\u{2069}'] {
+            let escaped = escape_untrusted(&format!("x{bidi}y")).into_owned();
+            assert!(!escaped.contains(bidi), "{escaped:?}");
+            assert!(escaped.starts_with("x\\u{"), "{escaped:?}");
+        }
+        // Windows path separators and quotes are left alone.
+        assert_eq!(
+            escape_untrusted("C:\\data\\\"a\".bin"),
+            "C:\\data\\\"a\".bin"
+        );
     }
 
     #[test]

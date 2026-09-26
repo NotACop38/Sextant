@@ -300,3 +300,220 @@ fn no_inputs_is_an_error() {
         Err(IngestError::NoInputs)
     ));
 }
+
+/// Run `work` on a helper thread and fail if it does not finish promptly, so a
+/// runaway walk or a blocking open fails the test instead of hanging the suite.
+fn finishes_promptly<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(work());
+    });
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("ingestion did not finish promptly")
+}
+
+fn file_names(set: &sextant_engine::SampleSet) -> Vec<String> {
+    set.samples
+        .iter()
+        .map(|sample| {
+            sample
+                .provenance
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_recursive_glob_does_not_follow_symlink_cycles() {
+    let scratch = Scratch::new("globcycle");
+    scratch.write("a.bin", b"a");
+    scratch.write("sub/b.bin", b"b");
+    // Two links back to the directory itself would make a following walker
+    // visit an exponential number of paths through `**`.
+    std::os::unix::fs::symlink(".", scratch.path().join("l1")).expect("symlink");
+    std::os::unix::fs::symlink(".", scratch.path().join("l2")).expect("symlink");
+
+    let pattern = format!("{}/**/*.bin", scratch.path_str());
+    let set = finishes_promptly(move || ingest(&[pattern], &IngestOptions::default()))
+        .expect("the glob expands");
+    assert_eq!(file_names(&set), ["a.bin", "b.bin"]);
+    assert!(
+        set.notices.contains(&Notice::SymlinksSkipped { count: 2 }),
+        "notices were {:?}",
+        set.notices
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_glob_does_not_follow_a_symlinked_directory_out_of_the_tree() {
+    let outside = Scratch::new("globoutside");
+    outside.write("secret.bin", b"secret");
+    let scratch = Scratch::new("globinside");
+    scratch.write("inside.bin", b"inside");
+    std::os::unix::fs::symlink(outside.path(), scratch.path().join("escape")).expect("symlink");
+
+    for pattern in ["**/*.bin", "*/*.bin", "*"] {
+        let pattern = format!("{}/{pattern}", scratch.path_str());
+        let set = ingest(
+            &[pattern.clone()],
+            &IngestOptions::default().with_recursive(true),
+        )
+        .expect("the glob expands");
+        assert!(
+            set.samples.iter().all(|sample| sample.data != b"secret"),
+            "{pattern} followed a symlink out of the tree"
+        );
+    }
+}
+
+#[test]
+fn the_walk_entry_limit_stops_expansion_with_a_notice() {
+    let scratch = Scratch::new("walklimit");
+    for name in ["a.bin", "b.bin", "c.bin", "d.bin", "e.bin"] {
+        scratch.write(name, b"x");
+    }
+    let options = IngestOptions::default().with_max_walk_entries(3);
+    let set = ingest(&[scratch.path_str()], &options).expect("ingest stops cleanly");
+    assert!(set.len() < 5, "the walk ran past its limit");
+    assert!(
+        set.notices.contains(&Notice::WalkLimitReached { limit: 3 }),
+        "notices were {:?}",
+        set.notices
+    );
+
+    let glob = format!("{}/*.bin", scratch.path_str());
+    let set = ingest(&[glob], &options).expect("the glob stops cleanly");
+    assert!(set.notices.contains(&Notice::WalkLimitReached { limit: 3 }));
+}
+
+#[test]
+fn the_input_file_limit_stops_resolution_with_a_notice() {
+    let scratch = Scratch::new("filelimit");
+    for name in ["a.bin", "b.bin", "c.bin", "d.bin"] {
+        scratch.write(name, b"x");
+    }
+    let options = IngestOptions::default().with_max_input_files(2);
+    let set = ingest(&[scratch.path_str()], &options).expect("ingest stops cleanly");
+    assert_eq!(file_names(&set), ["a.bin", "b.bin"]);
+    assert!(
+        set.notices.contains(&Notice::FileLimitReached { limit: 2 }),
+        "notices were {:?}",
+        set.notices
+    );
+}
+
+#[test]
+fn an_existing_path_with_glob_metacharacters_is_taken_literally() {
+    let scratch = Scratch::new("literalmeta");
+    let bracketed = scratch.write("sample[1].bin", b"bracketed");
+    scratch.write("sample1.bin", b"plain");
+
+    // As a glob, `[1]` would match `sample1.bin`; the file named exactly this
+    // must be ingested instead.
+    let set = ingest(
+        &[bracketed.to_str().unwrap().to_string()],
+        &IngestOptions::default(),
+    )
+    .expect("ingest the literal path");
+    assert_eq!(set.len(), 1);
+    assert_eq!(set.samples[0].data, b"bracketed");
+
+    // A missing path with a metacharacter is still expanded as a glob.
+    let pattern = format!("{}/sample[0-9].bin", scratch.path_str());
+    let set = ingest(&[pattern], &IngestOptions::default()).expect("ingest the glob");
+    assert_eq!(set.len(), 1);
+    assert_eq!(set.samples[0].data, b"plain");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_existing_path_with_a_star_is_taken_literally() {
+    let scratch = Scratch::new("literalstar");
+    let starred = scratch.write("all*.bin", b"starred");
+    scratch.write("allsorts.bin", b"other");
+    let set = ingest(
+        &[starred.to_str().unwrap().to_string()],
+        &IngestOptions::default(),
+    )
+    .expect("ingest the literal path");
+    assert_eq!(set.len(), 1);
+    assert_eq!(set.samples[0].data, b"starred");
+}
+
+#[test]
+fn a_parent_component_after_a_wildcard_is_rejected() {
+    let scratch = Scratch::new("parentglob");
+    scratch.write("sub/x.bin", b"x");
+    let pattern = format!("{}/*/../sub/x.bin", scratch.path_str());
+    let result = ingest(&[pattern], &IngestOptions::default());
+    assert!(
+        matches!(result, Err(IngestError::BadPattern { .. })),
+        "got {result:?}"
+    );
+}
+
+#[test]
+fn a_recursive_glob_matches_nested_files_in_sorted_order() {
+    let scratch = Scratch::new("globorder");
+    scratch.write("z.bin", b"z");
+    scratch.write("a/y.bin", b"y");
+    scratch.write("a/b/x.bin", b"x");
+    scratch.write("a/b/ignored.txt", b"no");
+    let pattern = format!("{}/**/*.bin", scratch.path_str());
+    let set = ingest(&[pattern], &IngestOptions::default()).expect("ingest the glob");
+    // Sorted by path components: a/b/x.bin, a/y.bin, then z.bin.
+    assert_eq!(file_names(&set), ["x.bin", "y.bin", "z.bin"]);
+
+    // A trailing separator matches directories only, which contribute their
+    // top-level files.
+    let dirs = format!("{}/*/", scratch.path_str());
+    let set = ingest(&[dirs], &IngestOptions::default()).expect("ingest the glob");
+    assert_eq!(file_names(&set), ["y.bin"]);
+}
+
+/// Create a FIFO with the system `mkfifo` tool; `false` when it is missing.
+#[cfg(unix)]
+fn make_fifo(path: &Path) -> bool {
+    std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_input_is_skipped_with_a_notice_and_never_blocks() {
+    let scratch = Scratch::new("fifo");
+    let fifo = scratch.path().join("capture.pcap");
+    if !make_fifo(&fifo) {
+        eprintln!("skipping: mkfifo is not available");
+        return;
+    }
+    scratch.write("real.bin", b"real");
+
+    // Named directly, and swept in by a directory walk.
+    for input in [fifo.to_str().unwrap().to_string(), scratch.path_str()] {
+        let set = finishes_promptly(move || ingest(&[input], &IngestOptions::default()))
+            .expect("ingest completes");
+        assert!(set.samples.iter().all(|sample| sample.data == b"real"));
+        assert!(
+            set.notices
+                .contains(&Notice::NotRegularFilesSkipped { count: 1 }),
+            "notices were {:?}",
+            set.notices
+        );
+    }
+
+    // The public reader refuses the FIFO instead of blocking on it.
+    let target = fifo.clone();
+    let result = finishes_promptly(move || sextant_engine::ingest::read_regular_file(&target, 16));
+    let error = result.expect_err("a FIFO is not a regular file");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}

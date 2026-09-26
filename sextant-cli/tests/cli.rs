@@ -150,8 +150,14 @@ fn bench_writes_machine_readable_results() {
         .expect("run sextant bench --out");
     assert!(output.status.success(), "bench --out should exit zero");
     let json = std::fs::read_to_string(&out).expect("results.json written");
-    assert!(json.contains("\"boundary_f1\""), "results JSON: {json}");
-    assert!(json.contains("\"parser_validity\""), "results JSON: {json}");
+    for key in [
+        "\"tiers\"",
+        "\"boundary_f1\"",
+        "\"native_validity\"",
+        "\"floors\"",
+    ] {
+        assert!(json.contains(key), "results JSON is missing {key}");
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 

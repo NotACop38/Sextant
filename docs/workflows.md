@@ -27,6 +27,7 @@ report that `inspect` and `export` consume.
 | `--timeout <SECONDS>` | Wall-clock cap for executing the structure against each sample. |
 | `--transport <tcp\|udp>` | Treat inputs as packet captures and extract this transport's payloads. Requires `--port`. |
 | `--port <N>` | The port that identifies the protocol in a capture. Requires `--transport`. |
+| `--max-messages <N>` | Cap the protocol messages extracted across all captures. |
 | `--out <FILE>` | Write the JSON report to this path. |
 
 ### Examples
@@ -65,6 +66,17 @@ To infer a protocol from a packet capture, pass a `.pcap` or `.pcapng` file with
 `--transport` and `--port`. Sextant extracts the payloads carried by that
 transport and port, clusters them into message types, and infers structure over
 them. The Wireshark Lua exporter is the natural output for this track.
+
+Capture inputs are resolved like sample inputs: files, directories (with `-r` to
+recurse), and glob patterns, with the same byte caps and a capture named twice
+read once. A file that a directory or glob sweeps in and that is not a capture
+is skipped with a note; a file named explicitly must be a capture.
+`--max-messages` caps the messages extracted across all captures, and its note
+appears only when more messages were actually left out. Sextant notes, per
+capture, packets the capture cut short (they are skipped, not treated as
+complete messages), TCP keep-alive probes and exact retransmissions it dropped,
+and any truncated or corrupt block where reading stopped. When both endpoints
+use the selected port, the side that sent first is treated as the client.
 
 ## `inspect`: read a sample through the field map
 

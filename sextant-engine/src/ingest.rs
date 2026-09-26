@@ -25,6 +25,21 @@
 //! clipped sample additionally records its full size in [`Provenance`] so the
 //! truncation is visible.
 //!
+//! # Traversal safety (FR-24, NFR-2)
+//!
+//! Directory inputs and glob patterns are expanded by one bounded walker. It
+//! reads each directory entry's own type and never follows a symbolic link it
+//! finds, so a link cycle cannot loop and a link cannot pull in files from
+//! outside the selected tree. A link named explicitly as an input, or as the
+//! literal leading directories of a glob, is still honored. The walk stops with
+//! a [`Notice`] once it has examined [`IngestOptions::max_walk_entries`]
+//! directory entries or resolved [`IngestOptions::max_input_files`] files.
+//!
+//! Only regular files become samples. FIFOs, sockets, and devices are skipped
+//! with a notice, and every file is checked again through its open handle, which
+//! is opened without blocking where the platform allows, so a path swapped for a
+//! FIFO after it was listed cannot hang the run.
+//!
 //! ```
 //! use sextant_engine::IngestOptions;
 //!
@@ -36,12 +51,13 @@
 
 use std::collections::BTreeSet;
 use std::error::Error;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-use glob::glob;
+use glob::{MatchOptions, Pattern};
 
 /// The default per-sample byte cap: 64 MiB. Large enough for the corpus formats,
 /// small enough that a single pathological file cannot exhaust memory (FR-5).
@@ -51,8 +67,17 @@ pub const DEFAULT_MAX_BYTES_PER_SAMPLE: usize = 64 << 20;
 /// retain across all samples (FR-5).
 pub const DEFAULT_MAX_TOTAL_BYTES: usize = 1 << 30;
 
-/// Options that govern ingestion: the byte caps (FR-5) and whether directory
-/// inputs are traversed recursively (FR-1).
+/// The default cap on directory entries examined while expanding directory and
+/// glob inputs: one million. Bounds the time a huge or hostile tree can cost
+/// (FR-24).
+pub const DEFAULT_MAX_WALK_ENTRIES: usize = 1_000_000;
+
+/// The default cap on input files resolved in one run: 100,000. Bounds the
+/// memory the resolved path list holds (FR-24).
+pub const DEFAULT_MAX_INPUT_FILES: usize = 100_000;
+
+/// Options that govern ingestion: the byte caps (FR-5), whether directory
+/// inputs are traversed recursively (FR-1), and the traversal limits (FR-24).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngestOptions {
     /// The most bytes retained from any single sample. A larger file is clipped
@@ -64,6 +89,14 @@ pub struct IngestOptions {
     /// Whether to descend into subdirectories of a directory input. Off by
     /// default: a directory yields only its top-level files unless asked (FR-1).
     pub recursive: bool,
+    /// The most directory entries that expanding directory and glob inputs may
+    /// examine, across all inputs. Once reached, expansion stops and a
+    /// [`Notice::WalkLimitReached`] is recorded.
+    pub max_walk_entries: usize,
+    /// The most files that inputs may resolve to, across all inputs. Once
+    /// reached, later matches are skipped and a [`Notice::FileLimitReached`] is
+    /// recorded.
+    pub max_input_files: usize,
 }
 
 impl Default for IngestOptions {
@@ -72,6 +105,8 @@ impl Default for IngestOptions {
             max_bytes_per_sample: DEFAULT_MAX_BYTES_PER_SAMPLE,
             max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
             recursive: false,
+            max_walk_entries: DEFAULT_MAX_WALK_ENTRIES,
+            max_input_files: DEFAULT_MAX_INPUT_FILES,
         }
     }
 }
@@ -95,6 +130,21 @@ impl IngestOptions {
     #[must_use]
     pub fn with_recursive(mut self, recursive: bool) -> Self {
         self.recursive = recursive;
+        self
+    }
+
+    /// Set the cap on directory entries examined during expansion (builder
+    /// style).
+    #[must_use]
+    pub fn with_max_walk_entries(mut self, limit: usize) -> Self {
+        self.max_walk_entries = limit;
+        self
+    }
+
+    /// Set the cap on files the inputs may resolve to (builder style).
+    #[must_use]
+    pub fn with_max_input_files(mut self, limit: usize) -> Self {
+        self.max_input_files = limit;
         self
     }
 }
@@ -170,7 +220,8 @@ pub struct SampleSet {
     pub samples: Vec<Sample>,
     /// The total number of retained bytes across the set.
     pub total_bytes: usize,
-    /// Notices about caps that were applied, to be surfaced to the user (FR-5).
+    /// Notices about caps, limits, and skipped inputs, to be surfaced to the
+    /// user (FR-5).
     pub notices: Vec<Notice>,
 }
 
@@ -198,8 +249,9 @@ impl SampleSet {
     }
 }
 
-/// A heads-up about a cap that took effect during ingestion, surfaced to the
-/// user so byte limits are never silent (FR-5).
+/// A heads-up about a cap or limit that took effect, or an input that was
+/// skipped, during ingestion. Surfaced to the user so nothing is dropped
+/// silently (FR-5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
     /// One or more samples were clipped to the per-sample byte cap.
@@ -216,6 +268,30 @@ pub enum Notice {
         /// How many samples were skipped because of the cap.
         skipped: usize,
     },
+    /// Expanding directories and globs stopped after examining the maximum
+    /// number of directory entries, so later matches were not considered.
+    WalkLimitReached {
+        /// The entry limit ([`IngestOptions::max_walk_entries`]).
+        limit: usize,
+    },
+    /// The inputs resolved to more files than the limit allows, so later
+    /// matches were skipped.
+    FileLimitReached {
+        /// The file limit ([`IngestOptions::max_input_files`]).
+        limit: usize,
+    },
+    /// Symbolic links found while walking a directory or glob were not
+    /// followed.
+    SymlinksSkipped {
+        /// How many links were skipped.
+        count: usize,
+    },
+    /// Inputs that are not regular files (a FIFO, socket, or device, including
+    /// a file replaced by one during the run) were skipped.
+    NotRegularFilesSkipped {
+        /// How many inputs were skipped.
+        count: usize,
+    },
 }
 
 impl fmt::Display for Notice {
@@ -228,6 +304,25 @@ impl fmt::Display for Notice {
             Notice::TotalCapReached { cap, skipped } => write!(
                 f,
                 "reached the total-input cap of {cap} bytes; skipped {skipped} sample(s)"
+            ),
+            Notice::WalkLimitReached { limit } => write!(
+                f,
+                "stopped expanding directories and globs after examining {limit} directory \
+                 entries; later matches were not considered, so narrow the inputs"
+            ),
+            Notice::FileLimitReached { limit } => write!(
+                f,
+                "the inputs matched more than {limit} files; later matches were skipped"
+            ),
+            Notice::SymlinksSkipped { count } => write!(
+                f,
+                "skipped {count} symbolic link(s) found while walking directories or globs; \
+                 name a link as an input to include it"
+            ),
+            Notice::NotRegularFilesSkipped { count } => write!(
+                f,
+                "skipped {count} input(s) that are not regular files (for example a FIFO, \
+                 socket, or device)"
             ),
         }
     }
@@ -289,12 +384,14 @@ impl Error for IngestError {
 /// ordered, normalized [`SampleSet`] with provenance and enforced byte caps
 /// (FR-1, FR-3, FR-4, FR-5).
 ///
-/// Inputs are resolved in order. An input containing a glob metacharacter
-/// (`*`, `?`, or `[`) is expanded against the filesystem; any other input is a
-/// literal path. A literal directory yields its files, descending into
-/// subdirectories only when [`IngestOptions::recursive`] is set (FR-1). The same
-/// file referenced more than once is ingested only once; distinct files with
-/// identical bytes are kept as distinct samples (FR-4).
+/// Inputs are resolved in order. An input that names an existing path is taken
+/// literally, even when its name contains a glob metacharacter; otherwise an
+/// input containing `*`, `?`, or `[` is expanded as a glob. A directory yields
+/// its regular files, descending into subdirectories only when
+/// [`IngestOptions::recursive`] is set (FR-1). Symbolic links found while
+/// walking are never followed. The same file referenced more than once is
+/// ingested only once; distinct files with identical bytes are kept as distinct
+/// samples (FR-4).
 ///
 /// # Errors
 ///
@@ -312,173 +409,450 @@ pub fn ingest<S: AsRef<str>>(
     }
 
     // Resolve every input to an ordered, de-duplicated list of file paths.
-    let mut resolved: Vec<PathBuf> = Vec::new();
-    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut resolver = Resolver::new(options);
     for input in inputs {
-        resolve_input(input.as_ref(), options.recursive, &mut resolved, &mut seen)?;
-    }
-
-    read_samples(&resolved, options)
-}
-
-/// Resolve one input string to zero or more file paths, appended to `out`.
-fn resolve_input(
-    input: &str,
-    recursive: bool,
-    out: &mut Vec<PathBuf>,
-    seen: &mut BTreeSet<PathBuf>,
-) -> Result<(), IngestError> {
-    if is_glob(input) {
-        // A glob is expanded by the `glob` crate, which may traverse symlinked
-        // directories while matching. After expansion we refuse symlink matches
-        // themselves and drop any path whose canonical form escapes the glob's
-        // literal prefix, so a crafted tree cannot pull in files outside the
-        // intended root (see `docs/threat-model.md`).
-        let matches = glob(input).map_err(|error| IngestError::BadPattern {
-            pattern: input.to_string(),
-            message: error.to_string(),
-        })?;
-        let root = glob_literal_root(input);
-        // Collect and sort so the expansion order is deterministic (NFR-6).
-        let mut paths: Vec<PathBuf> = Vec::new();
-        for entry in matches {
-            let path = entry.map_err(|error| IngestError::Io {
-                path: error.path().to_path_buf(),
-                source: error.into_error(),
-            })?;
-            if let Ok(meta) = fs::symlink_metadata(&path) {
-                if meta.file_type().is_symlink() {
-                    continue;
-                }
-            }
-            if let Some(root) = root.as_ref() {
-                if !path_stays_under_root(&path, root) {
-                    continue;
-                }
-            }
-            paths.push(path);
+        if resolver.exhausted() {
+            break;
         }
-        paths.sort();
-        for path in paths {
-            add_existing_path(&path, recursive, out, seen)?;
-        }
-        Ok(())
-    } else {
-        let path = PathBuf::from(input);
-        let metadata = fs::metadata(&path).map_err(|source| {
-            if source.kind() == io::ErrorKind::NotFound {
-                IngestError::PathNotFound { path: path.clone() }
-            } else {
-                IngestError::Io {
-                    path: path.clone(),
-                    source,
-                }
-            }
-        })?;
-        dispatch_path(&path, &metadata, recursive, out, seen)
+        resolver.resolve(input.as_ref())?;
     }
+
+    let (mut set, swapped) = read_samples(&resolver.files, options)?;
+    let mut notices = resolver.notices(swapped);
+    notices.append(&mut set.notices);
+    set.notices = notices;
+    Ok(set)
 }
 
-/// Add a path that a glob already proved to exist, classifying it as a file or
-/// directory.
-fn add_existing_path(
-    path: &Path,
-    recursive: bool,
-    out: &mut Vec<PathBuf>,
-    seen: &mut BTreeSet<PathBuf>,
-) -> Result<(), IngestError> {
-    let metadata = fs::metadata(path).map_err(|source| IngestError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    dispatch_path(path, &metadata, recursive, out, seen)
+/// Read at most `cap` bytes from the regular file at `path`, returning them
+/// with the file's full size in bytes (FR-5, FR-24).
+///
+/// The file is checked through its open handle, not just its path, and is
+/// opened without blocking where the platform allows, so a FIFO, socket, or
+/// device, including one swapped in for a file, is refused instead of stalling
+/// the read. A very large file costs only `cap` bytes of memory.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] of kind [`io::ErrorKind::InvalidInput`] when `path`
+/// is not a regular file, or the underlying error when it cannot be opened or
+/// read.
+pub fn read_regular_file(path: &Path, cap: usize) -> io::Result<(Vec<u8>, u64)> {
+    let Some((file, length)) = open_regular_file(path)? else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    };
+    Ok((read_up_to(file, cap)?, length))
 }
 
-/// Route a path to file collection or directory traversal based on its kind.
-/// Anything that is neither a regular file nor a directory (a socket or device,
-/// for example) is skipped rather than treated as a sample.
-fn dispatch_path(
-    path: &Path,
-    metadata: &fs::Metadata,
-    recursive: bool,
-    out: &mut Vec<PathBuf>,
-    seen: &mut BTreeSet<PathBuf>,
-) -> Result<(), IngestError> {
-    if metadata.is_dir() {
-        collect_dir(path, recursive, out, seen)
-    } else {
-        if metadata.is_file() {
-            push_unique(path, out, seen);
-        }
-        Ok(())
-    }
+/// The match options the glob crate uses for a single path component: case
+/// sensitive, with a leading dot matched by wildcards like any other character.
+const MATCH_OPTIONS: MatchOptions = MatchOptions {
+    case_sensitive: true,
+    require_literal_separator: true,
+    require_literal_leading_dot: false,
+};
+
+/// One component of a path pattern, matched against directory entry names.
+#[derive(Debug, Clone)]
+enum Segment {
+    /// `**`: zero or more directory levels.
+    AnyDirs,
+    /// Any single name, including one that is not valid UTF-8 (plain directory
+    /// traversal).
+    AnyName,
+    /// A glob component such as `*.bin`, matched against the entry name.
+    Name(Pattern),
 }
 
-/// Collect the regular files in a directory, sorted for determinism. Descends
-/// into subdirectories only when `recursive` is set (FR-1).
-fn collect_dir(
-    dir: &Path,
-    recursive: bool,
-    out: &mut Vec<PathBuf>,
-    seen: &mut BTreeSet<PathBuf>,
-) -> Result<(), IngestError> {
-    let reader = fs::read_dir(dir).map_err(|source| IngestError::Io {
-        path: dir.to_path_buf(),
-        source,
-    })?;
-    let mut entries: Vec<PathBuf> = Vec::new();
-    for entry in reader {
-        let entry = entry.map_err(|source| IngestError::Io {
-            path: dir.to_path_buf(),
-            source,
-        })?;
-        entries.push(entry.path());
-    }
-    entries.sort();
+/// What kind of entry counts as a match of the final segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Want {
+    /// Regular files only (directory traversal).
+    Files,
+    /// Files or directories (a glob; a matched directory contributes its files).
+    Any,
+    /// Directories only (a glob that ends in a path separator).
+    Dirs,
+}
 
-    for entry in entries {
-        // Read the link's own metadata, not its target's. A symlink encountered
-        // while walking a directory is never followed: following it could escape
-        // the intended input tree (reading files the user did not select) and a
-        // symlink that points back at an ancestor would drive unbounded recursion
-        // and exhaust the stack (NFR-2, FR-24). A symlink given explicitly as a
-        // top-level input is still honored; only directory traversal refuses to
-        // follow links.
-        let Ok(metadata) = fs::symlink_metadata(&entry) else {
-            // Skip entries that cannot be stat'd (a broken link, a race) rather
-            // than failing the whole run.
-            continue;
+/// A glob pattern split into the literal directory it starts from and the
+/// segments matched below it.
+struct GlobPlan {
+    /// The literal leading directories (empty for the current directory).
+    root: PathBuf,
+    /// The pattern components from the first one with a metacharacter on.
+    segments: Vec<Segment>,
+    /// Which entries a full match may be.
+    want: Want,
+}
+
+impl GlobPlan {
+    /// Split and compile a glob pattern.
+    fn parse(pattern: &str) -> Result<Self, IngestError> {
+        let bad = |message: String| IngestError::BadPattern {
+            pattern: pattern.to_string(),
+            message,
         };
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
-        if metadata.is_dir() {
-            if recursive {
-                collect_dir(&entry, recursive, out, seen)?;
+        // Validate the whole pattern with the glob crate's own parser, so a
+        // malformed pattern is reported the same way it always was.
+        Pattern::new(pattern).map_err(|error| bad(error.to_string()))?;
+
+        let mut root = PathBuf::new();
+        let mut segments = Vec::new();
+        for component in Path::new(pattern).components() {
+            let text = component.as_os_str().to_str().unwrap_or_default();
+            if segments.is_empty() && !is_glob(text) {
+                root.push(component);
+                continue;
             }
-        } else if metadata.is_file() {
-            push_unique(&entry, out, seen);
+            match component {
+                // `a/./b` names the same directory as `a/b`.
+                Component::CurDir => {}
+                Component::Normal(_) if text == "**" => {
+                    if !matches!(segments.last(), Some(Segment::AnyDirs)) {
+                        segments.push(Segment::AnyDirs);
+                    }
+                }
+                Component::Normal(_) => {
+                    let compiled = Pattern::new(text).map_err(|error| bad(error.to_string()))?;
+                    segments.push(Segment::Name(compiled));
+                }
+                // Climbing out of a matched directory would leave the tree the
+                // walk is confined to.
+                Component::ParentDir => {
+                    return Err(bad(
+                        "a `..` component after a wildcard is not supported".to_owned()
+                    ));
+                }
+                Component::RootDir | Component::Prefix(_) => {
+                    return Err(bad("a root or drive prefix after a wildcard".to_owned()));
+                }
+            }
         }
+        let want = if pattern.ends_with(std::path::is_separator) {
+            Want::Dirs
+        } else {
+            Want::Any
+        };
+        Ok(Self {
+            root,
+            segments,
+            want,
+        })
     }
-    Ok(())
 }
 
-/// Append a path the first time its canonical form is seen, so the same file
-/// referenced twice yields a single sample while distinct files are all kept.
-fn push_unique(path: &Path, out: &mut Vec<PathBuf>, seen: &mut BTreeSet<PathBuf>) {
-    let key = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    if seen.insert(key) {
-        out.push(path.to_path_buf());
+/// The segments that walk a directory input for its regular files.
+fn directory_segments(recursive: bool) -> Vec<Segment> {
+    if recursive {
+        vec![Segment::AnyDirs, Segment::AnyName]
+    } else {
+        vec![Segment::AnyName]
     }
+}
+
+/// One directory being walked: its sorted entries still to visit and the
+/// pattern states that reached it.
+struct Frame {
+    dir: PathBuf,
+    entries: std::vec::IntoIter<(OsString, fs::FileType)>,
+    states: Vec<usize>,
+}
+
+/// Resolves inputs to file paths under the traversal limits, recording what it
+/// skipped so the caller can surface it.
+struct Resolver<'o> {
+    options: &'o IngestOptions,
+    files: Vec<PathBuf>,
+    seen: BTreeSet<PathBuf>,
+    visited: usize,
+    walk_limit_hit: bool,
+    file_limit_hit: bool,
+    symlinks_skipped: usize,
+    not_regular: usize,
+}
+
+impl<'o> Resolver<'o> {
+    fn new(options: &'o IngestOptions) -> Self {
+        Self {
+            options,
+            files: Vec::new(),
+            seen: BTreeSet::new(),
+            visited: 0,
+            walk_limit_hit: false,
+            file_limit_hit: false,
+            symlinks_skipped: 0,
+            not_regular: 0,
+        }
+    }
+
+    /// Whether a traversal limit has stopped resolution.
+    fn exhausted(&self) -> bool {
+        self.walk_limit_hit || self.file_limit_hit
+    }
+
+    /// The notices resolution produced, plus `swapped` files that stopped being
+    /// regular files between resolution and reading.
+    fn notices(&self, swapped: usize) -> Vec<Notice> {
+        let mut notices = Vec::new();
+        if self.walk_limit_hit {
+            notices.push(Notice::WalkLimitReached {
+                limit: self.options.max_walk_entries,
+            });
+        }
+        if self.file_limit_hit {
+            notices.push(Notice::FileLimitReached {
+                limit: self.options.max_input_files,
+            });
+        }
+        if self.symlinks_skipped > 0 {
+            notices.push(Notice::SymlinksSkipped {
+                count: self.symlinks_skipped,
+            });
+        }
+        let not_regular = self.not_regular + swapped;
+        if not_regular > 0 {
+            notices.push(Notice::NotRegularFilesSkipped { count: not_regular });
+        }
+        notices
+    }
+
+    /// Resolve one input string to zero or more file paths.
+    fn resolve(&mut self, input: &str) -> Result<(), IngestError> {
+        let literal = Path::new(input);
+        // A path that exists is always taken literally, even when its name holds
+        // a glob metacharacter such as `[`, so such a file can still be named.
+        match fs::metadata(literal) {
+            Ok(metadata) => self.add_path(literal, &metadata),
+            Err(_) if is_glob(input) => self.expand_glob(input),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                Err(IngestError::PathNotFound {
+                    path: literal.to_path_buf(),
+                })
+            }
+            Err(source) => Err(IngestError::Io {
+                path: literal.to_path_buf(),
+                source,
+            }),
+        }
+    }
+
+    /// Add a path named explicitly: a regular file becomes a sample, a directory
+    /// contributes its files, and anything else is skipped.
+    fn add_path(&mut self, path: &Path, metadata: &fs::Metadata) -> Result<(), IngestError> {
+        if metadata.is_dir() {
+            self.walk_directory(path)
+        } else {
+            if metadata.is_file() {
+                self.push_file(path);
+            } else {
+                self.not_regular += 1;
+            }
+            Ok(())
+        }
+    }
+
+    /// Collect the regular files of a directory, descending into subdirectories
+    /// only when recursion is on (FR-1).
+    fn walk_directory(&mut self, dir: &Path) -> Result<(), IngestError> {
+        let segments = directory_segments(self.options.recursive);
+        self.walk(dir, &segments, Want::Files)
+    }
+
+    /// Expand a glob pattern against the filesystem.
+    fn expand_glob(&mut self, pattern: &str) -> Result<(), IngestError> {
+        let plan = GlobPlan::parse(pattern)?;
+        // The literal leading directories were named by the user, so they are
+        // followed even through a symlink; nothing below them is.
+        let listing = if plan.root.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            plan.root.as_path()
+        };
+        match fs::metadata(listing) {
+            Ok(metadata) if metadata.is_dir() => self.walk(&plan.root, &plan.segments, plan.want),
+            // A root that is missing or is not a directory matches nothing.
+            _ => Ok(()),
+        }
+    }
+
+    /// Walk the tree under `root`, matching entries against `segments`.
+    ///
+    /// The walk is iterative, visits entries in sorted order (so the result is
+    /// deterministic, NFR-6), charges every entry against the walk budget, and
+    /// never follows a symbolic link: a link cycle cannot loop and a link cannot
+    /// lead outside `root` (FR-24).
+    fn walk(&mut self, root: &Path, segments: &[Segment], want: Want) -> Result<(), IngestError> {
+        let start = closure(segments, vec![0]);
+        // A pattern that can end at the root itself (such as `dir/**`) matches
+        // the root directory.
+        if start.contains(&segments.len()) && want != Want::Files {
+            self.walk_directory(root)?;
+        }
+        if !start.iter().any(|&state| state < segments.len()) {
+            return Ok(());
+        }
+        let Some(entries) = self.list(root)? else {
+            return Ok(());
+        };
+        let mut stack = vec![Frame {
+            dir: root.to_path_buf(),
+            entries: entries.into_iter(),
+            states: start,
+        }];
+        while let Some(frame) = stack.last_mut() {
+            if self.exhausted() {
+                break;
+            }
+            let Some((name, file_type)) = frame.entries.next() else {
+                stack.pop();
+                continue;
+            };
+            let path = frame.dir.join(&name);
+            if file_type.is_symlink() {
+                // Never followed during a walk. It is counted when it would have
+                // mattered had it been a file or a directory.
+                if !step(segments, &frame.states, &name, true).is_empty() {
+                    self.symlinks_skipped += 1;
+                }
+                continue;
+            }
+            let is_dir = file_type.is_dir();
+            let next = step(segments, &frame.states, &name, is_dir);
+            if next.is_empty() {
+                continue;
+            }
+            if next.contains(&segments.len()) {
+                if is_dir {
+                    if want != Want::Files {
+                        self.walk_directory(&path)?;
+                    }
+                } else if want != Want::Dirs {
+                    if file_type.is_file() {
+                        self.push_file(&path);
+                    } else {
+                        self.not_regular += 1;
+                    }
+                }
+            }
+            if is_dir && next.iter().any(|&state| state < segments.len()) {
+                if let Some(entries) = self.list(&path)? {
+                    stack.push(Frame {
+                        dir: path,
+                        entries: entries.into_iter(),
+                        states: next,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// List a directory's entries sorted by name, charging each one against the
+    /// walk budget. Returns `None` once the budget is spent.
+    fn list(&mut self, dir: &Path) -> Result<Option<Vec<(OsString, fs::FileType)>>, IngestError> {
+        let target = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
+        let io_error = |source| IngestError::Io {
+            path: target.to_path_buf(),
+            source,
+        };
+        let reader = fs::read_dir(target).map_err(io_error)?;
+        let mut entries = Vec::new();
+        for entry in reader {
+            if self.visited >= self.options.max_walk_entries {
+                self.walk_limit_hit = true;
+                return Ok(None);
+            }
+            self.visited += 1;
+            let entry = entry.map_err(io_error)?;
+            // `file_type` describes the entry itself, with the semantics of
+            // `symlink_metadata`: a link is reported as a link, never as its
+            // target. An entry that cannot be typed (a race) is skipped.
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            entries.push((entry.file_name(), file_type));
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(Some(entries))
+    }
+
+    /// Append a file the first time its canonical form is seen, so the same file
+    /// referenced twice yields a single sample while distinct files are all kept.
+    fn push_file(&mut self, path: &Path) {
+        let key = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if self.seen.contains(&key) {
+            return;
+        }
+        if self.files.len() >= self.options.max_input_files {
+            self.file_limit_hit = true;
+            return;
+        }
+        self.seen.insert(key);
+        self.files.push(path.to_path_buf());
+    }
+}
+
+/// The pattern states reached after consuming one directory entry.
+fn step(segments: &[Segment], states: &[usize], name: &OsStr, is_dir: bool) -> Vec<usize> {
+    let text = name.to_str();
+    let mut next = Vec::new();
+    for &state in states {
+        match segments.get(state) {
+            Some(Segment::AnyDirs) => {
+                if is_dir {
+                    next.push(state);
+                }
+            }
+            Some(Segment::AnyName) => next.push(state + 1),
+            Some(Segment::Name(pattern)) => {
+                // Like the glob crate, a name that is not valid UTF-8 never
+                // matches a pattern component.
+                if text.is_some_and(|text| pattern.matches_with(text, MATCH_OPTIONS)) {
+                    next.push(state + 1);
+                }
+            }
+            None => {}
+        }
+    }
+    closure(segments, next)
+}
+
+/// Close a set of pattern states under `**` matching zero directories: a state
+/// on `**` also stands on the segment after it.
+fn closure(segments: &[Segment], mut states: Vec<usize>) -> Vec<usize> {
+    let mut index = 0;
+    while index < states.len() {
+        let state = states[index];
+        if matches!(segments.get(state), Some(Segment::AnyDirs)) && !states.contains(&(state + 1)) {
+            states.push(state + 1);
+        }
+        index += 1;
+    }
+    states.sort_unstable();
+    states.dedup();
+    states
 }
 
 /// Read each resolved path into a sample, applying the per-sample and total
-/// byte caps and collecting notices for any cap that took effect (FR-5).
-fn read_samples(paths: &[PathBuf], options: &IngestOptions) -> Result<SampleSet, IngestError> {
+/// byte caps and collecting notices for any cap that took effect (FR-5). Also
+/// returns how many paths were no longer regular files when they were opened.
+fn read_samples(
+    paths: &[PathBuf],
+    options: &IngestOptions,
+) -> Result<(SampleSet, usize), IngestError> {
     let mut set = SampleSet::default();
     let mut total: usize = 0;
     let mut truncated = 0usize;
     let mut skipped = 0usize;
+    let mut swapped = 0usize;
     let mut total_cap_hit = false;
 
     for path in paths {
@@ -487,11 +861,16 @@ fn read_samples(paths: &[PathBuf], options: &IngestOptions) -> Result<SampleSet,
             continue;
         }
 
-        let metadata = fs::metadata(path).map_err(|source| IngestError::Io {
+        let io_error = |source| IngestError::Io {
             path: path.clone(),
             source,
-        })?;
-        let original_length = metadata.len();
+        };
+        // The path was a regular file when it was listed, but it may have been
+        // replaced since, so the opened handle is checked again.
+        let Some((file, original_length)) = open_regular_file(path).map_err(io_error)? else {
+            swapped += 1;
+            continue;
+        };
         // Bytes we would keep from this sample, before the total cap is checked.
         // Computed in u64 so a file larger than usize on a 32-bit target cannot
         // wrap, then clamped to usize since it never exceeds the per-sample cap.
@@ -510,10 +889,7 @@ fn read_samples(paths: &[PathBuf], options: &IngestOptions) -> Result<SampleSet,
             continue;
         }
 
-        let data = read_capped(path, keep).map_err(|source| IngestError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let data = read_up_to(file, keep).map_err(io_error)?;
         let length = data.len();
         total += length;
         if (length as u64) < original_length {
@@ -544,14 +920,89 @@ fn read_samples(paths: &[PathBuf], options: &IngestOptions) -> Result<SampleSet,
             skipped,
         });
     }
-    Ok(set)
+    Ok((set, swapped))
 }
 
-/// Read at most `cap` bytes from a file. A very large file is never read whole:
-/// the [`Read::take`] limit bounds both the bytes read and the allocation, so a
-/// multi-gigabyte file costs only `cap` bytes of memory (FR-4).
-fn read_capped(path: &Path, cap: usize) -> io::Result<Vec<u8>> {
-    let file = fs::File::open(path)?;
+/// Open `path` for reading when it is a regular file, returning the handle and
+/// the file's size from the handle's own metadata. Returns `Ok(None)` for
+/// anything else.
+///
+/// The path is checked first so devices and FIFOs are not opened at all in the
+/// ordinary case, and the opened handle is checked again because the path may
+/// have been replaced in between. The open itself is non-blocking where the
+/// platform allows, so a FIFO swapped in at the last moment cannot stall it
+/// waiting for a writer.
+fn open_regular_file(path: &Path) -> io::Result<Option<(fs::File, u64)>> {
+    if !fs::metadata(path)?.is_file() {
+        return Ok(None);
+    }
+    let file = open_for_reading(path)?;
+    let metadata = file.metadata()?;
+    if metadata.is_file() {
+        Ok(Some((file, metadata.len())))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Open a path read-only, without blocking on a FIFO where the platform's
+/// non-blocking flag is known. The flag has no effect on regular files.
+fn open_for_reading(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Some(flag) = nonblocking_open_flag() {
+            options.custom_flags(flag);
+        }
+    }
+    options.open(path)
+}
+
+/// The platform's `O_NONBLOCK` open flag, when it is known.
+///
+/// The engine has no `libc` dependency, so the value is spelled out for the
+/// platform families Sextant ships on: Linux and Android on their common
+/// architectures, where it is octal 4000, and the Apple and BSD systems, where
+/// it is 4. Elsewhere this returns `None` and the open blocks as usual; the path
+/// and handle checks around it still apply.
+#[cfg(unix)]
+fn nonblocking_open_flag() -> Option<i32> {
+    if cfg!(all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "arm",
+            target_arch = "aarch64",
+            target_arch = "riscv32",
+            target_arch = "riscv64",
+            target_arch = "powerpc",
+            target_arch = "powerpc64",
+            target_arch = "s390x",
+            target_arch = "loongarch64",
+        )
+    )) {
+        Some(0o4000)
+    } else if cfg!(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+    )) {
+        Some(0x0004)
+    } else {
+        None
+    }
+}
+
+/// Read at most `cap` bytes from an open file. A very large file is never read
+/// whole: the [`Read::take`] limit bounds both the bytes read and the
+/// allocation, so a multi-gigabyte file costs only `cap` bytes of memory (FR-4).
+fn read_up_to(file: fs::File, cap: usize) -> io::Result<Vec<u8>> {
     let mut data = Vec::new();
     file.take(cap as u64).read_to_end(&mut data)?;
     Ok(data)
@@ -561,38 +1012,6 @@ fn read_capped(path: &Path, cap: usize) -> io::Result<Vec<u8>> {
 /// metacharacters are `*`, `?`, and `[`.
 fn is_glob(input: &str) -> bool {
     input.contains(['*', '?', '['])
-}
-
-/// The longest literal directory prefix of a glob pattern, used as the root that
-/// matched paths must stay under after canonicalization.
-fn glob_literal_root(pattern: &str) -> Option<PathBuf> {
-    let path = Path::new(pattern);
-    let mut root = PathBuf::new();
-    for component in path.components() {
-        let piece = component.as_os_str().to_string_lossy();
-        if piece.contains(['*', '?', '[']) {
-            break;
-        }
-        root.push(component);
-    }
-    if root.as_os_str().is_empty() {
-        None
-    } else {
-        Some(root)
-    }
-}
-
-/// Whether `path` canonicalizes to a location under `root` (also canonicalized).
-fn path_stays_under_root(path: &Path, root: &Path) -> bool {
-    let Ok(canon_path) = fs::canonicalize(path) else {
-        return false;
-    };
-    let Ok(canon_root) = fs::canonicalize(root) else {
-        // If the literal prefix does not exist yet (for example a pattern whose
-        // first component is a meta), do not enforce a root check.
-        return true;
-    };
-    canon_path.starts_with(canon_root)
 }
 
 #[cfg(test)]
@@ -609,12 +1028,31 @@ mod tests {
     }
 
     #[test]
-    fn glob_literal_root_stops_at_the_first_meta() {
-        assert_eq!(
-            glob_literal_root("corpus/tlv/**/*.tlv"),
-            Some(PathBuf::from("corpus/tlv"))
-        );
-        assert_eq!(glob_literal_root("*.png"), None);
+    fn glob_plan_splits_the_literal_root_from_the_pattern() {
+        let plan = GlobPlan::parse("corpus/tlv/**/*.tlv").expect("valid pattern");
+        assert_eq!(plan.root, PathBuf::from("corpus/tlv"));
+        assert_eq!(plan.segments.len(), 2);
+        assert!(matches!(plan.segments[0], Segment::AnyDirs));
+        assert_eq!(plan.want, Want::Any);
+
+        let relative = GlobPlan::parse("*.png").expect("valid pattern");
+        assert!(relative.root.as_os_str().is_empty());
+        assert_eq!(relative.segments.len(), 1);
+
+        // Consecutive `**` collapse, and a trailing separator wants directories.
+        let dirs = GlobPlan::parse("root/**/**/").expect("valid pattern");
+        assert_eq!(dirs.segments.len(), 1);
+        assert_eq!(dirs.want, Want::Dirs);
+    }
+
+    #[test]
+    fn glob_plan_rejects_a_parent_component_after_a_wildcard() {
+        assert!(matches!(
+            GlobPlan::parse("root/*/../secret"),
+            Err(IngestError::BadPattern { .. })
+        ));
+        // A parent component in the literal root is an ordinary path.
+        assert!(GlobPlan::parse("../corpus/*.bin").is_ok());
     }
 
     #[test]
@@ -622,6 +1060,8 @@ mod tests {
         let options = IngestOptions::default();
         assert_eq!(options.max_bytes_per_sample, DEFAULT_MAX_BYTES_PER_SAMPLE);
         assert_eq!(options.max_total_bytes, DEFAULT_MAX_TOTAL_BYTES);
+        assert_eq!(options.max_walk_entries, DEFAULT_MAX_WALK_ENTRIES);
+        assert_eq!(options.max_input_files, DEFAULT_MAX_INPUT_FILES);
         assert!(!options.recursive);
     }
 
@@ -653,16 +1093,24 @@ mod tests {
         assert!(!whole.is_truncated());
     }
 
+    /// A unique scratch directory under the system temp directory.
     #[cfg(unix)]
-    #[test]
-    fn recursive_ingest_does_not_follow_a_symlink_cycle() {
+    fn scratch(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "sextant-ingest-symlink-{}-{unique}",
+            "sextant-ingest-unit-{tag}-{}-{unique}",
             std::process::id()
         ));
+        fs::create_dir_all(&root).expect("create scratch dir");
+        root
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_ingest_does_not_follow_a_symlink_cycle() {
+        let root = scratch("symlink");
         let nested = root.join("nested");
         fs::create_dir_all(&nested).expect("create dirs");
         fs::write(nested.join("real.bin"), b"data").expect("write file");
@@ -680,17 +1128,81 @@ mod tests {
         // The one real file is ingested exactly once; the symlink is skipped.
         assert_eq!(set.len(), 1);
         assert_eq!(set.samples[0].data, b"data");
+        assert!(set.notices.contains(&Notice::SymlinksSkipped { count: 1 }));
+    }
+
+    /// Create a FIFO with the system `mkfifo` tool; `None` when it is missing.
+    #[cfg(unix)]
+    fn make_fifo(path: &Path) -> Option<()> {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .ok()?;
+        status.success().then_some(())
+    }
+
+    /// Run `work` on a helper thread and fail if it does not finish promptly,
+    /// so a blocking open fails the test instead of hanging the suite.
+    #[cfg(unix)]
+    fn finishes_promptly<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(work());
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the operation blocked on a FIFO")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_swapped_for_a_fifo_before_reading_is_skipped_without_blocking() {
+        let root = scratch("fifo-swap");
+        let fifo = root.join("sample.bin");
+        if make_fifo(&fifo).is_none() {
+            let _ = fs::remove_dir_all(&root);
+            eprintln!("skipping: mkfifo is not available");
+            return;
+        }
+        // Resolution saw a regular file at this path; by the time it is read
+        // the path is a FIFO with no writer. Reading must neither block nor
+        // treat it as a sample.
+        let paths = vec![fifo.clone()];
+        let (set, swapped) = finishes_promptly(move || {
+            read_samples(&paths, &IngestOptions::default()).expect("read completes")
+        });
+        assert!(set.is_empty());
+        assert_eq!(swapped, 1);
+
+        // The non-blocking open itself returns at once on a FIFO, and the
+        // handle's metadata exposes it, even with the path pre-check bypassed.
+        let target = fifo.clone();
+        let is_file = finishes_promptly(move || {
+            open_for_reading(&target)
+                .and_then(|file| file.metadata())
+                .map(|metadata| metadata.is_file())
+        });
+        let _ = fs::remove_dir_all(&root);
+        if nonblocking_open_flag().is_some() {
+            assert!(!is_file.expect("non-blocking open of a FIFO succeeds"));
+        }
     }
 
     #[test]
     fn notice_messages_avoid_dashes() {
-        let truncated = Notice::SamplesTruncated { count: 2, cap: 16 }.to_string();
-        let capped = Notice::TotalCapReached {
-            cap: 32,
-            skipped: 1,
-        }
-        .to_string();
-        for message in [truncated, capped] {
+        let notices = [
+            Notice::SamplesTruncated { count: 2, cap: 16 },
+            Notice::TotalCapReached {
+                cap: 32,
+                skipped: 1,
+            },
+            Notice::WalkLimitReached { limit: 10 },
+            Notice::FileLimitReached { limit: 10 },
+            Notice::SymlinksSkipped { count: 3 },
+            Notice::NotRegularFilesSkipped { count: 1 },
+        ];
+        for notice in notices {
+            let message = notice.to_string();
             assert!(!message.contains('\u{2014}'), "em dash in: {message}");
             assert!(!message.contains('\u{2013}'), "en dash in: {message}");
         }
