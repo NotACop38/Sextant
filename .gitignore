@@ -36,3 +36,6 @@ Thumbs.db
 
 # Internal audit working notes. Public security guidance lives in SECURITY.md.
 /SECURITY_REVIEW.md
+
+# Python bytecode from running the corpus generators
+__pycache__/

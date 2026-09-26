@@ -268,13 +268,14 @@ fn decode_int(field: &Field, sample: &[u8], offset: usize) -> Option<u64> {
 }
 
 /// The byte length of a ground-truth field at `cursor`, given the values decoded
-/// so far. A derived size must fit in the sample; an overrun is a ground-truth
-/// error rather than something to clamp away.
+/// so far. A to-end field runs to `limit`: the sample end, or where a fixed-size
+/// trailer begins. A derived size must fit in the sample; an overrun is a
+/// ground-truth error rather than something to clamp away.
 fn field_size(
     field: &Field,
     values: &HashMap<String, u64>,
     cursor: usize,
-    len: usize,
+    limit: usize,
 ) -> std::io::Result<usize> {
     match &field.size {
         SizeRule::Fixed(bytes) => usize::try_from(*bytes).map_err(crate::invalid_corpus),
@@ -286,7 +287,7 @@ fn field_size(
         }
         SizeRule::Rule {
             rule: SizeRuleKind::ToEnd,
-        } => Ok(len.saturating_sub(cursor)),
+        } => Ok(limit.saturating_sub(cursor)),
     }
 }
 
@@ -352,8 +353,12 @@ fn walk_ground_truth(
     let mut values: HashMap<String, u64> = HashMap::new();
     let len = sample.len();
     let mut cursor = 0usize;
+    // A to-end field before a fixed-size trailer stops where the trailer
+    // begins (validation allows that only when the trailer is fixed-size).
+    let body_end = len.saturating_sub(crate::fixed_trailer_len(gt).unwrap_or(0));
 
     let place = |field: &Field,
+                 limit: usize,
                  cursor: &mut usize,
                  values: &mut HashMap<String, u64>,
                  fields: &mut Vec<TruthField>|
@@ -365,7 +370,7 @@ fn walk_ground_truth(
         if let Some(value) = decode_int(field, sample, start) {
             values.insert(field.name.clone(), value);
         }
-        let size = field_size(field, values, start, len)?;
+        let size = field_size(field, values, start, limit)?;
         let end = start
             .checked_add(size)
             .filter(|&end| end <= len)
@@ -389,12 +394,12 @@ fn walk_ground_truth(
     };
 
     for field in &gt.structure.header {
-        place(field, &mut cursor, &mut values, &mut fields)?;
+        place(field, body_end, &mut cursor, &mut values, &mut fields)?;
     }
     for _ in 0..record_count {
         let start = cursor;
         for field in &gt.structure.record {
-            place(field, &mut cursor, &mut values, &mut fields)?;
+            place(field, body_end, &mut cursor, &mut values, &mut fields)?;
         }
         if cursor <= start {
             return Err(crate::invalid_corpus(
@@ -403,7 +408,7 @@ fn walk_ground_truth(
         }
     }
     for field in &gt.structure.trailer {
-        place(field, &mut cursor, &mut values, &mut fields)?;
+        place(field, len, &mut cursor, &mut values, &mut fields)?;
     }
     if cursor != len {
         return Err(crate::invalid_corpus(

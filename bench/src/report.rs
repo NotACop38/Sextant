@@ -6,8 +6,11 @@
 //!
 //! - the development tier ([`DEVELOPMENT_CORPUS`]) holds every format the
 //!   engine was tuned against, so its numbers measure fit to known data;
-//! - the held-out tier ([`HELD_OUT_CORPUS`]) holds real formats that were not
-//!   consulted while developing heuristics, so its numbers estimate accuracy on
+//! - the validation tier ([`VALIDATION_CORPUS`]) holds real formats that were
+//!   held out, evaluated once, and then used to find one generic defect, so its
+//!   numbers are informative but no longer blind;
+//! - the held-out tier ([`HELD_OUT_CORPUS`]) holds real formats that were never
+//!   examined before the published run, so its numbers estimate accuracy on
 //!   formats the engine was not fitted to.
 //!
 //! The report renders three ways: [`render_table`] for the terminal,
@@ -25,7 +28,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DEVELOPMENT_CORPUS, HELD_OUT_CORPUS,
+    DEVELOPMENT_CORPUS, HELD_OUT_CORPUS, VALIDATION_CORPUS,
     accuracy::{FormatMetrics, evaluate_format_in},
     corpus_dir,
 };
@@ -87,7 +90,10 @@ pub const FLOORS: &[Floor] = &[
 pub enum Tier {
     /// Formats the engine was tuned against.
     Development,
-    /// Formats withheld from tuning.
+    /// Formats withheld from tuning, evaluated once, then consulted for one
+    /// generic fix.
+    Validation,
+    /// Formats never examined before the published run.
     HeldOut,
 }
 
@@ -97,6 +103,7 @@ impl Tier {
     pub fn label(self) -> &'static str {
         match self {
             Tier::Development => "development",
+            Tier::Validation => "validation",
             Tier::HeldOut => "held-out",
         }
     }
@@ -106,6 +113,7 @@ impl Tier {
     pub fn formats(self) -> &'static [&'static str] {
         match self {
             Tier::Development => &DEVELOPMENT_CORPUS,
+            Tier::Validation => &VALIDATION_CORPUS,
             Tier::HeldOut => &HELD_OUT_CORPUS,
         }
     }
@@ -116,7 +124,7 @@ impl Tier {
 pub struct BenchOptions {
     /// The corpus directory to evaluate. Defaults to the repository `corpus/`.
     pub corpus_dir: PathBuf,
-    /// The tiers to evaluate, in order. Defaults to both.
+    /// The tiers to evaluate, in order. Defaults to all three.
     pub tiers: Vec<Tier>,
 }
 
@@ -124,7 +132,7 @@ impl Default for BenchOptions {
     fn default() -> Self {
         Self {
             corpus_dir: corpus_dir(),
-            tiers: vec![Tier::Development, Tier::HeldOut],
+            tiers: vec![Tier::Development, Tier::Validation, Tier::HeldOut],
         }
     }
 }
@@ -580,6 +588,7 @@ mod tests {
     #[test]
     fn tiers_partition_the_file_format_corpus() {
         let mut all: Vec<&str> = Tier::Development.formats().to_vec();
+        all.extend(Tier::Validation.formats());
         all.extend(Tier::HeldOut.formats());
         assert_eq!(all, crate::FILE_FORMAT_CORPUS.to_vec());
     }

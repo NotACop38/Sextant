@@ -32,19 +32,39 @@ pub use report::{
 pub const DEVELOPMENT_CORPUS: [&str; 8] =
     ["tlv", "scma", "stot", "sdlp", "png", "bmp", "wav", "zip"];
 
-/// Real file formats held out from tuning (PRD Section 15). They are evaluated
-/// with the same harness but are not consulted while developing heuristics, so
-/// their numbers estimate accuracy on formats the engine was not fitted to.
-/// A format moves to [`DEVELOPMENT_CORPUS`] once it has been used for tuning.
-pub const HELD_OUT_CORPUS: [&str; 4] = ["gif", "elf", "tar", "pcapfile"];
+/// Real file formats that were held out from tuning, then evaluated once, after
+/// which the first result exposed one generic defect (spurious chunk streams
+/// over zero padding) that was fixed. Their numbers are therefore no longer a
+/// blind estimate; they are published alongside the first-run result.
+pub const VALIDATION_CORPUS: [&str; 4] = ["gif", "elf", "tar", "pcapfile"];
 
-/// Every file-format corpus entry, development formats first. The protocol
-/// track (Modbus/TCP and the toy protocol) is captured-packet input with its own
-/// ground-truth schema and is exercised by the protocol tests and the Wireshark
-/// dissector round trip, not by these file-format metrics.
-pub const FILE_FORMAT_CORPUS: [&str; 12] = [
+/// Real file formats held out from all development (PRD Section 15). They are
+/// evaluated with the same harness but were never examined before the
+/// published run, so their numbers estimate accuracy on formats the engine was
+/// not fitted to. A format leaves this tier once it has been consulted.
+pub const HELD_OUT_CORPUS: [&str; 4] = ["gzip", "midi", "qoi", "ico"];
+
+/// Every file-format corpus entry, tier by tier. The protocol track (Modbus/TCP
+/// and the toy protocol) is captured-packet input with its own ground-truth
+/// schema and is exercised by the protocol tests and the Wireshark dissector
+/// round trip, not by these file-format metrics.
+pub const FILE_FORMAT_CORPUS: [&str; 16] = [
     "tlv", "scma", "stot", "sdlp", "png", "bmp", "wav", "zip", "gif", "elf", "tar", "pcapfile",
+    "gzip", "midi", "qoi", "ico",
 ];
+
+/// The total size of the trailer when every trailer field has a fixed size,
+/// else `None`.
+pub(crate) fn fixed_trailer_len(gt: &GroundTruth) -> Option<usize> {
+    gt.structure
+        .trailer
+        .iter()
+        .map(|field| match field.size {
+            SizeRule::Fixed(bytes) => usize::try_from(bytes).ok(),
+            _ => None,
+        })
+        .sum()
+}
 
 /// A hand-verified description of a single corpus format.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -142,8 +162,9 @@ pub enum SizeRule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SizeRuleKind {
-    /// The field runs to the end of the sample. Only the final field of a
-    /// structure may use it.
+    /// The field runs to the end of the sample, or, as the last header field
+    /// of a structure without records, to where its fixed-size trailer begins.
+    /// No other field may use it.
     ToEnd,
 }
 
@@ -293,8 +314,14 @@ fn validate_ground_truth(gt: &GroundTruth) -> std::io::Result<()> {
         }
     }
     // A to-end field consumes the rest of the sample, so it must be the last
-    // field laid out, and it cannot sit inside a repeating record.
+    // field laid out, or the last header field when no record follows and the
+    // trailer after it has a fixed size (it then stops where the trailer
+    // begins). It can never sit inside a repeating record.
     let last = fields.len().saturating_sub(1);
+    let before_fixed_trailer = gt.structure.record.is_empty()
+        && !gt.structure.trailer.is_empty()
+        && fixed_trailer_len(gt).is_some();
+    let last_header = gt.structure.header.len().checked_sub(1);
     for (index, field) in fields.iter().enumerate() {
         if matches!(
             field.size,
@@ -303,9 +330,11 @@ fn validate_ground_truth(gt: &GroundTruth) -> std::io::Result<()> {
             }
         ) {
             let in_record = gt.structure.record.iter().any(|f| std::ptr::eq(f, *field));
-            if index != last || in_record {
+            let allowed = index == last || (before_fixed_trailer && Some(index) == last_header);
+            if !allowed || in_record {
                 return Err(invalid_corpus(
-                    "only the final ground-truth field may run to the end",
+                    "only the final ground-truth field, or the final header field before a \
+                     fixed-size trailer, may run to the end",
                 ));
             }
         }
@@ -505,6 +534,30 @@ mod tests {
         let reparsed = parse_ground_truth(&json).expect("re-parse ground truth");
         assert_eq!(reparsed.format, ground_truth.format);
         assert_eq!(reparsed.samples.len(), ground_truth.samples.len());
+    }
+
+    #[test]
+    fn to_end_may_stop_only_at_a_fixed_size_trailer() {
+        // The gzip layout: a to-end body, then a fixed eight-byte trailer.
+        let original = load_ground_truth("gzip").expect("fixture");
+        assert!(validate_ground_truth(&original).is_ok());
+        assert_eq!(fixed_trailer_len(&original), Some(8));
+
+        // A trailer field with a derived size has no fixed start.
+        let mut gt = original.clone();
+        gt.structure.trailer[1].size = SizeRule::Derived("mtime".to_owned());
+        assert!(validate_ground_truth(&gt).is_err());
+
+        // A to-end field that is not the last header field is still refused.
+        let mut gt = original.clone();
+        let body = gt.structure.header.pop().expect("the body field");
+        gt.structure.header.insert(0, body);
+        assert!(validate_ground_truth(&gt).is_err());
+
+        // So is a to-end body followed by a repeating record.
+        let mut gt = original;
+        gt.structure.record = gt.structure.trailer.clone();
+        assert!(validate_ground_truth(&gt).is_err());
     }
 
     #[test]
