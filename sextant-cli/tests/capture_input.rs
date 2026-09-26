@@ -8,7 +8,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 fn sextant() -> Command {
@@ -27,11 +26,15 @@ fn modbus_capture() -> PathBuf {
     corpus("modbus/samples/session_01.pcap")
 }
 
-/// A scratch directory under the system temp directory, removed on drop.
+/// A scratch directory under the system temp directory, removed on drop. Only
+/// the Unix FIFO and file-name tests need one.
+#[cfg(unix)]
 struct Scratch(PathBuf);
 
+#[cfg(unix)]
 impl Scratch {
     fn new(tag: &str) -> Self {
+        use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
@@ -43,6 +46,7 @@ impl Scratch {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);

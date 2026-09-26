@@ -303,6 +303,8 @@ fn no_inputs_is_an_error() {
 
 /// Run `work` on a helper thread and fail if it does not finish promptly, so a
 /// runaway walk or a blocking open fails the test instead of hanging the suite.
+/// Only the Unix symlink and FIFO tests need it.
+#[cfg(unix)]
 fn finishes_promptly<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

@@ -15,6 +15,10 @@
 *.bin binary
 *.pcap binary
 *.pcapng binary
+*.gz binary
+*.mid binary
+*.qoi binary
+*.ico binary
 
 # Custom corpus sample formats (controlled difficulty fixtures) are raw bytes.
 *.tlv binary
