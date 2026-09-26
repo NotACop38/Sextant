@@ -522,11 +522,7 @@ impl GlobPlan {
                 }
                 // Climbing out of a matched directory would leave the tree the
                 // walk is confined to.
-                Component::ParentDir => {
-                    return Err(bad(
-                        "a `..` component after a wildcard is not supported".to_owned()
-                    ));
-                }
+                Component::ParentDir => return Err(bad(PARENT_AFTER_WILDCARD.to_owned())),
                 Component::RootDir | Component::Prefix(_) => {
                     return Err(bad("a root or drive prefix after a wildcard".to_owned()));
                 }
@@ -622,6 +618,16 @@ impl<'o> Resolver<'o> {
 
     /// Resolve one input string to zero or more file paths.
     fn resolve(&mut self, input: &str) -> Result<(), IngestError> {
+        // A `..` after a wildcard is refused before the input is tried as a
+        // literal path. Windows resolves `..` lexically, so `root/*/../file`
+        // exists there whenever `root/file` does, although `*` names nothing;
+        // refusing it everywhere keeps the rule the same on every platform.
+        if is_glob(input) && climbs_out_of_a_wildcard(input) {
+            return Err(IngestError::BadPattern {
+                pattern: input.to_string(),
+                message: PARENT_AFTER_WILDCARD.to_owned(),
+            });
+        }
         let literal = Path::new(input);
         // A path that exists is always taken literally, even when its name holds
         // a glob metacharacter such as `[`, so such a file can still be named.
@@ -1014,6 +1020,18 @@ fn is_glob(input: &str) -> bool {
     input.contains(['*', '?', '['])
 }
 
+/// Why a pattern that climbs out of a wildcard component is refused.
+const PARENT_AFTER_WILDCARD: &str = "a `..` component after a wildcard is not supported";
+
+/// Whether a `..` component follows the first component that holds a glob
+/// metacharacter, the same test [`GlobPlan::parse`] applies.
+fn climbs_out_of_a_wildcard(input: &str) -> bool {
+    Path::new(input)
+        .components()
+        .skip_while(|component| !component.as_os_str().to_str().is_some_and(is_glob))
+        .any(|component| component == Component::ParentDir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1043,6 +1061,15 @@ mod tests {
         let dirs = GlobPlan::parse("root/**/**/").expect("valid pattern");
         assert_eq!(dirs.segments.len(), 1);
         assert_eq!(dirs.want, Want::Dirs);
+    }
+
+    #[test]
+    fn a_parent_component_is_detected_only_after_a_wildcard() {
+        assert!(climbs_out_of_a_wildcard("root/*/../secret"));
+        assert!(climbs_out_of_a_wildcard("root/a[1]/b/../c"));
+        assert!(!climbs_out_of_a_wildcard("../corpus/*.bin"));
+        assert!(!climbs_out_of_a_wildcard("root/../corpus/sample[1].bin"));
+        assert!(!climbs_out_of_a_wildcard("root/**/*.bin"));
     }
 
     #[test]

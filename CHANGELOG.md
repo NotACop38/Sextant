@@ -82,8 +82,9 @@ No version has been tagged or published yet. The first release is planned as
 - `cargo-fuzz` targets for ingestion, the IR and report JSON, the executor,
   inference, capture parsing, and each exporter, plus property tests for the
   parse invariants and resource bounds.
-- Ingestion never follows a symlink below a named root, refuses FIFOs and other
-  special files, caps bytes, entries, and files, and escapes untrusted text
+- Ingestion never follows a symlink below a named root, refuses a `..` after a
+  wildcard, refuses FIFOs and other special files, caps bytes, entries, and
+  files, and escapes untrusted text
   (control, bidirectional, and invisible characters) in all terminal output.
 - Output files are created atomically and never overwrite an existing file or
   follow a symlink without `--force`.

@@ -449,6 +449,24 @@ fn an_existing_path_with_a_star_is_taken_literally() {
     assert_eq!(set.samples[0].data, b"starred");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_parent_component_after_a_wildcard_is_refused_even_when_the_path_exists() {
+    // A directory may be named `*` on Unix, so this path exists and would be
+    // taken literally. Windows makes such paths exist too, by resolving `..`
+    // lexically; the rule must not depend on either.
+    let scratch = Scratch::new("parentliteral");
+    scratch.write("*/placeholder.bin", b"p");
+    scratch.write("sub/x.bin", b"x");
+    let input = format!("{}/*/../sub/x.bin", scratch.path_str());
+    assert!(Path::new(&input).exists());
+    let result = ingest(&[input], &IngestOptions::default());
+    assert!(
+        matches!(result, Err(IngestError::BadPattern { .. })),
+        "got {result:?}"
+    );
+}
+
 #[test]
 fn a_parent_component_after_a_wildcard_is_rejected() {
     let scratch = Scratch::new("parentglob");
