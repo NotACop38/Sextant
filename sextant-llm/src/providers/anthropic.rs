@@ -22,7 +22,9 @@
 //! with HTTP 400 gets the same request once more without it, so the default
 //! works everywhere. Both are configurable. A structured call whose
 //! [`JsonRequest`] carries a JSON Schema is sent as structured output
-//! (`output_config.format`).
+//! (`output_config.format`), which enforces the shape, so the prose JSON-only
+//! instruction and schema hint are folded into the system prompt only when no
+//! schema can be sent.
 //!
 //! # Responses
 //!
@@ -549,8 +551,19 @@ impl LlmProvider for AnthropicProvider {
     }
 
     fn complete_json(&self, request: &JsonRequest) -> Result<JsonResponse, LlmError> {
-        let completion = provider::json_completion_request(request);
         let schema = request.json_schema.as_ref().and_then(closed_schema);
+        // Structured output enforces the schema, so the prose JSON-only
+        // instruction and hint are sent only when there is no schema.
+        let completion = if schema.is_some() {
+            CompletionRequest {
+                system: request.system.clone(),
+                messages: request.messages.clone(),
+                max_tokens: request.max_tokens,
+                temperature: request.temperature,
+            }
+        } else {
+            provider::json_completion_request(request)
+        };
         let response = self.send(&completion, schema)?;
         provider::json_response(response)
     }
@@ -756,12 +769,28 @@ mod tests {
             sent["properties"]["fields"]["items"]["additionalProperties"],
             serde_json::json!(false)
         );
-        // The prose hint is still folded into the system prompt.
-        assert!(
-            body["system"]
-                .as_str()
-                .is_some_and(|system| system.contains("a proposal"))
-        );
+        // The schema is enforced, so neither the prose hint nor the JSON-only
+        // instruction reaches the prompt.
+        assert!(body.get("system").is_none(), "{body}");
+    }
+
+    #[test]
+    fn a_structured_call_keeps_the_callers_system_prompt() {
+        let server = FakeServer::start(vec![answer(r#"{"fields": []}"#)]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"fields": {"type": "array"}},
+            "required": ["fields"]
+        });
+        provider(&server)
+            .complete_json(
+                &JsonRequest::new("annotate", "a proposal")
+                    .with_system("be precise")
+                    .with_json_schema(schema),
+            )
+            .expect("structured call");
+        let body = server.next_request().json();
+        assert_eq!(body["system"], serde_json::json!("be precise"));
     }
 
     #[test]
@@ -777,6 +806,13 @@ mod tests {
             .expect("structured call");
         let body = server.next_request().json();
         assert!(body["output_config"].get("format").is_none(), "{body}");
+        // Without an enforced schema, the prose hint carries the shape.
+        assert!(
+            body["system"]
+                .as_str()
+                .is_some_and(|system| system.contains("an object")),
+            "{body}"
+        );
         assert!(closed_schema(&serde_json::json!({"type": "array"})).is_none());
     }
 
