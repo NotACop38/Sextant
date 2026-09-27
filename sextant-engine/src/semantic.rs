@@ -114,14 +114,17 @@ const UNRESOLVED_PATH: &str = "the field path does not resolve in the current fo
 const TOO_DEEP_TO_RESOLVE: &str =
     "the format nests too deeply to check which fields its references bind to";
 
-/// The system instruction framing the semantic task for the model.
+/// The system instruction framing the semantic task for the model. The output
+/// format is not described here: a provider sends [`proposal_schema`] as
+/// structured output, or folds [`SCHEMA_HINT`] and a JSON-only instruction in
+/// when it has no structured mode.
 const SYSTEM_PROMPT: &str = "\
 You are a binary-format reverse-engineering assistant. You are given a candidate \
 field layout and a bounded hex view of sample bytes. Propose semantic \
 annotations and concrete, testable refinements expressed against the given \
 fields. Reference each field by its integer index. Write every name as an \
 identifier made of ASCII letters, digits, and underscores. Do not invent fields \
-you cannot see. Respond with a single JSON object and nothing else.";
+you cannot see.";
 
 /// A human-readable description of the JSON the model must return, folded into
 /// the structured request (FR-30).
